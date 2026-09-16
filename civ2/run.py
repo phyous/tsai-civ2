@@ -42,6 +42,27 @@ def observed_city_identity(dialog):
     return (match[1],re.sub(r'[^0-9A-Z]','',match[2].upper())) if match else None
 
 
+def observe_ready(session, resources):
+    """Wait only for native painting, including the blinking end-turn cue.
+
+    Uneven waits avoid repeatedly sampling the same low-contrast blink phase.
+    This issues no keys or mouse input and never repairs an unknown label.
+    """
+    observation = session.ui.observe()
+    dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
+                             state=classification_state(session))
+    for delay in (.13, .37, .61, .19, .43, .73, .29, .47):
+        if dialog['supported']:
+            break
+        session.game.rpc('resume')
+        time.sleep(delay)
+        session.game.rpc('pause')
+        observation = session.ui.observe()
+        dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
+                                 state=classification_state(session))
+    return observation, dialog
+
+
 def run_steps(session, *, max_decisions=10000):
     resources = game_text()
     context = controller_context(session)
@@ -51,22 +72,11 @@ def run_steps(session, *, max_decisions=10000):
             session.recorder.check()
         session.game.rpc('pause')
         session.publish('paused')
-        observation = session.ui.observe()
-        dialog = classify_dialog(observation, rules=session.rules, game_text=resources, state=classification_state(session))
-        # Win3.1 often paints a transient background between modal windows.
-        # Let that ordinary transition finish; never type into an unknown screen.
-        if not dialog['supported']:
-            for _ in range(10):
-                session.game.rpc('resume')
-                time.sleep(.25)
-                session.game.rpc('pause')
-                observation = session.ui.observe()
-                dialog = classify_dialog(observation,rules=session.rules,game_text=resources,state=classification_state(session))
-                if dialog['supported']:
-                    break
+        observation, dialog = observe_ready(session, resources)
         session.journal.append('screen_observed', screen=observation['sha256'],
                                 classification=dialog['kind'],supported=dialog['supported'],
-                                path=Path(observation['path']).relative_to(session.journal.directory).as_posix())
+                                path=Path(observation['path']).relative_to(session.journal.directory).as_posix(),
+                                **({'native_rejection':dialog['native_rejection']} if dialog.get('native_rejection') else {}))
         if not dialog['supported']:
             return {'status':'paused','reason':'Original screen requires a controller update.',
                     'screen':observation['path'],'classification':dialog}
@@ -87,6 +97,8 @@ def run_steps(session, *, max_decisions=10000):
                 raise RuntimeError('Repeated information screens need inspection')
             if kind == 'new_city_name':
                 context['observed_city_names'].add(dialog['default_name'])
+            if kind == 'rule_rejection':
+                session.note_native_rejection(dialog)
             session.mechanical(dialog['mechanical_action'])
             # The founded-city notice can return to the map while the city
             # window is still being created. Let its original repaint finish.
@@ -131,8 +143,7 @@ def run_steps(session, *, max_decisions=10000):
                     return {'status':'paused','reason':'Requested empire menu did not have an observed successful review.', 'screen':observation['path']}
                 context['reviewed']['actions'].append(context['pending_empire']['id'])
             context['pending_empire'] = None
-            observation = session.ui.observe()
-            dialog = classify_dialog(observation,rules=session.rules,game_text=resources,state=classification_state(session))
+            observation, dialog = observe_ready(session, resources)
             if dialog['kind'] != 'end_turn' or not dialog['supported']:
                 return {'status':'paused','reason':'End-turn checkpoint changed the observed screen.', 'screen':observation['path']}
             action,next_screen = session.choose_empire(dialog,context['reviewed'])

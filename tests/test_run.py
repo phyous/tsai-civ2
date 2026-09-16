@@ -69,3 +69,19 @@ class ControllerTests(TestCase):
         ctx=controller_context(s);ctx['pending_empire']={'id':'open_tax'}
         self.assertIn('did not have an observed',self.run_fake(s)['reason'])
         self.assertEqual(ctx['reviewed']['actions'],[])
+
+    def test_gray_blink_after_checkpoint_waits_for_observed_cue_before_choice(self):
+        end=frame(1,'end_turn')
+        gray=frame(2,'unknown',supported=False)
+        s=session([end,gray,end]);s.checkpoint=mock.Mock()
+        def choose(dialog,reviewed):
+            self.assertEqual(dialog['kind'],'end_turn')
+            s.decisions += 1
+            return {'id':'finish_turn'},frame(3,'normal_map')
+        s.choose_empire=mock.Mock(side_effect=choose)
+        self.run_fake(s)
+        s.choose_empire.assert_called_once()
+        s.ui.key.assert_not_called()
+        s.ui.select_text.assert_not_called()
+        self.assertEqual(s.game.rpc.call_args_list,
+                         [mock.call('pause'),mock.call('resume'),mock.call('pause')])

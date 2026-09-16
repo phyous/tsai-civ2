@@ -12,6 +12,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 SHORT_CONTROLS = {text.casefold(): text for text in
                   ('OK', 'Cancel', 'Yes', 'No', 'Help', 'Close', 'Next', 'Back', 'Done', 'Continue')}
+STATUS_CROP = (466, 440, 640, 480)
+STATUS_PHRASES = ('End of Turn', '(Press ENTER)')
 
 
 def _run_ocr(executable, path):
@@ -88,17 +90,92 @@ def _merge_controls(rows, fallback, conflicts):
                                   reason='ambiguous overlapping native geometry'))
 
 
-def _heading_near_match(text):
-    """At most two edits corroborate a heading; never generate its text."""
-    a, b = ' '.join(text.casefold().split()), 'found new city'
-    if abs(len(a) - len(b)) > 2:
+def _near_text(a, b, limit):
+    if abs(len(a) - len(b)) > limit:
         return False
     costs = list(range(len(b) + 1))
     for i, char in enumerate(a, 1):
         previous, costs = costs, [i]
         for j, other in enumerate(b, 1):
             costs.append(min(costs[-1] + 1, previous[j] + 1, previous[j - 1] + (char != other)))
-    return costs[-1] <= 2
+    return costs[-1] <= limit
+
+
+def _heading_near_match(text):
+    """At most two edits corroborate a heading; never generate its text."""
+    return _near_text(' '.join(text.casefold().split()), 'found new city', 2)
+
+
+def _in_status_crop(row):
+    x, y, w, h = row['bounds']
+    return x >= STATUS_CROP[0] and y >= STATUS_CROP[1] and x + w <= 641 and y + h <= 481
+
+
+def _status_recovery_needed(rows, width, height):
+    if (width, height) != (640, 480):
+        return False
+    status = [row for row in rows if _in_status_crop(row)]
+    if all(any(row['text'].strip() == phrase and row['confidence'] >= .8 for row in status)
+           for phrase in STATUS_PHRASES):
+        return False
+    if any(re.match(r'^(end|press)', re.sub(r'[^a-z]', '', row['text'].casefold())) for row in status):
+        return True
+    roman_map = any(row['text'].strip().casefold() in ('roman map', 'roman hap')
+                    and 40 <= row['center'][1] <= 70 and 30 <= row['center'][0] <= 430
+                    and row['confidence'] >= .8 for row in rows)
+    moving = any(row['text'].strip().casefold().startswith('moving')
+                 and row['center'][0] >= 466 and 245 <= row['center'][1] <= 430 for row in rows)
+    return roman_map and not moving
+
+
+def _status_near_match(text, phrase):
+    compact = re.sub(r'[^a-z]', '', text.casefold())
+    expected = re.sub(r'[^a-z]', '', phrase.casefold())
+    prefix, limit = ('end', 3) if phrase == STATUS_PHRASES[0] else ('press', 4)
+    return compact.startswith(prefix) and _near_text(compact, expected, limit)
+
+
+def _recover_status(rows, raw, conflicts):
+    """Recover the pair atomically from actual OCR of the white-glyph crop."""
+    local = _prepare_rows(raw, 174, 40, 'status_white_4x')
+    if len(local) != 2 or {row['text'].strip() for row in local} != set(STATUS_PHRASES):
+        return
+    candidates = []
+    for phrase in STATUS_PHRASES:
+        observed = next(row for row in local if row['text'].strip() == phrase)
+        x, y, w, h = observed['provenance'][0]['normalized_bounds']
+        mapped = dict(observed, x=(466 + x * 174) / 640, y=(440 + y * 40) / 480,
+                      width=w * 174 / 640, height=h * 40 / 480)
+        candidate = _prepare_rows([mapped], 640, 480, 'status_white_4x')[0]
+        candidate['provenance'][0].update(crop=list(STATUS_CROP), scale=4,
+                                          normalized_crop_bounds=[x, y, w, h],
+                                          transform='RGB channels >=240 to black; others white; grayscale; bicubic')
+        if candidate['confidence'] < .8 or not _in_status_crop(candidate):
+            return
+        candidates.append(candidate)
+    if (candidates[0]['center'][1] >= candidates[1]['center'][1]
+            or _overlap(candidates[0], candidates[1])):
+        return
+    replacements = []
+    for candidate, phrase in zip(candidates, STATUS_PHRASES):
+        overlaps = [index for index, row in enumerate(rows) if _overlap(row, candidate)]
+        nearby = [index for index, row in enumerate(rows) if _in_status_crop(row) and _status_near_match(row['text'], phrase)]
+        if not overlaps and not nearby:
+            replacements.append((None, candidate))
+        elif (len(overlaps) == 1 and nearby == overlaps
+              and _same_location(rows[overlaps[0]], candidate)):
+            previous = rows[overlaps[0]]
+            candidate['provenance'] = previous['provenance'] + candidate['provenance']
+            replacements.append((overlaps[0], candidate))
+        else:
+            conflicts.append(dict(text=phrase, bounds=candidate['bounds'],
+                                  reason='ambiguous or contradictory native end-turn status geometry'))
+            return
+    for index, candidate in replacements:
+        if index is None:
+            rows.append(candidate)
+        else:
+            rows[index] = candidate
 
 
 def recognize(path: str | Path) -> dict:
@@ -143,6 +220,16 @@ def recognize(path: str | Path) -> dict:
                             rows[rows.index(previous)] = candidate
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name='bicubic_3x', error=type(error).__name__))
+            if _status_recovery_needed(rows, width, height):
+                name = 'status_white_4x'
+                try:
+                    target = Path(directory) / (name + '.png')
+                    image.crop(STATUS_CROP).point(lambda value: 0 if value >= 240 else 255).convert('L').resize(
+                        (696, 160), Image.Resampling.BICUBIC).save(target)
+                    evidence['passes'].append(name)
+                    _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
+                except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+                    evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
     return {'width': width, 'height': height, 'sha256': original_hash,
             'lines': rows, 'text': '\n'.join(row['text'] for row in rows), 'ocr': evidence}
 

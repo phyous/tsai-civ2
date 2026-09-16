@@ -67,7 +67,7 @@ def task_candidates(state, rules=None, limit=64):
             add('survey', {**point, 'unknown_neighbors':unknown}, f'Reveal new terrain near a known frontier ({len(unknown)} unknown neighbors)'+suffix)
         if not worker or (x, y) in occupied:
             continue
-        if terrain in ('Grassland', 'Plains'):
+        if terrain in ('Grassland', 'Plains') and all(_grid_distance(state, point, c) > 1 for c in all_cities):
             spacing = min((_grid_distance(state, point, c) for c in cities), default=None)
             add('settle', point, 'Establish a city'+suffix+f"; nearest owned city {spacing if spacing is not None else 'none'} steps")
         works = set(tile.get('known_improvements', []))
@@ -177,7 +177,8 @@ def advance_plan(plan, before, after, action=None, rules=None):
         return stop('invalidated', 'Target is no longer an observed owned city')
     if task == 'engage' and not any(all(u.get(k)==v for k,v in target.items()) for u in after.get('visible_units', [])):
         return stop('invalidated', 'Exact hostile target is no longer currently visible; destruction is not inferred')
-    if task == 'settle' and (not tile or tile.get('terrain') not in ('Grassland','Plains') or any((c['x'],c['y'])==point for c in after.get('known_cities', []))):
+    if task == 'settle' and (not tile or tile.get('terrain') not in ('Grassland','Plains') or any(
+            _grid_distance(after, target, c) <= 1 for c in after['cities']+after.get('known_cities', []))):
         return stop('invalidated', 'Known settlement-site prerequisites changed')
     if task in ('road','irrigate','mine'):
         if not tile or point in new_cities or any((c['x'],c['y'])==point for c in after.get('known_cities', [])):

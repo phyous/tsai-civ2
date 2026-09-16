@@ -412,11 +412,32 @@ def unit_candidates(observation, unit_id=None, rules=None):
         add("fortify", "fortify", "Fortify this ground unit at its current position", "KeyF")
     if domain in (0, 2):
         add("sentry", "sentry", "Sentry this unit until nearby activity awakens it", "KeyS")
+    # Original MENU.TXT U / TUTORIAL.TXT @SHIPS requests unloading. Require
+    # the original naval-transport role and capacity, not a ship name or a
+    # guessed association with land units sharing its square. The game decides
+    # whether cargo exists and what can be activated/unloaded at this location.
+    transport_fields = ("id", "domain", "role", "transport_capacity")
+    transport_rules = [row for row in rules.get("units", [])
+                       if isinstance(row, dict) and row.get("id") == unit["type_id"]]
+    if len(transport_rules) == 1:
+        original = transport_rules[0]
+        if (all(_integer(original.get(key)) for key in transport_fields)
+                and original["domain"] == 2 and original["role"] == 4
+                and original["transport_capacity"] > 0
+                and all(type(spec.get(key)) is int and spec[key] == original[key]
+                        for key in transport_fields)):
+            add("unload", "unload",
+                "Request unloading from this selected transport in the original game; cargo and unloading legality are unverified",
+                "KeyU", transport_specification={key: original[key] for key in transport_fields})
     tile = tiles.get((unit["x"], unit["y"]))
     if not worker or not tile or tile.get("terrain") == "Ocean":
         return actions
     occupied = (unit["x"], unit["y"]) in cities or any(c.get("x") == unit["x"] and c.get("y") == unit["y"] for c in observation.get("known_cities", []))
-    if tile.get("terrain") in ("Grassland", "Plains") and not occupied:
+    # Original GAME.TXT rejects cities in adjacent squares. Use only observed
+    # owned/remembered cities; absent foreign knowledge is not a clearance claim.
+    nearby_city = any(_grid_distance(observation, unit, city) <= 1
+                      for city in [*observation.get("cities", []), *observation.get("known_cities", [])])
+    if tile.get("terrain") in ("Grassland", "Plains") and not nearby_city:
         add("settle", "settle", "Found a city here on observed "+tile["terrain"]+_city_distance_label(observation, unit)+"; consumes this settler", "KeyB")
     if occupied:
         # Original manual, Building Cities/City Radius: centers automatically

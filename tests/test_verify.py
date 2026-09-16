@@ -16,10 +16,10 @@ from PIL import Image, ImageDraw
 from civ2.boot import verify_setup
 from civ2.evidence import Journal, canonical
 from civ2.save import parse_save
-from civ2.verify import VerificationError, verify_run
+from civ2.verify import VerificationError, _inputs, verify_run
 
 
-def initial_save():
+def initial_save(unit_type=0):
     """Minimal synthetic classic TEST layout, with the requested setup fields."""
     area = 2000
     base = 13432+14+13*area+2*20*13+1024
@@ -38,6 +38,7 @@ def initial_save():
     data[civ+19], data[civ+20], data[civ+21] = 6, 4, 1
     data[civ+10] = 255
     struct.pack_into('<hh', data, base, 8, 8)
+    data[base+6] = unit_type
     data[base+7] = 1
     data[base+15] = data[base+16] = 255
     struct.pack_into('<hh', data, base+18, -1, -1)
@@ -55,18 +56,18 @@ def picture(size=(640, 480)):
 
 
 class Evidence:
-    def __init__(self, parent, *, dispatch=True, recording=False):
+    def __init__(self, parent, *, dispatch=True, recording=False, unit_type=0):
         self.directory = Path(parent)/'test-evidence'
         self.journal = Journal(self.directory)
-        self.initial = self.journal.artifact('initial.sav', initial_save())
-        state = parse_save(initial_save())
+        self.initial = self.journal.artifact('initial.sav', initial_save(unit_type))
+        state = parse_save(initial_save(unit_type))
         self.journal.append('begin', initial_save=self.initial, checks=verify_setup(state),
                             settings=state['settings'], model='jev-latest')
         self.screen = self.journal.artifact('screens/test.png', picture())
         self.journal.append('screen_observed', path=self.screen['path'], screen=self.screen['sha256'],
                             classification='normal_map', supported=True)
         self.action = dict(id='settle', kind='settle', label='TEST found city',
-            actor=dict(id=0,type_id=0,owner=1,x=8,y=8),
+            actor=dict(id=0,type_id=unit_type,owner=1,x=8,y=8),
             preconditions=dict(save_sha256=self.initial['sha256'],turn=1,selected_unit_id=0),
             parameters=dict(key='KeyB'))
         self.request = dict(state=dict(turn=1,selected_unit=deepcopy(self.action['actor'])),
@@ -133,8 +134,83 @@ class Evidence:
         (self.directory/'terminal-review.json').write_bytes(canonical(review))
         return 'terminal-review.json'
 
+    def add_plan(self):
+        state=parse_save(initial_save());actor={k:state['units'][0].get(k) for k in
+            ('id','owner','type_id','x','y','home_city_id','veteran')}
+        task=dict(id='hold_one_turn',task='hold',label='TEST hold objective',actor=actor,
+            preconditions=dict(save_sha256=self.initial['sha256'],turn=1,selected_unit_id=0),target={'turn':2})
+        request=dict(state=dict(turn=1,selected_unit=actor,planning=dict(targets={
+            'hold_one_turn':dict(task='hold',target={'turn':2}),
+            'settle_8_8':dict(task='settle',target={'x':8,'y':8})})),
+            questions=dict(task_choice=dict(type='choice',instructions='TEST context only',
+                criteria=dict(hold_one_turn='TEST hold objective',settle_8_8='TEST settle objective'))))
+        response=deepcopy(self.response);response['answers']=dict(task_choice=dict(type='choice',choice='hold_one_turn',
+            probabilities=dict(hold_one_turn=.7,settle_8_8=.3),confidence=.7))
+        descriptors=[]
+        for name,value in [('decisions/plan-request.json',request),('decisions/plan-response.json',response)]:
+            data=canonical(value);(self.directory/name).write_bytes(data)
+            descriptors.append(dict(path=name,bytes=len(data),sha256=hashlib.sha256(data).hexdigest()))
+        plan=dict(candidate=task,actor=actor,current_save_sha256=self.initial['sha256'],created_turn=1,
+            expires_turn=9,observations=0,status='active',reason='TEST context only',decision_id=1)
+        self.request['state']['persistent_plan']=dict(planning_decision=1,task='hold',target={'turn':2},
+            label=task['label'],actor=actor,status='active',created_turn=1,expires_turn=9)
+        self.change_artifact('decisions/request.json',self.request)
+        def change(rows):
+            rows[0]['payload']['planning_enabled']=True
+            first=next(i for i,r in enumerate(rows) if r['kind']=='inference_started')
+            for row in rows:
+                if row['payload'].get('decision')==1:row['payload']['decision']=2
+            elapsed=rows[first]['elapsed_ms']
+            extra=[dict(kind='inference_started',elapsed_ms=elapsed,payload=dict(decision=1,request=descriptors[0],stage='planning')),
+                   dict(kind='model_plan',elapsed_ms=elapsed,payload=dict(decision=1,response=descriptors[1],
+                       selected_question='task_choice',task=task,executes_input=False)),
+                   dict(kind='plan_status',elapsed_ms=elapsed,payload=dict(planning_decision=1,plan=plan,
+                       previous_status=None,executes_input=False,checkpoint=0))]
+            rows[first:first]=extra
+        self.rewrite(change)
+
 
 class VerifyTests(unittest.TestCase):
+    def test_planning_is_a_validated_separate_response_without_a_dispatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            e=Evidence(d);e.add_plan();r=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(r['decisions']['validated_responses'],2)
+            self.assertEqual(r['decisions']['planning_decisions'],1)
+            self.assertEqual(r['decisions']['command_decisions'],1)
+            self.assertEqual(r['decisions']['planning_dispatches'],0)
+            self.assertEqual(r['decisions']['model_dispatches'],1)
+            self.assertEqual(r['decisions']['undispatched_decisions'],[])
+            self.assertEqual(r['decisions']['inferences_without_response'],[])
+            self.assertEqual(r['decisions']['accepted_response_input_tokens'],200)
+
+    def test_plan_cannot_be_reclassified_as_command_or_native_effect(self):
+        for mode in ('execute','stage','dispatch','effect'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+                e=Evidence(d);e.add_plan()
+                def change(rows):
+                    if mode=='execute':next(r for r in rows if r['kind']=='model_plan')['payload']['executes_input']=True
+                    elif mode=='stage':next(r for r in rows if r['kind']=='inference_started')['payload']['stage']='command'
+                    elif mode=='dispatch':next(r for r in rows if r['kind']=='command_dispatched')['payload']['decision']=1
+                    else:rows.append(dict(kind='batch_observed_effect',elapsed_ms=rows[-1]['elapsed_ms'],payload=dict(decisions=[1])))
+                e.rewrite(change)
+                with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_plan_context_and_model_target_cannot_be_silently_rewritten(self):
+        for mode in ('context','target','choice','actor'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+                e=Evidence(d);e.add_plan()
+                if mode=='context':
+                    e.request['state']['persistent_plan']['target']={'turn':20}
+                    e.change_artifact('decisions/request.json',e.request)
+                else:
+                    def change(rows):
+                        plan=next(r for r in rows if r['kind']=='model_plan')['payload']['task']
+                        if mode=='target':plan['target']={'turn':20}
+                        elif mode=='choice':plan['id']='settle_8_8'
+                        else:plan['actor']['id']=20
+                    e.rewrite(change)
+                with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
     def test_intact_setup_model_choice_receipt_and_unverified_outcome(self):
         with tempfile.TemporaryDirectory() as d:
             e=Evidence(d);r=verify_run(e.directory,ffprobe=None)
@@ -227,6 +303,56 @@ class VerifyTests(unittest.TestCase):
                 e.rewrite(change)
                 with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
 
+    def test_unload_receipt_requires_selected_key_u_without_claiming_native_acceptance(self):
+        with tempfile.TemporaryDirectory() as d:
+            e=Evidence(d,unit_type=32)
+            specification=dict(id=32,domain=2,role=4,transport_capacity=2)
+            action={**e.action,'id':'unload','kind':'unload','label':'TEST request unload',
+                    'parameters':{'key':'KeyU','transport_specification':specification}}
+            request=deepcopy(e.request)
+            request['state']['selected_unit']['specification']=specification
+            request['questions']['unit_action']['criteria']={'unload':action['label'],'skip':'TEST skip'}
+            response=deepcopy(e.response)
+            response['answers']['unit_action'].update(choice='unload',probabilities={'unload':.7,'skip':.3})
+            e.change_artifact('decisions/request.json',request)
+            e.change_artifact('decisions/response.json',response)
+            def change(rows):
+                for row in rows:
+                    if row['kind'] in ('model_decision','command_dispatched'):
+                        row['payload']['action']=deepcopy(action)
+                    if row['kind']=='command_dispatched':
+                        for receipt in row['payload']['inputs']:receipt['code']='KeyU'
+            e.rewrite(change)
+            report=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(report['decisions']['model_dispatches'],1)
+            self.assertIn('Native acceptance',report['decisions']['acceptance'])
+            for change_spec in ({'domain':0},{'role':2},{'transport_capacity':0},
+                                {'transport_capacity':3},{'id':33},{'role':True}):
+                bad=deepcopy(request)
+                bad['state']['selected_unit']['specification'].update(change_spec)
+                e.change_artifact('decisions/request.json',bad)
+                with self.subTest(change_spec=change_spec),self.assertRaisesRegex(VerificationError,'transport specification'):
+                    verify_run(e.directory,ffprobe=None)
+            e.change_artifact('decisions/request.json',request)
+            def missing_spec(rows):
+                next(r for r in rows if r['kind']=='model_decision')['payload']['action']['parameters'].pop('transport_specification')
+            e.rewrite(missing_spec)
+            with self.assertRaisesRegex(VerificationError,'transport specification'):
+                verify_run(e.directory,ffprobe=None)
+            e.rewrite(change)
+            e.rewrite(lambda rows:next(r for r in rows if r['kind']=='command_dispatched')['payload']['inputs'][0].update(code='KeyB'))
+            with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_historical_request_is_not_regenerated_with_todays_candidate_policy(self):
+        with tempfile.TemporaryDirectory() as d:
+            e=Evidence(d)
+            # A controller update may later exclude a formerly offered order.
+            # This test is receipt integrity, not a claim that TEST settling was legal.
+            with mock.patch('civ2.policy.validate_action',side_effect=AssertionError('new policy rejects old action')):
+                report=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(report['integrity'],'passed')
+            self.assertTrue(any('not regenerated' in item for item in report['limitations']))
+
     def test_dialog_cursor_receipt_is_bound_to_the_selected_observed_option(self):
         with tempfile.TemporaryDirectory() as d:
             e=Evidence(d)
@@ -243,7 +369,8 @@ class VerifyTests(unittest.TestCase):
                 probabilities=dict(option_0=.7,option_1=.3),confidence=.7))
             e.change_artifact('decisions/request.json',request);e.change_artifact('decisions/response.json',response)
             wrapper=dict(issued=True,target=[120,150],observed_cursor=[121,150],tolerance=3,
-                inputs=[dict(type='relativeMouse',sequence=10,dx=10,dy=0,queued=True,via='SDL_SendMouseMotion'),
+                inputs=[dict(type='relativeMouse',sequence=10,dx=10,dy=0,
+                             dispatched=True,emulate=True,via='DOSBox Mouse_CursorMoved'),
                         dict(type='mouse',sequence=11,event='mousedown',x=310,y=225,button=0),
                         dict(type='mouse',sequence=12,event='mouseup',x=310,y=225,button=0)])
             def change(rows):
@@ -270,6 +397,26 @@ class VerifyTests(unittest.TestCase):
             self.assertEqual(recovered['decisions']['manually_reviewed_keyboard_recoveries'],[1])
             self.assertEqual(recovered['decisions']['model_dispatches'],0)
             self.assertFalse(recovered['completeness']['release_review_ready'])
+
+    def test_relative_motion_accepts_only_verified_backend_receipts_and_bounds(self):
+        legacy=dict(type='relativeMouse',sequence=1,dx=12,dy=-12,
+                    queued=True,via='SDL_SendMouseMotion')
+        current=dict(type='relativeMouse',sequence=1,dx=12,dy=-12,
+                     dispatched=True,emulate=True,via='DOSBox Mouse_CursorMoved')
+        self.assertEqual(_inputs([legacy]),[legacy])
+        self.assertEqual(_inputs([current]),[current])
+        for changes in ({'dispatched':False}, {'dispatched':1}, {'emulate':False},
+                        {'emulate':1}, {'via':'guestWrite'}, {'via':'SDL_SendMouseMotion'},
+                        {'dx':33}, {'dy':-33}, {'dx':True}, {'dx':0,'dy':0}):
+            with self.subTest(changes=changes):
+                with self.assertRaisesRegex(VerificationError,'Relative mouse receipt'):
+                    _inputs([{**current,**changes}])
+        for key in ('dispatched','emulate','via'):
+            invalid={k:v for k,v in current.items() if k!=key}
+            with self.subTest(missing=key),self.assertRaisesRegex(VerificationError,'Relative mouse receipt'):
+                _inputs([invalid])
+        with self.assertRaisesRegex(VerificationError,'Relative mouse receipt'):
+            _inputs([{**legacy,'queued':False}])
 
     def test_empire_implicit_decision_binding_and_no_forged_forced_key(self):
         with tempfile.TemporaryDirectory() as d:

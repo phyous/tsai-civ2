@@ -15,6 +15,8 @@ import unicodedata
 
 
 EVENT_TITLES = {
+    'ADJACENTCITY': 'civ rules: cities',
+    'CIVADVANCE': 'civilization advance',
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
                      'INHOCK', 'FERTILE', 'UPGRADED', 'UPGRADE'), 'domestic advisor'),
@@ -23,6 +25,13 @@ EVENT_TITLES = {
                      'INCIDENTTERROR', 'SENATESCANDAL'), 'newspaper'),
     **dict.fromkeys(('PLANTEDNUKE', 'FEARWARMING', 'GLOBALWARMING'), '(newspaper)'),
 }
+# Reviewed against original screenshots B003/74 and A002/254 respectively.
+# These aliases never replace observed text and still require a complete body
+# from the matching original resource and the sole aligned OK control.
+TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
+                 'CIVADVANCE': {'ciadization advance'}}
+RULE_REJECTIONS = {'ADJACENTCITY': 'Cities cannot be built in adjacent squares.'}
+OBSERVED_EVENT_TITLES = set(EVENT_TITLES.values()) | set().union(*TITLE_ALIASES.values())
 CONTROLS = {'ok', 'cancel', 'yes', 'no', 'help', 'continue', 'back', 'next', 'done', 'close'}
 TOKEN = re.compile(r'%(STRING|NUMBER)(\d{1,2})', re.I)
 
@@ -144,6 +153,8 @@ def classify_information(observation, resources, *, placeholder_values=None):
                 or resource.get('options') != [] or resource.get('listbox') is not False
                 or resource.get('buttons') not in ([], ['OK'])):
             continue
+        if tag in RULE_REJECTIONS and _normal(body or '') != _normal(RULE_REJECTIONS[tag]):
+            continue
         tag_values = placeholder_values.get(tag, {})
         if not isinstance(tag_values, dict):
             continue
@@ -152,7 +163,8 @@ def classify_information(observation, resources, *, placeholder_values=None):
         pattern = _body_pattern(body, tag_values)
         if pattern is None:
             continue
-        titles = [row for row in rows if row['normal'] == _normal(title)]
+        allowed_titles = {_normal(title)} | TITLE_ALIASES.get(tag, set())
+        titles = [row for row in rows if row['normal'] in allowed_titles]
         if len(titles) != 1:
             continue
         heading = titles[0]
@@ -190,7 +202,7 @@ def classify_information(observation, resources, *, placeholder_values=None):
         if len(observed_body) > 2000 or pattern.fullmatch(observed_body) is None:
             continue
         # A second visible advisor/event heading indicates ambiguous layers.
-        if any(row is not heading and row['normal'] in set(EVENT_TITLES.values()) for row in rows):
+        if any(row is not heading and row['normal'] in OBSERVED_EVENT_TITLES for row in rows):
             continue
         matches.append((resource, heading, body_rows))
     if len(matches) != 1:
@@ -198,12 +210,21 @@ def classify_information(observation, resources, *, placeholder_values=None):
     resource, heading, body_rows = matches[0]
     option = {key: ok[key] for key in ('text', 'center', 'source_line', 'confidence')}
     option.update(control='button', enabled=None)
-    result.update(kind='information', supported=True, mechanical_action='acknowledge_information',
+    observed_body = '\n'.join(row['text'] for row in body_rows)
+    result.update(kind='rule_rejection' if resource['tag'] in RULE_REJECTIONS else 'information',
+                  supported=True, mechanical_action='acknowledge_information',
                   title=heading['text'], options=[option], buttons=[option], resource_tag=resource['tag'], reason=None,
                   evidence=dict(source='original GAME.TXT event template', source_tag=resource['tag'],
                                 template_sha256=hashlib.sha256(json.dumps(resource, sort_keys=True).encode()).hexdigest(),
                                 title_source_line=heading['source_line'],
+                                observed_title=heading['text'], observed_body=observed_body,
+                                title_match='exact' if heading['normal']==_normal(resource['title']) else 'reviewed OCR alias',
                                 body_source_lines=[row['source_line'] for row in body_rows],
                                 button_source_line=ok['source_line'],
                                 match='complete visible title and body; sole observed OK'))
+    if resource['tag'] in RULE_REJECTIONS:
+        result['native_rejection'] = dict(tag=resource['tag'], body=observed_body,
+            title=heading['text'], source='original GAME.TXT',
+            template_sha256=result['evidence']['template_sha256'],
+            observation_sha256=observation['sha256'])
     return result

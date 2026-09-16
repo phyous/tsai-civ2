@@ -69,6 +69,20 @@ class PlanningTests(unittest.TestCase):
         s['diplomacy']=[];s['visible_units'][0]['owner']=0
         self.assertIn('engage_10_8_11',task_candidates(s,r)[0])
 
+    def test_settlement_excludes_known_adjacent_cities_and_invalidates_new_neighbor(self):
+        for key in ('cities','known_cities'):
+            s,r=fixture();s[key]=[dict(id=0,owner=1 if key=='cities' else 2,name='TEST City',x=6,y=8)]
+            candidates,_=task_candidates(s,r,limit=255)
+            self.assertNotIn('settle_8_8',candidates)
+            self.assertIn('settle_10_8',candidates)
+            plan=make_plan(candidates['settle_10_8'],s,r,limit=255)
+            after=fresh(s);after[key].append(dict(id=1,owner=1 if key=='cities' else 2,name='TEST New',x=12,y=8))
+            self.assertEqual(advance_plan(plan,s,after,rules=r)['status'],'invalidated')
+        s,r=fixture();s['settings']['round_world']=True
+        s['cities']=[dict(id=0,owner=1,name='TEST Wrapped City',x=0,y=8)]
+        s['map']['tiles'].append(dict(x=38,y=8,terrain='Plains',terrain_id=1,river=False,known_improvements=[]))
+        self.assertNotIn('settle_38_8',task_candidates(s,r,limit=255)[0])
+
     def test_candidate_cap_is_deterministic_reports_omissions_and_reserves_hold(self):
         s,r=fixture();s['map']['tiles']=[dict(x=2*c+y%2,y=y,terrain='Plains',terrain_id=1,
             river=False,known_improvements=[]) for y in range(20) for c in range(20)]

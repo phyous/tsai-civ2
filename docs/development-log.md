@@ -53,6 +53,29 @@ DOSBox relative input handler; a fresh live menu selection reached pixel
 (512,378) exactly in eight feedback steps. These are harness calibrations, not
 model losses.
 
+## Parallel controller experiments
+
+Attempts 002 and 003 start from the same verified map and settings in separate
+local browser runtimes. Attempt 002 uses immediate action choices; attempt 003
+adds independent Jev-selected persistent objectives. Both retain continuous
+recordings, including controller-development pauses. These are ongoing games,
+not completed victories or defeats.
+
+The baseline repeatedly skipped its second starting Settler through turn 10.
+In the planned run, Jev chose a frontier target and moved north, then proposed
+a new city adjacent to Rome. The original game rejected that order with
+“Cities cannot be built in adjacent squares.” The candidate builder had omitted
+this rule. Both planning and immediate settlement choices now exclude squares
+adjacent to observed cities, including across the world seam. The rejected call
+and its native notice remain in the evidence; it is not counted as a founded city.
+
+Other observed fixes include the original End of Turn cue's blinking white/gray
+text, research-heading bitmap-font OCR, and city-locator text under the pointer.
+Varied repaint waits avoid sampling the same unreadable blink phase and issue
+no game input. Planning choices and dispatched commands have separate evidence
+and HUD labels. A responsive read-only live theater at `/web/watch.html` displays
+the recorder's complete composition without opening another emulator.
+
 ## Evidence conventions
 
 Each model session retains original saves, original screenshots, requests,

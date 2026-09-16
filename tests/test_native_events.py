@@ -109,6 +109,77 @@ class NativeEventTests(unittest.TestCase):
             bad = copy.deepcopy(screen); bad['lines'][1]['confidence'] = value
             self.assertFalse(classify_information(bad, [resource()])['supported'])
 
+    def test_adjacent_city_rejection_preserves_exact_body_and_observed_heading(self):
+        source=resource(tag='ADJACENTCITY',title='Civ Rules: Cities',
+                        body='Cities cannot be built in adjacent squares.')
+        for title in ('Civ Rules: Cities','Civ Rules: Cines'):
+            with self.subTest(title=title):
+                screen=notice('Cities cannot be built in adjacent squares.',title=title)
+                result=classify_information(screen,[source])
+                self.assertTrue(result['supported'],result)
+                self.assertEqual(result['kind'],'rule_rejection')
+                self.assertEqual(result['mechanical_action'],'acknowledge_information')
+                self.assertFalse(result['requires_model'])
+                self.assertEqual(result['title'],title)
+                self.assertEqual(result['native_rejection']['body'],source['body'])
+                self.assertEqual(result['native_rejection']['tag'],'ADJACENTCITY')
+                self.assertEqual(result['native_rejection']['observation_sha256'],screen['sha256'])
+                self.assertEqual(result['evidence']['observed_title'],title)
+                self.assertEqual([o['text'] for o in result['options']],['OK'])
+
+    def test_rule_alias_cannot_accept_other_rejection_or_arbitrary_body(self):
+        source=resource(tag='ADJACENTCITY',title='Civ Rules: Cities',
+                        body='Cities cannot be built in adjacent squares.')
+        for body in ('Cities cannot be built at sea.', 'Cities cannot be built in adjacent',
+                     'Cities cannot be built in adjacent squares. Really disband?',
+                     'TEST arbitrary notice'):
+            self.assertFalse(classify_information(notice(body,title='Civ Rules: Cines'),[source])['supported'])
+        forged=copy.deepcopy(source); forged['body']='TEST arbitrary notice'
+        self.assertFalse(classify_information(notice(forged['body'],title=source['title']),[forged])['supported'])
+        for tag in ('CITYATSEA','NOADJACENTCITIES'):
+            forged=copy.deepcopy(source); forged['tag']=tag
+            self.assertFalse(classify_information(notice(source['body'],title=source['title']),[forged])['supported'])
+
+    def test_rule_rejection_rejects_extra_control_or_unaligned_ok(self):
+        source=resource(tag='ADJACENTCITY',title='Civ Rules: Cities',
+                        body='Cities cannot be built in adjacent squares.')
+        screen=notice(source['body'],title='Civ Rules: Cines')
+        screen['lines'].append(row('Cancel',y=270,width=40))
+        self.assertFalse(classify_information(screen,[source])['supported'])
+        screen=notice(source['body'],title='Civ Rules: Cines')
+        screen['lines'][-1]=row('OK',x=520,y=240,width=25)
+        self.assertFalse(classify_information(screen,[source])['supported'])
+
+    def test_advance_notice_requires_complete_original_discovery_body(self):
+        source=resource(tag='CIVADVANCE',title='Civilization Advance',
+                        body='%STRING0 %STRING1 discover the secret of %STRING2.')
+        for title in ('Civilization Advance','Ciadization Advance'):
+            screen=notice('Roman wise men discover the secret of','Alphabet.',title=title)
+            result=classify_information(screen,[source])
+            self.assertTrue(result['supported'],result)
+            self.assertEqual(result['kind'],'information')
+            self.assertNotIn('native_rejection',result)
+            self.assertEqual(result['evidence']['observed_body'],'Roman wise men discover the secret of\nAlphabet.')
+            self.assertEqual(result['title'],title)
+            for body in ('Roman wise men discover the secret of', 'Alphabet.',
+                         'Roman wise men select the secret of Alphabet.',
+                         'Roman wise men discover the secret of Alphabet. Really continue?'):
+                self.assertFalse(classify_information(notice(body,title=title),[source])['supported'])
+
+    def test_original_notice_integration_keeps_rejection_distinct(self):
+        from civ2.dialogs import classify_dialog
+        text='@ADJACENTCITY\n@title=Civ Rules: Cities\nCities cannot be built in adjacent\nsquares.\n\n@CIVADVANCE\n@title=Civilization Advance\n@width=320\n%STRING0 %STRING1 discover the secret of %STRING2.\n'
+        screen=notice('Cities cannot be built in adjacent squares.',title='Civ Rules: Cines')
+        result=classify_dialog(screen,game_text=text)
+        self.assertEqual(result['kind'],'rule_rejection')
+        self.assertTrue(result['supported'])
+        self.assertEqual(result['native_rejection']['body'],'Cities cannot be built in adjacent squares.')
+        advance=notice('Roman wise men discover the secret of','Alphabet.',title='Ciadization Advance')
+        result=classify_dialog(advance,game_text=text)
+        self.assertTrue(result['supported'])
+        self.assertEqual(result['resource_tag'],'CIVADVANCE')
+        self.assertFalse(result['requires_model'])
+
     def test_optional_downloaded_original_disorder_support_and_government_templates(self):
         from civ2.dialogs import dialog_resources
         bundle = Path(__file__).resolve().parents[1]/'engine/game/civ2-win31.zip'

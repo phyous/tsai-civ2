@@ -19,6 +19,8 @@ The report checks:
 
 `dialog_keyboard_recovery` records are reported separately. They bind a manually reviewed keyboard selection to an existing model choice; they do not count as automatically verified dispatches or proof of an autonomous run. Unknown development events are counted and prevent the report's `release_review_ready` flag. Incomplete attempts can pass integrity checks while remaining incomplete and having no verified outcome.
 
+Optional planning runs use separate `inference_started(stage="planning")`, `model_plan` and `plan_status` events. The verifier checks the actual `task_choice` response, selected actor/save binding, request target and its observation boundary. Planning events must declare `executes_input=false`; they cannot appear in command dispatches or native-effect batches. A later unit request's persistent-plan context must match its prior active plan status, but its separate unit-action answer still selects the only command. Reports count planning and command responses separately, include both in model usage totals, and never list a valid plan as a missing game dispatch. Earlier traces without planning fields retain their original command semantics.
+
 ## Terminal review
 
 The verifier never derives a win from turn count, research, a save, scores, a `session_stopped` status or a journal claim. To add a terminal review, first inspect the original result screen visually, retain its unmodified 640 × 480 PNG, and create a new JSON artifact inside the run:

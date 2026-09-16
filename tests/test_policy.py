@@ -272,6 +272,98 @@ class PolicyTests(unittest.TestCase):
         s=fixture();s['cities']=[{'id':0,'x':8,'y':8}];self.assertNotIn('settle',unit_candidates(s,rules=rules()))
         self.assertNotIn('settle',unit_candidates(fixture(1),rules=rules()))
 
+    def test_settlement_rejects_all_adjacent_owned_and_remembered_city_squares(self):
+        for collection in ('cities','known_cities'):
+            for _,_,dx,dy,_ in (("here","here",0,0,""),*DIRECTIONS):
+                with self.subTest(collection=collection,dx=dx,dy=dy):
+                    s=fixture();s[collection]=[{'id':0,'x':8+dx,'y':8+dy}]
+                    self.assertNotIn('settle',unit_candidates(s,rules=rules()))
+            # Two keypad steps are legal with respect to this spacing rule.
+            for point in ((8,12),(12,8),(10,10)):
+                s=fixture();s[collection]=[{'id':0,'x':point[0],'y':point[1]}]
+                self.assertIn('settle',unit_candidates(s,rules=rules()))
+
+    def test_settlement_spacing_wraps_only_on_observed_round_world(self):
+        for collection in ('cities','known_cities'):
+            for point in ((30,8),(31,7),(31,9)):
+                s=fixture();s['units'][0]['x']=0
+                s['map']['tiles']=[dict(x=0,y=8,terrain_id=2,terrain='Grassland',river=False,known_improvements=[])]
+                s[collection]=[{'id':0,'x':point[0],'y':point[1]}]
+                self.assertIn('settle',unit_candidates(s,rules=rules()))
+                s['settings']['round_world']=True
+                self.assertNotIn('settle',unit_candidates(s,rules=rules()))
+                s[collection][0].update(x=28,y=8)
+                self.assertIn('settle',unit_candidates(s,rules=rules()))
+
+    def test_unobserved_city_does_not_invent_a_settlement_spacing_restriction(self):
+        s=fixture();s['hidden_cities']=[{'id':0,'x':8,'y':6}]
+        self.assertIn('settle',unit_candidates(s,rules=rules()))
+
+    def test_unload_is_original_transport_request_bound_to_selected_actor(self):
+        s=fixture(2);r=rules();old=copy.deepcopy(s)
+        actions=unit_candidates(s,rules=r);action=actions['unload']
+        self.assertEqual(action['kind'],'unload')
+        self.assertEqual(action['parameters'],{'key':'KeyU','transport_specification':{
+            'id':2,'domain':2,'role':4,'transport_capacity':2}})
+        self.assertEqual(action['actor'],{'id':7,'type_id':2,'owner':1,'x':8,'y':8})
+        self.assertEqual(action['preconditions']['save_sha256'],'a'*64)
+        self.assertIn('Request unloading',action['label'])
+        self.assertIn('unverified',action['label'])
+        self.assertNotIn('cargo_units',action['parameters'])
+        validate_action(action,s,r)
+        request=unit_request_for(s,actions,r);_validate_questions(request['questions'])
+        self.assertEqual(request['questions']['unit_action']['criteria']['unload'],action['label'])
+        self.assertEqual(s,old)
+
+    def test_unload_requires_original_naval_transport_role_and_positive_integer_capacity(self):
+        for changes in ({'domain':0},{'domain':1},{'domain':True},{'role':2},
+                        {'transport_capacity':0},{'transport_capacity':-1},
+                        {'transport_capacity':True},{'transport_capacity':2.5},
+                        {'transport_capacity':None}):
+            with self.subTest(changes=changes):
+                s=fixture(2);r=rules()
+                s['units'][0]['specification'].update(changes);r['units'][2].update(changes)
+                self.assertNotIn('unload',unit_candidates(s,rules=r))
+        for unit_type in (0,1):
+            self.assertNotIn('unload',unit_candidates(fixture(unit_type),rules=rules()))
+
+    def test_unload_does_not_trust_missing_ambiguous_or_conflicting_original_specification(self):
+        s=fixture(2);self.assertNotIn('unload',unit_candidates(s))
+        r=rules();r['units'].append(copy.deepcopy(r['units'][2]))
+        self.assertNotIn('unload',unit_candidates(s,rules=r))
+        r=rules();s['units'][0]['specification']['transport_capacity']=8
+        self.assertNotIn('unload',unit_candidates(s,rules=r))
+        # The original rules can supply the specification if omitted from the observation.
+        s['units'][0].pop('specification')
+        self.assertIn('unload',unit_candidates(s,rules=r))
+
+    def test_unload_never_infers_cargo_or_changes_land_to_ocean_moves(self):
+        s=fixture();here(s).update(terrain='Grassland',terrain_id=2)
+        next(t for t in s['map']['tiles'] if (t['x'],t['y'])==(10,8)).update(terrain='Ocean',terrain_id=10)
+        ship=copy.deepcopy(fixture(2)['units'][0]);ship.update(id=8,x=10,y=8)
+        s['units'].append(ship)
+        self.assertNotIn('unload',unit_candidates(s,rules=rules()))
+        self.assertNotIn('move_e',unit_candidates(s,rules=rules()))
+        s['selected_unit_id']=8
+        first=unit_candidates(s,rules=rules())['unload']
+        s['units'][0].update(x=10,y=8)
+        self.assertEqual(unit_candidates(s,rules=rules())['unload'],first)
+        s['units'][1]['owner']=2
+        with self.assertRaises(PolicyError):unit_candidates(s,rules=rules())
+
+    def test_unload_canonical_validation_rejects_altered_key_cargo_and_stale_actor(self):
+        s=fixture(2);action=unit_candidates(s,rules=rules())['unload']
+        for mutate in (lambda a:a['parameters'].update(key='KeyL'),
+                       lambda a:a['parameters'].update(cargo_units=[9]),
+                       lambda a:a['parameters']['transport_specification'].update(transport_capacity=8)):
+            tampered=copy.deepcopy(action);mutate(tampered)
+            with self.assertRaises(PolicyError):validate_action(tampered,s,rules())
+        for mutate in (lambda state:state['evidence'].update(save_sha256='b'*64),
+                       lambda state:state['units'][0].update(x=10),
+                       lambda state:state.update(selected_unit_id=None)):
+            fresh=copy.deepcopy(s);mutate(fresh)
+            with self.assertRaises(PolicyError):validate_action(action,fresh,rules())
+
     def test_worker_F_not_mislabeled_fortify(self):
         self.assertNotIn('fortify',unit_candidates(fixture(),rules=rules()))
         self.assertEqual(unit_candidates(fixture(1),rules=rules())['fortify']['parameters']['key'],'KeyF')

@@ -146,9 +146,9 @@ def _native_map_kind(rows, observation, state):
     status=[r for r in rows if r['bounds'][0]>=466 and 175<=r['center'][1]<=246]
     people=[r for r in status if re.fullmatch(r'[0-9,]+\s+people',r['normal'])]
     years=[r for r in status if re.fullmatch(r'\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',r['normal'])]
-    # Original narrow status-font 1 is observed as I/l. This is only a pane
+    # Original narrow status-font 1 is observed as I/l and 5 as E. This is only a pane
     # layout marker, never an OCR-derived treasury value; economy comes from SAV.
-    gold=[r for r in status if re.fullmatch(r'[0-9il,]{1,16}\s+gold(?:\s+[0-9.]+)?',r['normal'])]
+    gold=[r for r in status if re.fullmatch(r'[0-9ile,]{1,16}\s+gold(?:\s+[0-9.]+)?',r['normal'])]
     if len(people)!=1 or len(years)!=1 or len(gold)!=1:
         return None, 'Native population, year and treasury status markers are incomplete'
     if any(r['confidence']<.8 for r in map_titles+worlds+people+years+gold):
@@ -327,9 +327,33 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         'luxury_rate':r'select new luxury rate',
         'revolution_choice':r'revolution',
         'revolution_offer':r'civ rules: governments',
-        'city_locator':r'where in the heck is',
+        'city_locator':r'where in the (?:heck|beck) is',
     }
     matches=[(kind,r) for kind,p in patterns.items() for r in single_title(p)]
+    # The original selected-font research screenshot reads the @RESEARCH
+    # heading as "Whait ... porsue?". These two measured glyph variants do not
+    # authorize a list by themselves: exact advance peers and all three native
+    # controls must independently corroborate the research dialog. Keep the raw
+    # observed heading and let the ordinary option validation run below.
+    if not matches and isinstance(rules,dict):
+        advance_names={_normal(r['name']) for r in rules.get('advances',[])
+                       if isinstance(r,dict) and isinstance(r.get('name'),str)}
+        approximate=[]
+        for title in rows:
+            if title['confidence']<.8 or not re.fullmatch(r'wha(?:t|it) discovery shall our [a-z ]{2,40} p[uo]rsue',title['normal']):
+                continue
+            body,controls,_=body_rows(title,{'ok','help','goal','cancel'},300)
+            corroborated=(len(controls)==3 and {r['normal'] for r in controls}=={'help','goal','ok'}
+                          and all(r['confidence']>=.8 for r in controls)
+                          and sum(r['normal'] in advance_names and r['confidence']>=.8 for r in body)>=2)
+            if corroborated:approximate.append(title)
+        if len(approximate)==1:
+            title=approximate[0]
+            matches=[('research_choice',title)]
+            result['title_recovery']={'source':'Original RESEARCH title with measured Whait/porsue glyph variants, native controls and exact peer advances',
+                                      'ocr_text':title['text'],'source_line':title['source_line']}
+        elif len(approximate)>1:
+            return unknown('Multiple corroborated research headings are ambiguous','research_choice')
     # Match only the original production-title template, and only against city
     # names already observed by the caller. Corrupted title spelling alone is
     # insufficient: exact rule names, paired stat rows and native Auto/Help/OK
@@ -518,7 +542,9 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         if event['supported']:
             result['resource_tag']=event['resource_tag']
             result['evidence']={**result['evidence'],**event['evidence']}
-            return finish('information',event['title'],event['options'],event['buttons'],
+            if 'native_rejection' in event:
+                result['native_rejection']=event['native_rejection']
+            return finish(event['kind'],event['title'],event['options'],event['buttons'],
                           mechanical='acknowledge_information',reason=event['reason'])
         if any(r['normal'] in set(EVENT_TITLES.values()) for r in rows):
             return unknown(event['reason'],'information')

@@ -64,11 +64,16 @@ class UI:
         point = find_text(observation, text, exact=exact)
         receipts = self.game.click(*point)
         time.sleep(.2)
+        from .cursor import move_cursor, CursorError
+        try:
+            parking = move_cursor(self.game,620,410)
+        except CursorError as error:
+            parking = {'issued':False,'error':str(error)}
         selected = self.observe()
         if confirm:
             receipts += self.key('Enter')
         return {'target': text, 'point': point, 'before': observation['sha256'],
-                'selected_frame': selected['sha256'], 'inputs': receipts}
+                'selected_frame': selected['sha256'], 'inputs': receipts, 'pointer_park':parking}
 
     def save_native(self, name):
         """Write through the original Save dialog, then read the resulting file."""

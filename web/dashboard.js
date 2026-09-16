@@ -50,15 +50,16 @@
     const selectedIntent = text(d.selected_intent || graph.selected_intent, 80);
     const root = groups.find(g=>g.name===rootName);
     const disagreement = Boolean(root && selectedIntent && root.choice!==selectedIntent);
-    const rawReceipt = d.receipt;
-    const receipt = ['pending','accepted','refused'].includes(rawReceipt) ? rawReceipt : null;
+    const planning = d.stage === 'planning' && d.executes_input === false;
+    const rawReceipt = planning ? null : d.receipt;
+    const receipt = ['pending','dispatched','accepted','refused'].includes(rawReceipt) ? rawReceipt : null;
     return {
       status: STATUSES.has(snapshot.status) ? snapshot.status : 'setup', mode: snapshot.mode === 'replay' ? 'replay' : 'live',
       civilization: text(snapshot.civilization,50), turn: number(snapshot.turn), year: text(snapshot.year,30), message: text(snapshot.message,190),
       settings: Array.isArray(snapshot.settings) ? snapshot.settings.filter(obj).slice(0,6).map(s=>({label:text(s.label,30),value:text(s.value,60)})).filter(s=>s.label&&s.value) : [],
       empire: {cities:number(e.cities),population:number(e.population),treasury:number(e.treasury),net_income:number(e.net_income),science:number(e.science),research:text(e.research,70),research_turns:number(e.research_turns)},
       decision: {id:text(d.id,30),model:/^jev[a-zA-Z0-9._-]*$/.test(d.model) ? d.model : '',latency_ms:nonnegative(d.latency_ms ?? metadata.latency_ms) ? (d.latency_ms ?? metadata.latency_ms) : null,observed_turn:number(d.observed_turn),observed_revision:text(d.observed_revision,40),
-        groups: invalid || pathInvalid || disagreement ? [] : groups,invalid:invalid||pathInvalid||disagreement,rootName,childName,selectedIntent,action_label:text(d.action_label,220),receipt,
+        stage:planning?'planning':'command',groups: invalid || pathInvalid || disagreement ? [] : groups,invalid:invalid||pathInvalid||disagreement,rootName,childName,selectedIntent,action_label:text(d.action_label,220),receipt,
         input_tokens:nonnegative(d.input_tokens ?? metadata.input_tokens_total) ? (d.input_tokens ?? metadata.input_tokens_total) : null},
       chronicle: Array.isArray(snapshot.chronicle) ? snapshot.chronicle.filter(obj).slice(-30).map((event,i)=>({id:text(event.id,40)||String(i),turn:number(event.turn),year:text(event.year,30),label:text(event.label,180),kind:text(event.kind,40)})).filter(event=>event.label) : [],
       playback_speed: finite(snapshot.playback_speed) && snapshot.playback_speed>0 ? snapshot.playback_speed : null,
@@ -80,7 +81,7 @@
     const plans=shown.map((g,i)=>{
       const limit=i===0?16:count===3?8:12,visible=Math.min(g.options.length,limit);
       const columns=i===0?(count===1?1:visible>(count===3?8:12)?2:1):(visible>4?2:1);
-      return {group:g,role:i===0?'COMMAND CHOICE':g===root?'ROUTING CHOICE':'COMPANION · NOT DISPATCHED',visible,columns,rows:Math.ceil(visible/columns)};
+      return {group:g,role:i===0?(decision.stage==='planning'?'OBJECTIVE CHOICE':'COMMAND CHOICE'):g===root?'ROUTING CHOICE':'COMPANION · NOT DISPATCHED',visible,columns,rows:Math.ceil(visible/columns)};
     });
     const rowHeight=Math.min(43,Math.max(24,Math.floor((556-40*count-10*(count-1))/plans.reduce((n,p)=>n+p.rows,0))));
     let y=286;
@@ -125,7 +126,7 @@
   function vectorName(name){return ({unit_action:'Unit orders',dialog_action:'Dialog choices',empire_strategy:'Empire strategy',intent:'Strategic direction'})[name]||name.replace(/^action_/, '').replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());}
   function paintVector(ctx,plan){
     const {group,role,y,columns,visible,rows,rowHeight}=plan;
-    const primary=role==='COMMAND CHOICE',color=primary?C.teal:'#8c6939';
+    const primary=['COMMAND CHOICE','OBJECTIVE CHOICE'].includes(role),color=primary?C.teal:'#8c6939';
     write(ctx,clipped(ctx,vectorName(group.name),325,17,'serif'),1208,y,17,C.ink,'serif');
     write(ctx,role,1864,y+3,10,primary?C.teal:'#927952','mono','normal','right');
     const columnWidth=columns===1?656:319,gap=18;
@@ -194,9 +195,9 @@
       if(s.settings.length){write(ctx,'THIS GAME',1208,663,10,'#927952','mono');s.settings.slice(0,4).forEach((setting,i)=>{write(ctx,clipped(ctx,setting.label,180,14),1208,690+i*30,14,'#8a7e68');write(ctx,clipped(ctx,setting.value,440,15),1864,688+i*30,15,C.ink,'sans','normal','right');});}
     }
     rect(ctx,1184,890,704,75,'#12363e',C.line,3);
-    const receiptText={pending:'AWAITING GAME RECEIPT',accepted:'ORDER ACCEPTED',refused:'ORDER NOT ACCEPTED'};
+    const receiptText={pending:'AWAITING INPUT DISPATCH',dispatched:'INPUT DISPATCHED',accepted:'ORDER ACCEPTED',refused:'ORDER NOT ACCEPTED'};
     const receiptColor=s.decision.receipt==='refused'?C.red:C.gold;
-    write(ctx,receiptText[s.decision.receipt]||'LATEST MODEL ORDER',1206,901,10,receiptColor,'mono');
+    write(ctx,s.decision.stage==='planning'?'JEV’S CURRENT OBJECTIVE':(receiptText[s.decision.receipt]||'LATEST MODEL ORDER'),1206,901,10,receiptColor,'mono');
     wrapped(ctx,s.decision.action_label||'Waiting for an order',651,2,17).forEach((line,i)=>write(ctx,line,1206,921+i*21,17,C.ivory));
     rect(ctx,1184,977,704,53,'#102a34',C.line,3);
     write(ctx,'CHRONICLE',1206,985,9,C.mutedGold,'mono');

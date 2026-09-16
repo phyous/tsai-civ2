@@ -76,3 +76,14 @@ test('routing and companion vectors stay separate and in the panel bounds',()=>{
   for(const panel of layout.panels)assert.ok(panel.y+panel.height<=878);
   assert.deepEqual(vectorLayout(normalize({}).decision),{panels:[],additional:[]});
 });
+
+test('planning probabilities choose an objective without claiming a game command',()=>{
+  const s=normalize({decision:{stage:'planning',executes_input:false,receipt:'accepted',selected_question:'task_choice',answers:{task_choice:answer({survey:.8,hold:.2})}}});
+  assert.equal(s.decision.stage,'planning');assert.equal(s.decision.receipt,null);
+  assert.equal(vectorLayout(s.decision).panels[0].role,'OBJECTIVE CHOICE');
+  const command=normalize({decision:{stage:'planning',executes_input:true}});
+  assert.equal(command.decision.stage,'command');
+  const dispatched=normalize({decision:{stage:'command',receipt:'dispatched'}});
+  assert.equal(dispatched.decision.receipt,'dispatched');
+  assert.notEqual(dispatched.decision.receipt,'accepted');
+});

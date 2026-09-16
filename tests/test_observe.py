@@ -16,6 +16,17 @@ def row(text, x=300, y=330, width=40, height=14):
                 width=width/640, height=height/480)
 
 
+def status_pair():
+    """Synthetic TEST crop-relative boxes, approximately native font spacing."""
+    return [dict(text='End of Turn', confidence=1., x=10/174, y=7/40, width=64/174, height=10/40),
+            dict(text='(Press ENTER)', confidence=1., x=12/174, y=20/40, width=78/174, height=10/40)]
+
+
+def broken_status():
+    return [row('Endofhum', x=476, y=447, width=64, height=10),
+            row('(Press KHEERO', x=478, y=460, width=78, height=10)]
+
+
 class ObserveTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -122,8 +133,100 @@ class ObserveTests(unittest.TestCase):
             self.assertEqual(result['text'], 'Native')
             self.assertEqual(result['ocr']['fallback_errors'][0]['error'], 'ValueError')
 
+    def test_status_pair_maps_crop_boxes_and_replaces_only_corroborated_native_rows(self):
+        result, calls = self.recognize(broken_status(), [], status_pair())
+        self.assertEqual(calls, 3)
+        self.assertEqual([line['text'] for line in result['lines']], ['End of Turn', '(Press ENTER)'])
+        self.assertEqual(result['lines'][0]['bounds'], [476, 447, 64, 10])
+        self.assertEqual(result['lines'][1]['center'], [517, 465])
+        self.assertAlmostEqual(result['lines'][0]['x'], 476/640)
+        proof = result['lines'][0]['provenance']
+        self.assertEqual(proof[0]['text'], 'Endofhum')
+        self.assertEqual(proof[1]['crop'], [466, 440, 640, 480])
+        self.assertEqual(proof[1]['normalized_crop_bounds'], [10/174, 7/40, 64/174, 10/40])
+        self.assertEqual(result['sha256'], hashlib.sha256(self.original).hexdigest())
+
+    def test_status_recovery_requires_both_exact_phrases_and_normal_order(self):
+        good = status_pair()
+        variants = [good[:1], [dict(good[0]), dict(good[1], text='(Press SPACE)')],
+                    [dict(good[0], y=.7), dict(good[1], y=.1)],
+                    [dict(good[0]), dict(good[1], confidence=.4)],
+                    [*good, dict(good[0], text='Unrelated text')]]
+        for masked in variants:
+            with self.subTest(masked=masked):
+                result, _ = self.recognize(broken_status(), [], masked)
+                self.assertEqual([line['text'] for line in result['lines']], ['Endofhum', '(Press KHEERO'])
+
+    def test_status_merge_is_atomic_when_second_line_conflicts(self):
+        native = broken_status(); native[1]['text'] = 'No orders'
+        result, _ = self.recognize(native, [], status_pair())
+        self.assertEqual([line['text'] for line in result['lines']], ['Endofhum', 'No orders'])
+        self.assertEqual(len(result['ocr']['conflicts']), 1)
+
+    def test_status_avoids_duplicate_displaced_near_rows(self):
+        native = broken_status(); native[0]['y'] = 435/480
+        # This near row crosses outside the status crop but still overlaps its
+        # recovered phrase's text bounds: uncertainty must reject the pair.
+        native[0]['height'] = 20/480
+        result, _ = self.recognize(native, [], status_pair())
+        self.assertEqual(len(result['lines']), 2)
+        self.assertNotIn('End of Turn', result['text'])
+
+    def test_missing_status_can_be_added_only_with_verified_roman_title_and_no_moving_marker(self):
+        roman = row('Roman Map', x=190, y=45, width=80)
+        result, calls = self.recognize([roman], [], status_pair())
+        self.assertEqual(calls, 3)
+        self.assertEqual(result['lines'][-1]['center'], [517, 465])
+        for native in ([row('Other Map', x=190, y=45, width=80)],
+                       [roman, row('Moving Units', x=510, y=252, width=100)],
+                       [row('Roman Map', x=190, y=145, width=80)]):
+            result, calls = self.recognize(native, [])
+            self.assertEqual(calls, 2)
+            self.assertNotIn('End of Turn', result['text'])
+
+    def test_correct_native_pair_skips_extra_pass_and_wrong_dimensions_never_crop(self):
+        native = broken_status(); native[0]['text'] = 'End of Turn'; native[1]['text'] = '(Press ENTER)'
+        result, calls = self.recognize(native, [])
+        self.assertEqual(calls, 2)
+        Image.new('RGB', (800, 600), 'gray').save(self.path)
+        result, calls = self.recognize(broken_status(), [])
+        self.assertEqual(calls, 2)
+
+    def test_status_analysis_uses_only_white_glyph_roi_and_leaves_source_intact(self):
+        with Image.open(self.path) as original:
+            im = original.copy()
+        for x in range(476, 480):
+            for y in range(447, 451): im.putpixel((x, y), (255, 255, 255))
+        im.save(self.path); before = self.path.read_bytes()
+        def ocr(executable, path):
+            if path == self.path: return broken_status()
+            if path.name == 'nearest_2x.png': return []
+            with Image.open(path) as transformed:
+                self.assertEqual(transformed.size, (696, 160))
+                self.assertEqual(transformed.mode, 'L')
+                self.assertEqual(transformed.getpixel((48, 36)), 0)
+                self.assertEqual(transformed.getpixel((400, 36)), 255)
+            return status_pair()
+        with patch.object(observe, '_run_ocr', side_effect=ocr):
+            result = observe.recognize(self.path)
+        self.assertIn('End of Turn', result['text'])
+        self.assertEqual(self.path.read_bytes(), before)
+
 
 class PrivateCalibrationTests(unittest.TestCase):
+    def test_optional_actual_end_turn_status_recovery(self):
+        root = Path(__file__).resolve().parents[1]
+        path = root/'runs/attempt-002/screens/ui-0000037.png'
+        if not path.exists() or not (root/'.runtime/ocr').exists():
+            self.skipTest('Private original end-turn screenshot/OCR unavailable')
+        before = path.read_bytes(); result = observe.recognize(path)
+        self.assertEqual(len([row for row in result['lines'] if row['text'] == 'End of Turn']), 1)
+        self.assertEqual(len([row for row in result['lines'] if row['text'] == '(Press ENTER)']), 1)
+        self.assertLessEqual(abs(observe.find_text(result, 'End of Turn', exact=True)[1] - 452), 1)
+        self.assertEqual(observe.find_text(result, '(Press ENTER)', exact=True), [517, 465])
+        self.assertEqual(result['sha256'], hashlib.sha256(before).hexdigest())
+        self.assertEqual(path.read_bytes(), before)
+
     def test_optional_four_original_dialog_controls(self):
         root = Path(__file__).resolve().parents[1]
         cases = [

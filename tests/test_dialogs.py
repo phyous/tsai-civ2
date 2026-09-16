@@ -68,6 +68,39 @@ ROMAN_STATE=dict(player=dict(id=1,tribe_id=0,tribe='Romans'),cities=[],known_cit
 
 
 class DialogTests(unittest.TestCase):
+    def test_measured_research_heading_variants_require_native_controls_and_exact_peers(self):
+        rrules={'advances':[{'id':0,'name':'Alphabet'},{'id':1,'name':'Currency'},{'id':2,'name':'Pottery'}]}
+        o=observation(row('Whait discovery shall our wise men porsue?',y=80,w=320),
+            row('Aphabet',x=250,y=120,w=70),row('Currency',x=250,y=145,w=70),row('Pottery',x=250,y=170,w=70),
+            row('Help',x=220,y=260,w=30),row('Goal',x=320,y=260,w=30),row('OK',x=420,y=260,w=24))
+        r=classify_dialog(o,rules=rrules)
+        self.assertTrue(r['supported'],r);self.assertEqual(r['kind'],'research_choice')
+        self.assertEqual(r['title'],o['lines'][0]['text'])
+        self.assertEqual(r['title_recovery']['ocr_text'],o['lines'][0]['text'])
+        self.assertEqual([x['text'] for x in r['options']],['Alphabet','Currency','Pottery'])
+        self.assertEqual(r['options'][0]['center'],[250,120])
+        self.assertEqual(r['options'][0]['ocr_text'],'Aphabet')
+        for mutate in (lambda x:x['lines'].pop(5),lambda x:x['lines'].pop(3),
+                       lambda x:x['lines'][0].update(confidence=.5),
+                       lambda x:x['lines'][0].update(text='Whait discovery shall our wise men purchase?'),
+                       lambda x:x['lines'].insert(4,row('Unrecognized advance',x=250,y=195,w=140)),
+                       lambda x:x['lines'].append(row('Cancel',x=480,y=260,w=40))):
+            changed=copy.deepcopy(o);mutate(changed)
+            with self.subTest(changed=changed):self.assertFalse(classify_dialog(changed,rules=rrules)['supported'])
+
+    def test_optional_actual_research_title_and_selected_font_recovery(self):
+        from civ2.observe import recognize
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        root=Path(__file__).resolve().parents[1];path=root/'runs/attempt-002/screens/ui-0000082.png'
+        if not path.exists() or not (root/'.runtime/ocr').exists():self.skipTest('private original research image unavailable')
+        o=recognize(path);r=classify_dialog(o,rules=parse_rules(original_rules()))
+        self.assertTrue(r['supported'],r);self.assertEqual(r['kind'],'research_choice')
+        self.assertEqual([x['text'] for x in r['options']],['Alphabet','Ceremonial Burial','Currency','Horseback Riding','Masonry','Pottery','Warrior Code'])
+        self.assertEqual(r['options'][0]['center'],[279,109])
+        self.assertEqual(r['title_recovery']['ocr_text'],'Whait discovery shall our wise men porsue?')
+        self.assertTrue(r['requires_model']);self.assertIsNone(r['mechanical_action'])
+
     def test_research_name_recovery_is_unique_bounded_and_keeps_observed_center(self):
         rrules={'advances':[{'id':0,'name':'Alphabet'},{'id':1,'name':'Currency'},{'id':2,'name':'Pottery'}]}
         o=observation(row('What discovery shall our wise men pursue?',y=80,w=320),

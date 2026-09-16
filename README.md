@@ -53,6 +53,21 @@ Install `ffmpeg` for continuous video capture.
 The dense spectator panel can show 16 command probabilities and separate
 independent Jev vectors in the same live/recording layout.
 
+## Optional observed-target planning
+
+The default controller asks Jev for each current unit command. The experimental
+Python option `Session(..., planning=True)` first lets Jev choose a persistent
+task and observed target, then makes a separate call for the next unit command.
+Every unit order is still independently model-selected from the same canonical
+actions. Planning executes no input, forces no path and uses no hidden map data.
+
+Task choices and command choices have distinct evidence events, probability
+displays and counts. Plans are reviewed after observed completion, invalidation
+or bounded expiry. The CLI remains in baseline mode; see
+[planning setup, comparison and limitations](docs/planning.md) for the Python
+entry point and parallel-runtime requirements. Neither mode has a verified
+complete-game victory yet.
+
 ## Acknowledgments
 
 TypeSafe's [System One / Jev demonstration](https://typesafe.ai/blog/introducing-system-one-models-and-jev)

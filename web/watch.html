@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jev / Civilization II — Live theater</title>
+<style>
+  :root { color-scheme: dark; background: #091b28; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100dvh; display: grid; place-items: center; overflow: hidden; }
+  img { width: 100%; height: 100%; object-fit: contain; }
+  #status { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); margin: 0; padding: .6rem 1rem; background: #102e3a; color: #f5e9ce; font: 14px system-ui; border: 1px solid #bda26c; }
+  [hidden] { display: none !important; }
+</style>
+<img id="frame" alt="Live original Civilization II game and actual Jev action probabilities">
+<p id="status" role="status">Connecting to the live game…</p>
+<script>
+  // Read-only viewer: no iframe, WebSocket, controls or game inputs. The active
+  // runtime produces the same complete composition used by the recorder.
+  const frame = document.getElementById('frame');
+  const status = document.getElementById('status');
+  async function refresh() {
+    if (!document.hidden) {
+      const next = new Image();
+      await new Promise(resolve => {
+        next.onload = () => { frame.src = next.src; status.hidden = true; resolve(); };
+        next.onerror = () => { status.textContent = 'Live capture unavailable · reconnecting'; status.hidden = false; resolve(); };
+        next.src = '/bridge/capture/dashboard?t=' + Date.now();
+      });
+    }
+    setTimeout(refresh, 1000);
+  }
+  refresh();
+</script>
+</html>

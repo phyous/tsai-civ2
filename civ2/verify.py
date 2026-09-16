@@ -35,6 +35,7 @@ KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'navigate_selected_city', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
+                'model_plan', 'plan_status',
                 *DISPATCHES}
 
 
@@ -198,9 +199,16 @@ def _inputs(value):
                      and type(row.get('button')) is int and row['button'] in (0, 1, 2),
                      'Mouse receipt is not an ordinary original-canvas event')
         elif kind == 'relativeMouse':
+            # Retain earlier SDL receipts and accept only the current bridge's
+            # original DOSBox relative host-input handler (not a guest write).
+            backend_ok = (
+                row.get('via') == 'SDL_SendMouseMotion' and row.get('queued') is True
+                or row.get('via') == 'DOSBox Mouse_CursorMoved'
+                and row.get('dispatched') is True and row.get('emulate') is True
+            )
             _require(all(type(row.get(k)) is int and -32 <= row[k] <= 32 for k in ('dx', 'dy'))
-                     and (row['dx'] or row['dy']) and row.get('queued') is True
-                     and row.get('via') == 'SDL_SendMouseMotion', 'Relative mouse receipt is invalid')
+                     and (row['dx'] or row['dy']) and backend_ok,
+                     'Relative mouse receipt is invalid')
         else:
             raise VerificationError('Dispatch contains an unsupported input operation')
         result.append(row)
@@ -246,7 +254,7 @@ def _action_binding(action, request, question, saves):
         selected = model.get('selected_unit', {})
         _require(isinstance(selected, dict) and all(selected.get(k) == actor[k] for k in fields),
                  'Unit actor differs from the model observation')
-        keys = {'skip': 'Space', 'fortify': 'KeyF', 'sentry': 'KeyS', 'settle': 'KeyB',
+        keys = {'skip': 'Space', 'fortify': 'KeyF', 'sentry': 'KeyS', 'settle': 'KeyB', 'unload': 'KeyU',
                 'road': 'KeyR', 'railroad': 'KeyR', 'irrigate': 'KeyI', 'farmland': 'KeyI', 'mine': 'KeyM'}
         moves = {'n': (0, -2, 'Numpad8'), 'ne': (1, -1, 'Numpad9'), 'e': (2, 0, 'Numpad6'),
                  'se': (1, 1, 'Numpad3'), 's': (0, 2, 'Numpad2'), 'sw': (-1, 1, 'Numpad1'),
@@ -262,6 +270,21 @@ def _action_binding(action, request, question, saves):
         else:
             key = keys.get(identifier)
         _require(key is not None and params.get('key') == key, 'Unit action is outside the implemented ordinary key mapping')
+        if identifier == 'unload':
+            # Standard 1.06 @UNITS rows in original RULES.TXT: Trireme,
+            # Caravel, Galleon, Transport. Numeric rules avoid requiring private
+            # game assets just to verify retained standard-rules evidence.
+            capacity = {32:2, 33:3, 34:4, 43:8}.get(actor['type_id'])
+            expected = {'id':actor['type_id'], 'domain':2, 'role':4,
+                        'transport_capacity':capacity}
+            declared = params.get('transport_specification')
+            specification = selected.get('specification')
+            _require(capacity is not None and action['kind'] == 'unload'
+                     and isinstance(declared,dict) and set(declared) == set(expected)
+                     and all(type(declared.get(k)) is int and declared[k] == v for k,v in expected.items())
+                     and isinstance(specification,dict)
+                     and all(type(specification.get(k)) is int and specification[k] == v for k,v in expected.items()),
+                     'Unload action differs from its original naval transport specification')
     elif question == 'dialog_action':
         point = params.get('center'); index = params.get('option_index')
         _require(action['kind'] == 'dialog_choice' and _sha(pre.get('image_sha256'))
@@ -323,6 +346,55 @@ def _dispatch(payload, action, question, files):
             _require(all([r['x'], r['y']] == params['center'] for r in mouse),
                      'Direct mouse receipt differs from the selected option coordinates')
     return len(inputs)
+
+
+def _plan_binding(task, request, saves):
+    _require(isinstance(task, dict) and set(task) ==
+             {'id','task','label','actor','preconditions','target'}, 'Planning candidate schema is invalid')
+    pre, actor, target = task['preconditions'], task['actor'], task['target']
+    _require(all(isinstance(v, dict) for v in (pre, actor, target)), 'Planning candidate binding is malformed')
+    _require(pre.get('save_sha256') in saves, 'Plan does not reference an earlier native save')
+    state = saves[pre['save_sha256']]
+    model = request.get('state', {})
+    _require(model.get('turn') == pre.get('turn') == state['turn'], 'Planning request and native save turns differ')
+    units = [u for u in state['units'] if u['id'] == actor.get('id')]
+    fields = ('id','owner','type_id','x','y','home_city_id','veteran')
+    _require(set(actor) == set(fields) and len(units) == 1 and all(actor.get(k) == units[0].get(k) for k in fields)
+             and actor['id'] == pre.get('selected_unit_id') == state['selected_unit_id'],
+             'Planning actor differs from the selected owned unit in its native save')
+    selected = model.get('selected_unit', {})
+    _require(all(selected.get(k) == actor[k] for k in fields), 'Planning actor differs from the model observation')
+    declared = model.get('planning', {}).get('targets', {}).get(task['id'])
+    _require(declared == {'task':task['task'],'target':target}, 'Plan target differs from the actual model request')
+    name = task['task']
+    _require(name in ('hold','survey','settle','road','irrigate','mine','defend','engage'), 'Unknown planning task')
+    if name == 'hold':
+        _require(target == {'turn':state['turn']+1}, 'Hold plan has an invalid review turn')
+        return
+    target_fields = ({'x','y','unknown_neighbors'} if name == 'survey' else
+                     {'id','x','y'} if name == 'defend' else
+                     {'id','owner','type_id','x','y'} if name == 'engage' else {'x','y'})
+    _require(set(target) == target_fields, 'Plan target contains unsupported fields')
+    point = target.get('x'), target.get('y')
+    known = {(t['x'],t['y']) for t in state['map']['tiles']}
+    _require(point in known, 'Planning target is outside the explored native observation')
+    if name == 'defend':
+        _require(any(all(target.get(k) == c[k] for k in ('id','x','y')) for c in state['cities']),
+                 'Defend plan does not target an owned city')
+    if name == 'engage':
+        _require(any(all(target.get(k) == u[k] for k in ('id','owner','type_id','x','y')) for u in state['visible_units']),
+                 'Engage plan does not target a currently visible native unit')
+    if name == 'survey':
+        neighbors = target.get('unknown_neighbors')
+        _require(isinstance(neighbors,list) and neighbors, 'Survey plan has no observed frontier boundary')
+        width,height = state['map']['coordinate_width'],state['map']['height']
+        legal = set()
+        for dx,dy in ((0,-2),(1,-1),(2,0),(1,1),(0,2),(-1,1),(-2,0),(-1,-1)):
+            x,y = point[0]+dx,point[1]+dy
+            if state['settings']['round_world']:x %= width
+            if 0 <= x < width and 0 <= y < height and (x,y) not in known:legal.add((x,y))
+        _require(all(isinstance(p,dict) and set(p)=={'x','y'} and (p['x'],p['y']) in legal for p in neighbors),
+                 'Survey plan introduces terrain facts beyond its known frontier')
 
 
 def _recording(files, payload, ffprobe):
@@ -424,7 +496,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     """Verify retained evidence, never infer victory or claim command acceptance."""
     files = Files(directory)
     events, chain = _journal(files)
-    saves, started, decisions, dispatched = {}, {}, {}, set()
+    saves, started, stages, decisions, plans, plan_statuses, dispatched = {}, {}, {}, {}, {}, {}, set()
     inputs, forced, forced_pending, recording = 0, 0, None, None
     stops, recoveries, unknown = [], [], Counter()
     checks, initial_state = None, None
@@ -465,9 +537,51 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             except (ValueError, RuntimeError, KeyError, TypeError):
                 raise VerificationError('Saved model request is invalid') from None
             started[identifier] = request
+            stage = payload.get('stage','command')
+            _require(stage in ('command','planning'), 'Inference stage is invalid')
+            stages[identifier] = stage
+        elif kind == 'model_plan':
+            identifier = payload.get('decision')
+            _require(identifier in started and identifier not in plans and identifier not in decisions
+                     and stages[identifier] == 'planning' and payload.get('executes_input') is False
+                     and payload.get('selected_question') == 'task_choice'
+                     and events[0]['payload'].get('planning_enabled') is True,
+                     'Planning event is not a declared separate non-dispatch inference')
+            request = started[identifier]; response = files.json(payload['response']['path'])
+            try:
+                clean = validate_response(response, request['questions'])
+            except (ValueError,RuntimeError,KeyError,TypeError):
+                raise VerificationError('Planning response fails strict probability/schema validation') from None
+            answer = clean['answers'].get('task_choice', {})
+            task = payload.get('task')
+            _require(answer.get('type') == 'choice' and isinstance(task,dict)
+                     and task.get('id') == answer.get('choice')
+                     and task.get('label') == request['questions']['task_choice']['criteria'][answer['choice']],
+                     'Plan differs from the actual selected model task')
+            _plan_binding(task, request, saves)
+            plans[identifier] = {'task':task,'response':response}
+        elif kind == 'plan_status':
+            _require(payload.get('executes_input') is False, 'Plan status cannot authorize a game input')
+            if payload.get('status') == 'unavailable':
+                _require('plan' not in payload, 'Unavailable plan status contains a plan')
+                continue
+            identifier = payload.get('planning_decision'); plan = payload.get('plan')
+            _require(identifier in plans and isinstance(plan,dict)
+                     and plan.get('decision_id') == identifier and plan.get('candidate') == plans[identifier]['task']
+                     and plan.get('status') in ('active','complete','invalidated','expired')
+                     and plan.get('current_save_sha256') in saves,
+                     'Plan status does not reference its actual prior task and native checkpoint')
+            if plan['status'] == 'active':
+                state = saves[plan['current_save_sha256']]
+                _require(isinstance(plan.get('actor'),dict)
+                         and set(plan['actor']) == set(plan['candidate']['actor'])
+                         and any(all(u.get(k)==v for k,v in plan['actor'].items()) for u in state['units']),
+                         'Active plan actor differs from its current native checkpoint')
+            plan_statuses[identifier] = plan
         elif kind == 'model_decision':
             identifier, question = payload.get('decision'), payload.get('selected_question')
-            _require(identifier in started and identifier not in decisions, 'Model decision has no unique prior inference')
+            _require(identifier in started and identifier not in decisions and identifier not in plans
+                     and stages[identifier] == 'command', 'Model decision has no unique prior command inference')
             request = started[identifier]; response = files.json(payload['response']['path'])
             try:
                 clean = validate_response(response, request['questions'])
@@ -480,6 +594,17 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      and action.get('label') == request['questions'][question]['criteria'][choice],
                      'Selected action does not match the actual model choice and criterion')
             _action_binding(action, request, question, saves)
+            context = request.get('state', {}).get('persistent_plan')
+            if context is not None:
+                plan_id = context.get('planning_decision')
+                _require(question == 'unit_action' and plan_id in plan_statuses,
+                         'Command planning context has no prior observed plan status')
+                plan = plan_statuses[plan_id]
+                _require(plan['status'] == context.get('status') == 'active'
+                         and all(context.get(k) == plan['candidate'][k] for k in ('task','target','label'))
+                         and context.get('actor') == plan['actor']
+                         and plan['current_save_sha256'] == action['preconditions']['save_sha256'],
+                         'Command planning context differs from the current observed model plan')
             decisions[identifier] = {'action': action, 'question': question, 'response': response}
         elif kind == 'forced_empire_command':
             _require(forced_pending is None and payload.get('action', {}).get('id') == 'finish_turn',
@@ -521,10 +646,14 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             recording = _recording(files, payload, ffprobe)
         elif kind == 'session_stopped':
             stops.append(payload)
+        elif kind == 'batch_observed_effect':
+            identifiers = payload.get('decisions')
+            _require(isinstance(identifiers,list) and all(i in decisions for i in identifiers),
+                     'Native effect batch includes a non-command planning decision')
     _require(checks is not None, 'Initial native setup evidence is absent')
     outcome = _terminal(files, terminal_review, chain)
     complete = len(stops) == 1 and recording is not None and not unknown
-    responses = [d['response'] for d in decisions.values()]
+    responses = [d['response'] for group in (decisions,plans) for d in group.values()]
     numeric_metadata = ('rejected_response_attempts', 'rejected_input_tokens',
                         'rejected_output_tokens', 'rejected_usage_unavailable_attempts')
     totals = {key: 0 for key in numeric_metadata}
@@ -538,10 +667,13 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     return {'schema_version': 1, 'integrity': 'passed', 'journal': chain,
             'initial_setup': {'checks': checks, 'save_sha256': events[0]['payload']['initial_save']['sha256']},
             'artifacts': {'verified_count': len(files.checked), 'files': sorted(files.checked.values(), key=lambda x: x['path'])},
-            'decisions': {'inferences_started': len(started), 'validated_responses': len(decisions),
+            'decisions': {'inferences_started': len(started), 'validated_responses': len(decisions)+len(plans),
+                          'command_decisions':len(decisions), 'planning_decisions':len(plans),
+                          'planning_dispatches':0,
+                          'planning_note':'Planning choices and observed plan-status changes are context only, not commands or native effects.',
                           'model_dispatches': len(dispatched), 'ordinary_input_events': inputs,
                           'undispatched_decisions': sorted(set(decisions)-dispatched),
-                          'inferences_without_response': sorted(set(started)-set(decisions)),
+                          'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)),
                           'forced_empire_dispatches': forced,
                           'manually_reviewed_keyboard_recoveries': recoveries,
                           'manual_recovery_note': 'These choices required separately logged manual selection review. They are not counted as automatically verified model dispatches or autonomous-run proof.',
@@ -555,8 +687,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                              'pending_forced_command': forced_pending is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] == 'human_reviewed' and len(dispatched) == len(decisions)
-                              and len(started) == len(decisions) and forced_pending is None and not recoveries},
+                              and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
+                           'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
                            'This verifier performs no OCR, live game calls or automatic victory recognition.',
                            'Do not publish original saves or game assets merely because their integrity checks pass.']}
 
