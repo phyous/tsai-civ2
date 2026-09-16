@@ -27,15 +27,17 @@ class VerificationError(ValueError):
 
 SHA = re.compile(r'[0-9a-f]{64}')
 SCREEN_KEYS = {'screen', 'before', 'after', 'dialog', 'typed', 'saved',
-               'selected_frame', 'source_image', 'image_sha256'}
+               'selected_frame', 'source_image', 'image_sha256', 'completion_screen', 'opening', 'verified_image'}
 DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_action',
-              'empire_command_dispatched': 'empire_action'}
+              'empire_command_dispatched': 'empire_action', 'city_control_dispatched':'city_action'}
 KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'screen_observed', 'mechanical_input', 'open_city_control',
                 'navigate_selected_city', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
                 'model_plan', 'plan_status',
+                'forced_city_control', 'city_control_review_completed', 'city_control_closed',
+                'graphics_preferences_configured',
                 *DISPATCHES}
 
 
@@ -230,7 +232,7 @@ def _inputs(value):
     return result
 
 
-def _action_binding(action, request, question, saves):
+def _action_binding(action, request, question, saves, *, forced=False):
     _require(isinstance(action, dict) and set(action) ==
              {'id', 'kind', 'label', 'actor', 'preconditions', 'parameters'}, 'Selected action schema is invalid')
     pre, actor, params = action['preconditions'], action['actor'], action['parameters']
@@ -296,6 +298,8 @@ def _action_binding(action, request, question, saves):
         dialog = model.get('mandatory_dialog', {})
         _require(dialog.get('title') == actor.get('title') and action['label'] in dialog.get('options', []),
                  'Dialog action differs from the model-observed native menu')
+        if actor.get('id') == 'buy_quote':
+            _purchase_quote(dialog.get('quote'))
     elif question == 'empire_action':
         keys = {'finish_turn': ('Enter', []), 'open_tax': ('KeyT', ['ShiftLeft']),
                 'open_research': ('F6', []), 'open_diplomacy': ('F3', []),
@@ -309,6 +313,44 @@ def _action_binding(action, request, question, saves):
         _require(key is not None and (params.get('key'), params.get('modifiers')) == key
                  and pre.get('screen_kind') == 'end_turn' and _sha(pre.get('image_sha256')),
                  'Empire action is outside the observed End of Turn command mapping')
+    elif question == 'city_action':
+        controls = {'change_production':('change','production_choice'),
+                    'open_buy_quote':('buy','buy_quote'), 'exit_city':('exit','original_map')}
+        identifier = action['id']; point = params.get('center')
+        expected = controls.get(identifier)
+        _require(expected is not None and action['kind'] == 'city_control'
+                 and set(actor) == {'kind','id','owner','name','x','y'} and actor['kind'] == 'city'
+                 and all(_int(actor[k]) for k in ('id','owner','x','y')) and isinstance(actor['name'],str)
+                 and any(all(actor.get(k)==c.get(k) for k in ('id','owner','name','x','y')) for c in state['cities']),
+                 'City control actor differs from its owned native city')
+        _require(pre.get('screen_kind') == 'city_screen' and _sha(pre.get('image_sha256'))
+                 and pre.get('width') == 640 and pre.get('height') == 480
+                 and pre.get('year_raw') == state['year_raw']
+                 and isinstance(pre.get('reviewed_action_ids'),list)
+                 and len(set(pre['reviewed_action_ids'])) == len(pre['reviewed_action_ids'])
+                 and set(pre['reviewed_action_ids']) <= {'change_production','open_buy_quote'}
+                 and identifier not in pre['reviewed_action_ids'], 'City control observation binding is invalid')
+        title = pre.get('observed_city_title')
+        match = re.match(r'^City of (.+?),\s*(\d{1,5})\s*(B\.?\s*C\.?|A\.?\s*D\.?)\b',title,re.I) if isinstance(title,str) else None
+        _require(match is not None and ' '.join(match[1].casefold().split()) == ' '.join(actor['name'].casefold().split())
+                 and int(match[2])*(-1 if match[3][0].casefold()=='b' else 1) == state['year_raw'],
+                 'City control title differs from its native city and year')
+        _require(isinstance(point,list) and len(point)==2 and all(_int(v) for v in point)
+                 and point[0]<640 and point[1]<480 and _int(params.get('button_index')) and params['button_index']<64
+                 and isinstance(params.get('observed_text'),str)
+                 and params['observed_text'].strip().casefold() == expected[0]
+                 and params.get('control') == 'button' and params.get('expected_screen') == expected[1]
+                 and params.get('only_open_menu') is (identifier!='exit_city')
+                 and params.get('purchase_authorized') is False
+                 and params.get('confirmation_requires_separate_choice') is (identifier=='open_buy_quote'),
+                 'City control does not match its ordinary button or quote-only semantics')
+        if not forced:
+            review = model.get('city_control_review', {})
+            _require(review.get('actor') == actor and review.get('observed_title') == title
+                     and review.get('year_raw') == pre['year_raw']
+                     and review.get('reviewed_action_ids') == pre['reviewed_action_ids']
+                     and review.get('controls') == request['questions']['city_action']['criteria'],
+                     'City control differs from the actual observed model request')
     else:
         raise VerificationError('Unsupported model dispatch question')
 
@@ -331,10 +373,14 @@ def _dispatch(payload, action, question, files):
         _require(keys == expected and all(r['type'] == 'key' for r in inputs),
                  'Input receipt does not execute exactly the selected key command')
     else:
-        _require(before == action['preconditions']['image_sha256']
-                 and receipt.get('point') == params['center']
-                 and receipt.get('target') == action['label'], 'Dialog receipt differs from its observed selected target')
-        _require(keys in ([], [('Enter', True), ('Enter', False)]), 'Dialog dispatch contains unrelated keys')
+        if question == 'city_action':
+            _require(before == action['preconditions']['image_sha256'] and not keys,
+                     'City control receipt does not match its image or contains unrelated keys')
+        else:
+            _require(before == action['preconditions']['image_sha256']
+                     and receipt.get('point') == params['center']
+                     and receipt.get('target') == action['label'], 'Dialog receipt differs from its observed selected target')
+            _require(keys in ([], [('Enter', True), ('Enter', False)]), 'Dialog dispatch contains unrelated keys')
         mouse = [r for r in inputs if r['type'] == 'mouse' and r['event'] != 'mousemove']
         _require([r['event'] for r in mouse] == ['mousedown', 'mouseup']
                  and all(r['button'] == 0 for r in mouse), 'Dialog dispatch must contain one ordinary left click')
@@ -346,6 +392,67 @@ def _dispatch(payload, action, question, files):
             _require(all([r['x'], r['y']] == params['center'] for r in mouse),
                      'Direct mouse receipt differs from the selected option coordinates')
     return len(inputs)
+
+
+def _city_review_binding(action, reviewed, *, completed=False):
+    actor,pre = action['actor'],action['preconditions']
+    expected = set(pre['reviewed_action_ids']) | ({action['id']} if completed else set())
+    _require(isinstance(reviewed,dict) and set(reviewed)=={'city_id','city_name','year_raw','actions'}
+             and reviewed['city_id']==actor['id'] and reviewed['city_name']==actor['name']
+             and reviewed['year_raw']==pre['year_raw'] and isinstance(reviewed['actions'],list)
+             and len(reviewed['actions'])==len(set(reviewed['actions']))
+             and set(reviewed['actions'])==expected, 'City control review belongs to a different city, year or transaction')
+
+
+def _purchase_quote(quote):
+    _require(isinstance(quote,dict) and isinstance(quote.get('item'),str) and 0<len(quote['item'])<=100
+             and _int(quote.get('cost')) and _int(quote.get('treasury')) and quote['cost']<=quote['treasury']
+             and quote.get('purchase_executed') is False
+             and quote.get('source')=='Original GAME.TXT COMPLETE1 and complete visible quote',
+             'Purchase response lacks its original observed cost/treasury quote')
+
+
+def _graphics_preferences(receipt, files):
+    labels = {'Throne Room','Diplomacy Screen','Animated Heralds',
+              'Civilopedia for Advances','High Council','Wonder Movies'}
+    target = 'Civilopedia for Advances'
+    _require(isinstance(receipt,dict), 'Graphics preference receipt is missing')
+    before,after = receipt.get('checkbox_before'),receipt.get('checkbox_after')
+    _require(isinstance(before,dict) and isinstance(after,dict) and set(before)==set(after)==labels
+             and all(type(v) is bool for values in (before,after) for v in values.values())
+             and after[target] is False and all(before[k]==after[k] for k in labels-{target})
+             and receipt.get('other_checkboxes_unchanged') is True,
+             'Graphics preferences changed more than the single presentation option')
+    for key in ('before','opening','after'):files.screen(receipt.get(key))
+    keys = _inputs(receipt.get('inputs'))
+    _require([(r['type'],r.get('code'),r.get('down')) for r in keys]==[
+        ('key','ControlLeft',True),('key','KeyP',True),('key','KeyP',False),('key','ControlLeft',False),
+        ('key','Enter',True),('key','Enter',False)], 'Graphics preference dialog uses unrelated keyboard input')
+    changes = receipt.get('changes')
+    _require(isinstance(changes,list) and len(changes)==1 and isinstance(changes[0],dict) and changes[0].get('label')==target
+             and changes[0].get('before') is before[target] and changes[0].get('after') is False,
+             'Graphics preference change does not match its observed checkbox states')
+    change=changes[0];files.screen(change.get('verified_image'));click=change.get('receipt')
+    if before[target] is False:
+        _require(click is None, 'Already-disabled presentation option must not be toggled')
+        return
+    _require(isinstance(click,dict) and click.get('before')==receipt['opening']
+             and isinstance(click.get('target'),str)
+             and re.sub(r'[^a-z0-9]','',click['target'].casefold())=='civilopediaforadvances',
+             'Graphics preference click targets a different option')
+    inputs=_inputs(click.get('inputs'))
+    buttons=[r for r in inputs if r['type']=='mouse' and r['event']!='mousemove']
+    _require(not any(r['type']=='key' for r in inputs) and [r['event'] for r in buttons]==['mousedown','mouseup']
+             and all(r['button']==0 for r in buttons), 'Graphics preference needs one ordinary checkbox click')
+    park=click.get('pointer_park')
+    _require(isinstance(park,dict) and park.get('issued') is False and park.get('target')==[620,410]
+             and isinstance(park.get('observed_cursor'),list) and len(park['observed_cursor'])==2
+             and all(_int(v) for v in park['observed_cursor']) and _int(park.get('tolerance'))
+             and park['tolerance']<=4 and max(abs(a-b) for a,b in zip(park['observed_cursor'],park['target']))<=park['tolerance']
+             and isinstance(park.get('inputs'),list), 'Preference cursor park was not observed at its bounded target')
+    if park['inputs']:
+        _require(all(r['type']=='relativeMouse' for r in _inputs(park['inputs'])),
+                 'Preference cursor park contains a non-movement input')
 
 
 def _plan_binding(task, request, saves):
@@ -498,6 +605,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     events, chain = _journal(files)
     saves, started, stages, decisions, plans, plan_statuses, dispatched = {}, {}, {}, {}, {}, {}, set()
     inputs, forced, forced_pending, recording = 0, 0, None, None
+    forced_city, forced_city_pending, city_pending = 0, None, None
+    city_reviews, city_closures, graphics_reviews = 0, 0, 0
     stops, recoveries, unknown = [], [], Counter()
     checks, initial_state = None, None
     for event in events:
@@ -612,9 +721,26 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             forced_pending = payload['action']
             _action_binding(forced_pending, {'state': {'turn': forced_pending['preconditions']['turn']}},
                             'empire_action', saves)
+        elif kind == 'forced_city_control':
+            action = payload.get('action')
+            _require(forced_city_pending is None and city_pending is None and isinstance(action,dict)
+                     and action.get('id')=='exit_city', 'Only a pending-free observed Exit may be forced')
+            _action_binding(action,{'state':{'turn':action['preconditions']['turn']}},'city_action',saves,forced=True)
+            _city_review_binding(action,payload.get('reviewed'))
+            forced_city_pending = action
         elif kind in DISPATCHES:
             question = DISPATCHES[kind]
             identifier = payload.get('decision')
+            if question == 'city_action':
+                _require(city_pending is None, 'A city control transaction is already pending')
+                _city_review_binding(payload.get('action',{}),payload.get('reviewed'))
+                if identifier is None:
+                    _require(forced_city_pending == payload.get('action') and forced_city_pending is not None,
+                             'Forced city dispatch has no prior observed Exit')
+                    inputs += _dispatch(payload,forced_city_pending,question,files)
+                    city_pending = {'action':forced_city_pending,'decision':None,'sequence':event['sequence'],'mechanical':[]}
+                    forced_city += 1; forced_city_pending = None
+                    continue
             if identifier is None and question == 'empire_action':
                 matches = [i for i, d in decisions.items() if i not in dispatched
                            and d['action'] == payload.get('action') and d['question'] == question]
@@ -629,6 +755,55 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      'Dispatch has no unique prior selected model decision')
             inputs += _dispatch(payload, decisions[identifier]['action'], question, files)
             dispatched.add(identifier)
+            if question == 'city_action':
+                city_pending = {'action':decisions[identifier]['action'],'decision':identifier,
+                                'sequence':event['sequence'],'mechanical':[]}
+        elif kind == 'mechanical_input' and city_pending is not None:
+            city_pending['mechanical'].append(payload)
+        elif kind == 'city_control_review_completed':
+            _require(city_pending is not None and payload.get('decision')==city_pending['decision'],
+                     'City review has no matching pending control dispatch')
+            action = city_pending['action']; observed = payload.get('observed_dialog')
+            _require(action['id'] in ('change_production','open_buy_quote')
+                     and payload.get('action_id')==action['id'] and isinstance(observed,dict)
+                     and observed.get('kind')==action['parameters']['expected_screen'],
+                     'City review does not match the opened native transaction')
+            files.screen(observed.get('sha256')); files.screen(payload.get('completion_screen'))
+            response_id = payload.get('response_decision')
+            if response_id is None:
+                _require(action['id']=='open_buy_quote' and observed.get('resource_tag')=='COMPLETE0',
+                         'Only an information-only native quote may finish without a separate model choice')
+                acknowledgements = [r for r in city_pending['mechanical']
+                                    if r.get('label')=='acknowledge_information' and r.get('before')==observed['sha256']]
+                _require(len(acknowledgements)==1, 'Information-only quote has no unique mechanical acknowledgement')
+                events_in = _inputs(acknowledgements[0].get('inputs'))
+                _require([(r.get('type'),r.get('code'),r.get('down')) for r in events_in]
+                         == [('key','Enter',True),('key','Enter',False)],
+                         'Information-only quote acknowledgement contains unrelated input')
+            else:
+                response = decisions.get(response_id,{})
+                _require(_int(response_id,1) and response_id in dispatched
+                         and response_id > city_pending['decision'] and response.get('question')=='dialog_action'
+                         and response.get('action',{}).get('preconditions',{}).get('image_sha256')==observed['sha256'],
+                         'City review response is not a separate dispatched choice for its observed dialog')
+                if action['id']=='open_buy_quote':
+                    _require(observed.get('resource_tag')=='COMPLETE1', 'Purchase quote lacks the original separate-choice resource')
+                    _purchase_quote(started[response_id].get('state',{}).get('mandatory_dialog',{}).get('quote'))
+            _city_review_binding(action,payload.get('reviewed'),completed=True)
+            city_reviews += 1; city_pending = None
+        elif kind == 'city_control_closed':
+            _require(city_pending is not None and city_pending['action']['id']=='exit_city'
+                     and payload.get('decision')==city_pending['decision'] and payload.get('action_id')=='exit_city',
+                     'City closure has no matching Exit dispatch')
+            action = city_pending['action']
+            _require(payload.get('city')=={'id':action['actor']['id'],'name':action['actor']['name'],
+                                          'year_raw':action['preconditions']['year_raw']},
+                     'City closure belongs to another city or year')
+            files.screen(payload.get('completion_screen'))
+            city_closures += 1; city_pending = None
+        elif kind == 'graphics_preferences_configured':
+            _graphics_preferences(payload.get('receipt'),files)
+            graphics_reviews += 1
         elif kind == 'dialog_keyboard_recovery':
             identifier = payload.get('decision')
             _require(identifier in decisions and identifier not in dispatched and identifier not in recoveries
@@ -675,6 +850,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'undispatched_decisions': sorted(set(decisions)-dispatched),
                           'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)),
                           'forced_empire_dispatches': forced,
+                          'forced_city_exit_dispatches':forced_city,
+                          'completed_city_reviews':city_reviews, 'closed_city_controls':city_closures,
+                          'graphics_preference_reviews':graphics_reviews,
                           'manually_reviewed_keyboard_recoveries': recoveries,
                           'manual_recovery_note': 'These choices required separately logged manual selection review. They are not counted as automatically verified model dispatches or autonomous-run proof.',
                           'models': sorted({r['model'] for r in responses}),
@@ -685,9 +863,11 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             'recording': recording, 'outcome': outcome,
             'completeness': {'finalized_session': len(stops) == 1, 'uninterpreted_event_counts': dict(sorted(unknown.items())),
                              'pending_forced_command': forced_pending is not None,
+                             'pending_city_control':city_pending is not None or forced_city_pending is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] == 'human_reviewed' and len(dispatched) == len(decisions)
-                              and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries},
+                              and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries
+                              and city_pending is None and forced_city_pending is None},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
                            'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
                            'This verifier performs no OCR, live game calls or automatic victory recognition.',

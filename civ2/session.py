@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import time
 from .boot import original_rules, verify_setup
+from .city_controls import city_control_candidates, city_control_request_for, validate_city_control
 from .engine import Game
 from .empire import empire_candidates, empire_request_for, validate_empire_action
 from .evidence import Journal
@@ -41,6 +42,70 @@ def snapshot(state, *, status='paused', decision=None, chronicle=(), message='',
                     {'label':'Leader','value':'Male / Rome'}],
         'decision':decision or {},'chronicle':list(chronicle),'message':message,
         **({'ledger':ledger} if ledger is not None else {})}
+
+
+def observed_order_outcome(before, after, record, *, pending_count):
+    """Bounded checkpoint facts, never command acceptance or guessed slot identity."""
+    facts = {'turn': [before['turn'], after['turn']],
+             'owned_city_count': [len(before['cities']), len(after['cities'])],
+             'actor_binding': 'unavailable'}
+    parts = [f"Checkpoint batch, not acceptance: turn {before['turn']}->{after['turn']}",
+             f"cities {len(before['cities'])}->{len(after['cities'])}"]
+    action = record.get('action', {})
+    actor = action.get('actor', {})
+    def finish(reason=None):
+        if reason:
+            facts['actor_binding_reason'] = reason
+            parts.append(reason)
+        return '; '.join(parts)[:300], facts
+    if pending_count != 1:
+        return finish('multiple pending commands; actor effects not individually attributed')
+    fields = ('id', 'owner', 'type_id', 'x', 'y')
+    if not all(type(actor.get(k)) is int for k in fields):
+        return finish('no checkpoint-bound unit actor')
+    if action.get('preconditions', {}).get('save_sha256') != before['evidence']['save_sha256']:
+        return finish('actor revision differs; continuity unknown')
+    old = {u['id']:u for u in before['units']}
+    new = {u['id']:u for u in after['units']}
+    unit = old.get(actor['id'])
+    if unit is None or any(unit.get(k) != actor[k] for k in fields):
+        return finish('actor differs from prior checkpoint; continuity unknown')
+    identity = ('owner', 'type_id', 'home_city_id', 'veteran')
+    if not set(old).issubset(new) or any(
+            any(u.get(k) != new[identifier].get(k) for k in identity)
+            for identifier, u in old.items() if identifier in new):
+        return finish('roster removal/replacement or possible compaction; actor continuity unknown')
+    positions = {(unit['x'], unit['y'])}
+    target = action.get('parameters', {}).get('destination', {})
+    if action.get('kind') == 'move' and all(type(target.get(k)) is int for k in ('x', 'y')):
+        positions.add((target['x'], target['y']))
+    candidates = [u for u in new.values()
+                  if all(u.get(k) == unit.get(k) for k in identity)
+                  and (u['x'], u['y']) in positions]
+    if len(candidates) != 1 or candidates[0]['id'] != unit['id']:
+        return finish('actor transition ambiguous or unexplained; continuity unknown')
+    fresh = candidates[0]
+    facts['actor_binding'] = 'unique_observed_signature'
+    facts['position'] = [[unit['x'], unit['y']], [fresh['x'], fresh['y']]]
+    if facts['position'][0] == facts['position'][1]:
+        parts.append(f"position unchanged ({unit['x']},{unit['y']})")
+    else:
+        parts.append(f"position ({unit['x']},{unit['y']})->({fresh['x']},{fresh['y']})")
+    for field, label in (('movement_thirds_spent', 'spent thirds'), ('order_id', 'order')):
+        values = [unit.get(field), fresh.get(field)]
+        if all(type(v) is int for v in values):
+            facts[field] = values
+            parts.append(f'{label} {values[0]}->{values[1]}')
+    # Byte13 is a worker counter only for ground worker-role units; for other
+    # units it can mean cargo/commodity/role data. Never label it completed work.
+    spec = unit.get('specification', {})
+    if spec.get('domain') == 0 and spec.get('role') == 5:
+        counter = [unit.get('counter_or_commodity'), fresh.get('counter_or_commodity')]
+        if all(type(v) is int for v in counter):
+            facts['worker_counter'] = counter
+            parts.append(f'worker counter {counter[0]}->{counter[1]}')
+    parts.append('remaining movement unverified')
+    return finish()
 
 
 class Session:
@@ -161,9 +226,14 @@ class Session:
             changed = [key for key in fields if self.state[key] != state[key]]
             self.journal.append('batch_observed_effect', decisions=list(self.pending_decisions),
                 changed_fields=changed, attribution='Changes since the previous native checkpoint; not individual command acceptance')
-            if self.history:
-                self.history[-1]['outcome'] = ('Observed after pending orders: '+', '.join(changed)
-                                               if changed else 'No observed state change after pending orders')
+            records = [r for r in self.history if r.get('decision') in self.pending_decisions]
+            # Older live sessions retain flat history without decision IDs.
+            # Preserve them, but never infer a unit identity from that alone.
+            if not records and self.history:
+                records = [self.history[-1]]
+            for record in records:
+                record['outcome'], record['observed_delta'] = observed_order_outcome(
+                    self.state, state, record, pending_count=len(self.pending_decisions))
             self.pending_decisions.clear()
         if getattr(self, 'planning', False):
             self._advance_plans(state)
@@ -250,6 +320,7 @@ class Session:
         if getattr(self, 'planning', False):
             self.plan_actions.append(deepcopy(action))
         self.history.append({'turn':self.state['turn'],'actor':action['actor'],
+                             'decision':decision_id,'action':deepcopy(action),
                              'order':action['label'],'outcome':'awaiting next game observation'})
         self.chronicle.append({'id':str(self.decisions),'turn':self.state['turn'],
                                'label':action['label'],'kind':action['kind']})
@@ -264,6 +335,13 @@ class Session:
             'note':'Empire and unit data are from the last native save. The mandatory dialog is current; pending orders may have changed the empire.'}
         if getattr(self,'city_report',None):
             request['state']['latest_observed_city_report'] = self.city_report
+        if dialog.get('kind') == 'buy_quote':
+            quote = dialog.get('quote')
+            if (dialog.get('resource_tag') != 'COMPLETE1' or not isinstance(quote, dict)
+                    or quote.get('purchase_executed') is not False
+                    or any(type(quote.get(k)) is not int or quote[k] < 0 for k in ('cost','treasury'))):
+                raise RuntimeError('A purchase choice requires its actual original quote and treasury')
+            request['state']['mandatory_dialog']['quote'] = deepcopy(quote)
         if len(actions) < 2:
             raise RuntimeError('A single forced dialog option needs an explicit mechanical handler')
         action = self._evaluate(request, actions, 'dialog_action')
@@ -287,7 +365,8 @@ class Session:
         self.journal.append('dialog_dispatched',decision=self.decisions,action=action,receipt=receipt,
                             after=after['sha256'])
         self._mark_dispatched(decision_id, 'dialog_action', action, inputs)
-        self.history.append({'turn':self.state['turn'],'order':action['label'],'outcome':'awaiting original game response'})
+        self.history.append({'turn':self.state['turn'],'decision':decision_id,'action':deepcopy(action),
+                             'order':action['label'],'outcome':'awaiting original game response'})
         self.chronicle.append({'id':str(self.decisions),'turn':self.state['turn'],'label':action['label'],'kind':'dialog'})
         self.publish('running')
         return action, after
@@ -321,9 +400,47 @@ class Session:
         if decision_id is not None:
             self._mark_dispatched(decision_id, 'empire_action', action, inputs)
         self.history.append({'turn':self.state['turn'],'actor':action['actor'],
+            'decision':decision_id,'action':deepcopy(action),
             'order':action['label'],'outcome':'Awaiting the original game response'})
         self.chronicle.append({'id':str(self.decisions),'turn':self.state['turn'],
                                'label':action['label'],'kind':action['kind']})
+        self.publish('running')
+        return action, after
+
+    def choose_city_control(self, screen, reviewed):
+        actions = city_control_candidates(self.state, screen, reviewed, self.rules)
+        decision_id = None
+        if len(actions) == 1:
+            action = actions['exit_city']
+            self.journal.append('forced_city_control', action=action, reviewed=deepcopy(reviewed),
+                reason='Only observed Exit remains after city review. No model distribution created.')
+        else:
+            request = city_control_request_for(self.state, screen, actions, reviewed, self.rules,
+                                               recent_actions=list(self.history))
+            request['state']['checkpoint_freshness'] = {
+                'pending_decisions_since_native_save':list(self.pending_decisions),
+                'note':'Saved city statistics may precede pending orders; this city window and its control labels are current.'}
+            if getattr(self, 'city_report', None):
+                request['state']['latest_observed_city_report'] = deepcopy(self.city_report)
+            action = self._evaluate(request, actions, 'city_action')
+            decision_id = self.decisions
+        validate_city_control(action, self.state, screen, reviewed, self.rules)
+        current = self.ui.observe()
+        if current['sha256'] != screen['sha256']:
+            raise RuntimeError('Native city screen changed before the chosen control')
+        self.game.rpc('resume')
+        inputs = self.game.click(*action['parameters']['center'])
+        time.sleep(.4)
+        after = self.ui.observe()
+        self.journal.append('city_control_dispatched', decision=decision_id, action=action,
+            reviewed=deepcopy(reviewed), before=current['sha256'], after=after['sha256'], inputs=inputs)
+        if decision_id is not None:
+            self._mark_dispatched(decision_id, 'city_action', action, inputs)
+        self.history.append({'turn':self.state['turn'],'actor':action['actor'],
+            'decision':decision_id,'action':deepcopy(action),'order':action['label'],
+            'outcome':'Native city control dispatched; awaiting its observed follow-up, no purchase inferred'})
+        self.chronicle.append({'id':str(decision_id) if decision_id is not None else f'city-exit-{self.checkpoints}',
+            'turn':self.state['turn'],'label':action['label'],'kind':'city_control'})
         self.publish('running')
         return action, after
 

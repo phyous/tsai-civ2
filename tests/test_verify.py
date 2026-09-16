@@ -170,7 +170,204 @@ class Evidence:
         self.rewrite(change)
 
 
+def city_evidence(parent, identifier='open_buy_quote', *, forced=False):
+    """Native-format TEST checkpoint, with independent explicit city UI bindings."""
+    e=Evidence(parent)
+    data=bytearray(initial_save())
+    city_base=13432+14+13*2000+2*20*13+1024+26
+    data[city_base:city_base]=bytes(88)
+    struct.pack_into('<H',data,60,1)
+    struct.pack_into('<hh',data,city_base,8,8)
+    data[city_base+8]=data[city_base+9]=1
+    data[city_base+32:city_base+41]=b'TEST Rome'
+    name='city-test.sav';(e.directory/name).write_bytes(data)
+    descriptor=dict(path=name,sha256=hashlib.sha256(data).hexdigest(),bytes=len(data))
+    actor=dict(kind='city',id=0,owner=1,name='TEST Rome',x=8,y=8)
+    pre=dict(save_sha256=descriptor['sha256'],turn=1,image_sha256=e.screen['sha256'],
+             width=640,height=480,screen_kind='city_screen',observed_city_title='City of TEST Rome, 4000 B.C.',
+             year_raw=-4000,reviewed_action_ids=['change_production','open_buy_quote'] if forced else [])
+    buttons={'change_production':('Change','production_choice'),
+             'open_buy_quote':('Buy','buy_quote'),'exit_city':('Exit','original_map')}
+    native,next_screen=buttons[identifier]
+    action=dict(id=identifier,kind='city_control',label='TEST '+identifier,actor=actor,preconditions=pre,
+        parameters=dict(center=[120,150],observed_text=native,button_index=0,control='button',
+                        only_open_menu=identifier!='exit_city',expected_screen=next_screen,
+                        purchase_authorized=False,confirmation_requires_separate_choice=identifier=='open_buy_quote'))
+    criteria={key:'TEST '+key for key in buttons}
+    request=dict(state=dict(turn=1,city_control_review=dict(actor=actor,observed_title=pre['observed_city_title'],
+        year_raw=-4000,reviewed_action_ids=pre['reviewed_action_ids'],controls=criteria)),
+        questions=dict(city_action=dict(type='choice',instructions='TEST choose one actual city button',criteria=criteria)))
+    response=deepcopy(e.response)
+    response['answers']=dict(city_action=dict(type='choice',choice=identifier,confidence=.7,
+        probabilities={key:.7 if key==identifier else .15 for key in buttons}))
+    e.change_artifact('decisions/request.json',request);e.change_artifact('decisions/response.json',response)
+    reviewed=dict(city_id=0,city_name='TEST Rome',year_raw=-4000,actions=list(pre['reviewed_action_ids']))
+    def change(rows):
+        rows.insert(1,dict(kind='checkpoint',elapsed_ms=0,payload=dict(artifact=descriptor,turn=1,year=-4000)))
+        selected=next(r for r in rows if r['kind']=='model_decision')
+        selected['payload'].update(action=action,selected_question='city_action')
+        dispatch=next(r for r in rows if r['kind']=='command_dispatched')
+        dispatch.update(kind='city_control_dispatched',payload=dict(decision=None if forced else 1,
+            action=action,reviewed=reviewed,before=e.screen['sha256'],after=e.screen['sha256'],inputs=[
+                dict(type='mouse',sequence=1,event='mousedown',x=120,y=150,button=0),
+                dict(type='mouse',sequence=2,event='mouseup',x=120,y=150,button=0)]))
+        if forced:
+            rows[:]=[r for r in rows if r['kind'] not in ('inference_started','model_decision')]
+            rows.insert(rows.index(dispatch),dict(kind='forced_city_control',elapsed_ms=dispatch['elapsed_ms'],
+                payload=dict(action=action,reviewed=reviewed,reason='TEST only observed Exit remains')))
+    e.rewrite(change)
+    return e,action,reviewed
+
+
 class VerifyTests(unittest.TestCase):
+    def test_graphics_preferences_change_only_verified_presentation_checkbox(self):
+        for initially_checked in (False,True):
+            with self.subTest(checked=initially_checked),tempfile.TemporaryDirectory() as d:
+                e=Evidence(d)
+                labels=('Throne Room','Diplomacy Screen','Animated Heralds','Civilopedia for Advances','High Council','Wonder Movies')
+                before={name:True for name in labels};before['Civilopedia for Advances']=initially_checked
+                after={**before,'Civilopedia for Advances':False}
+                keys=[dict(type='key',sequence=i,code=code,down=down,repeat=False) for i,code,down in (
+                    (1,'ControlLeft',True),(2,'KeyP',True),(3,'KeyP',False),(4,'ControlLeft',False),(9,'Enter',True),(10,'Enter',False))]
+                click=None
+                if initially_checked:
+                    click=dict(target='Civilopedia for Advances',before=e.screen['sha256'],inputs=[
+                        dict(type='mouse',sequence=i,event=event,x=120,y=150,button=0)
+                        for i,event in ((5,'mousedown'),(6,'mouseup'))],pointer_park=dict(
+                            issued=False,target=[620,410],observed_cursor=[619,410],tolerance=3,inputs=[
+                                dict(type='relativeMouse',sequence=7,dx=12,dy=12,dispatched=True,emulate=True,via='DOSBox Mouse_CursorMoved')]))
+                receipt=dict(before=e.screen['sha256'],opening=e.screen['sha256'],after=e.screen['sha256'],
+                    checkbox_before=before,checkbox_after=after,other_checkboxes_unchanged=True,inputs=keys,
+                    changes=[dict(label='Civilopedia for Advances',before=initially_checked,after=False,
+                                  receipt=click,verified_image=e.screen['sha256'])])
+                e.rewrite(lambda rows:rows.insert(-1,dict(kind='graphics_preferences_configured',
+                    elapsed_ms=rows[-1]['elapsed_ms'],payload={'receipt':receipt})))
+                r=verify_run(e.directory,ffprobe=None)
+                self.assertEqual(r['decisions']['graphics_preference_reviews'],1)
+                self.assertEqual(r['decisions']['model_dispatches'],1)
+                def unrelated(rows):
+                    p=next(r['payload']['receipt'] for r in rows if r['kind']=='graphics_preferences_configured')
+                    p['checkbox_after']['Wonder Movies']=False
+                e.rewrite(unrelated)
+                with self.assertRaisesRegex(VerificationError,'single presentation option'):
+                    verify_run(e.directory,ffprobe=None)
+
+    def test_city_buy_opens_only_quote_and_pending_review_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,action,reviewed=city_evidence(d)
+            r=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(r['decisions']['model_dispatches'],1)
+            self.assertEqual(r['decisions']['completed_city_reviews'],0)
+            self.assertTrue(r['completeness']['pending_city_control'])
+            e.rewrite(lambda rows:next(r for r in rows if r['kind']=='model_decision')['payload']['action']['parameters'].update(purchase_authorized=True))
+            with self.assertRaisesRegex(VerificationError,'quote-only'):verify_run(e.directory,ffprobe=None)
+
+    def test_city_action_wrong_native_actor_year_or_click_refuses(self):
+        for mode in ('actor','year','click','enter'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+                e,_,_=city_evidence(d)
+                def change(rows):
+                    selected=next(r['payload']['action'] for r in rows if r['kind']=='model_decision')
+                    dispatched=next(r['payload'] for r in rows if r['kind']=='city_control_dispatched')
+                    if mode=='actor':selected['actor']['name']='TEST Other'
+                    elif mode=='year':selected['preconditions']['year_raw']=-3950
+                    elif mode=='click':dispatched['inputs'][0]['x']=130
+                    else:dispatched['inputs'] += [dict(type='key',sequence=i,code='Enter',down=down,repeat=False) for i,down in ((3,True),(4,False))]
+                e.rewrite(change)
+                with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_forced_city_exit_has_no_fabricated_model_response(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,action,_=city_evidence(d,'exit_city',forced=True)
+            def close(rows):
+                rows.insert(-1,dict(kind='city_control_closed',elapsed_ms=rows[-1]['elapsed_ms'],payload=dict(
+                    decision=None,action_id='exit_city',city=dict(id=0,name='TEST Rome',year_raw=-4000),
+                    completion_screen=e.screen['sha256'])))
+            e.rewrite(close)
+            r=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(r['decisions']['validated_responses'],0)
+            self.assertEqual(r['decisions']['forced_city_exit_dispatches'],1)
+            self.assertEqual(r['decisions']['closed_city_controls'],1)
+            self.assertFalse(r['completeness']['pending_city_control'])
+            e.rewrite(lambda rows:next(r for r in rows if r['kind']=='city_control_closed')['payload']['city'].update(name='TEST Other'))
+            with self.assertRaisesRegex(VerificationError,'another city'):verify_run(e.directory,ffprobe=None)
+
+    def test_information_only_quote_needs_its_original_resource_and_acknowledgement(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,action,reviewed=city_evidence(d)
+            def complete(rows):
+                elapsed=rows[-1]['elapsed_ms']
+                ack=dict(kind='mechanical_input',elapsed_ms=elapsed,payload=dict(label='acknowledge_information',
+                    before=e.screen['sha256'],after=e.screen['sha256'],inputs=[
+                        dict(type='key',sequence=i,code='Enter',down=down,repeat=False) for i,down in ((3,True),(4,False))]))
+                done=dict(kind='city_control_review_completed',elapsed_ms=elapsed,payload=dict(decision=1,
+                    action_id='open_buy_quote',reviewed={**reviewed,'actions':['open_buy_quote']},
+                    observed_dialog=dict(kind='buy_quote',sha256=e.screen['sha256'],resource_tag='COMPLETE0'),
+                    response_decision=None,completion_screen=e.screen['sha256']))
+                rows[-1:-1]=[ack,done]
+            e.rewrite(complete)
+            r=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(r['decisions']['completed_city_reviews'],1)
+            self.assertFalse(r['completeness']['pending_city_control'])
+            e.rewrite(lambda rows:next(r for r in rows if r['kind']=='city_control_review_completed')['payload']['observed_dialog'].update(resource_tag='COMPLETE1'))
+            with self.assertRaisesRegex(VerificationError,'information-only'):verify_run(e.directory,ffprobe=None)
+
+    def test_production_and_purchase_reviews_need_a_separate_dispatched_model_choice(self):
+        for control,kind,resource in (('change_production','production_choice',None),('open_buy_quote','buy_quote','COMPLETE1')):
+            with self.subTest(control=control),tempfile.TemporaryDirectory() as d:
+                e,_,reviewed=city_evidence(d,control)
+                action=dict(id='option_0',kind='dialog_choice',label='TEST observed option',
+                    actor=dict(kind='dialog',id='test_followup',title='TEST native followup'),
+                    preconditions=dict(save_sha256=hashlib.sha256((e.directory/'city-test.sav').read_bytes()).hexdigest(),
+                        turn=1,image_sha256=e.screen['sha256'],width=640,height=480),
+                    parameters=dict(center=[180,200],observed_text='TEST observed option',option_index=0))
+                request=dict(state=dict(turn=1,mandatory_dialog=dict(title='TEST native followup',options=['TEST observed option','TEST alternative'])),
+                    questions=dict(dialog_action=dict(type='choice',instructions='TEST separate followup choice',
+                        criteria=dict(option_0='TEST observed option',option_1='TEST alternative'))))
+                if control=='open_buy_quote':
+                    action['actor']['id']='buy_quote'
+                    request['state']['mandatory_dialog']['quote']=dict(item='TEST unit',cost=20,treasury=50,
+                        purchase_executed=False,source='Original GAME.TXT COMPLETE1 and complete visible quote')
+                response=deepcopy(e.response)
+                response['answers']=dict(dialog_action=dict(type='choice',choice='option_0',confidence=.7,
+                    probabilities=dict(option_0=.7,option_1=.3)))
+                descriptors=[]
+                for name,value in [('decisions/followup-request.json',request),('decisions/followup-response.json',response)]:
+                    data=canonical(value);(e.directory/name).write_bytes(data)
+                    descriptors.append(dict(path=name,sha256=hashlib.sha256(data).hexdigest(),bytes=len(data)))
+                def complete(rows):
+                    elapsed=rows[-1]['elapsed_ms']
+                    def event(kind,**payload):return dict(kind=kind,elapsed_ms=elapsed,payload=payload)
+                    rows[-1:-1]=[
+                        event('inference_started',decision=2,request=descriptors[0]),
+                        event('model_decision',decision=2,selected_question='dialog_action',action=action,response=descriptors[1]),
+                        event('dialog_dispatched',decision=2,action=action,after=e.screen['sha256'],receipt=dict(
+                            before=e.screen['sha256'],point=[180,200],target='TEST observed option',inputs=[
+                                dict(type='mouse',sequence=i,event=operation,x=180,y=200,button=0)
+                                for i,operation in ((3,'mousedown'),(4,'mouseup'))])),
+                        event('city_control_review_completed',decision=1,action_id=control,
+                            reviewed={**reviewed,'actions':[control]},
+                            observed_dialog=dict(kind=kind,sha256=e.screen['sha256'],resource_tag=resource),
+                            response_decision=2,completion_screen=e.screen['sha256'])]
+                e.rewrite(complete)
+                r=verify_run(e.directory,ffprobe=None)
+                self.assertEqual(r['decisions']['validated_responses'],2)
+                self.assertEqual(r['decisions']['model_dispatches'],2)
+                self.assertEqual(r['decisions']['completed_city_reviews'],1)
+                self.assertFalse(r['completeness']['pending_city_control'])
+                if control=='open_buy_quote':
+                    for bad_quote in (None,{'cost':True},{'cost':60},{'purchase_executed':True}):
+                        bad=deepcopy(request)
+                        if bad_quote is None:bad['state']['mandatory_dialog'].pop('quote')
+                        else:bad['state']['mandatory_dialog']['quote'].update(bad_quote)
+                        e.change_artifact('decisions/followup-request.json',bad)
+                        with self.subTest(bad_quote=bad_quote),self.assertRaisesRegex(VerificationError,'cost/treasury quote'):
+                            verify_run(e.directory,ffprobe=None)
+                    e.change_artifact('decisions/followup-request.json',request)
+                e.rewrite(lambda rows:next(r for r in rows if r['kind']=='city_control_review_completed')['payload'].update(response_decision=1))
+                with self.assertRaisesRegex(VerificationError,'separate dispatched choice'):
+                    verify_run(e.directory,ffprobe=None)
+
     def test_planning_is_a_validated_separate_response_without_a_dispatch(self):
         with tempfile.TemporaryDirectory() as d:
             e=Evidence(d);e.add_plan();r=verify_run(e.directory,ffprobe=None)

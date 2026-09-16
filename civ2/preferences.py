@@ -64,3 +64,45 @@ def configure_preferences(ui):
     inputs+=ui.key('Enter',settle=1.2)
     after=ui.observe()
     return dict(before=before['sha256'],opening=opening,changes=changes,inputs=inputs,after=after['sha256'])
+
+
+GRAPHICS_LABELS = ('Throne Room','Diplomacy Screen','Animated Heralds',
+                   'Civilopedia for Advances','High Council','Wonder Movies')
+
+
+def configure_graphics_preferences(ui):
+    """Disable only the native post-discovery reference popup, with readback.
+
+    Original MENU.TXT Ctrl+P / GAME.TXT @GRAPHICOPTIONS. Calibrated in the
+    original 640x480 dialog; these are presentation settings, not game rules.
+    Other checkbox values are observed before/after and must remain unchanged.
+    """
+    key=lambda text:re.sub(r'[^a-z0-9]','',text.casefold())
+    def complete(o):
+        labels=[key(row['text']) for row in o['lines']]
+        return (all(any(key(name) in text for text in labels) for name in GRAPHICS_LABELS)
+                and labels.count('ok')==1 and labels.count('cancel')==1)
+    ui.game.rpc('resume')
+    before=ui.observe()
+    inputs=ui.game.chord('ControlLeft','KeyP',hold_ms=120)
+    observation=ui.wait(complete)
+    opening=observation['sha256']
+    prior={name:checkbox_state(observation,name) for name in GRAPHICS_LABELS}
+    label='Civilopedia for Advances';receipt=None
+    if prior[label]:
+        actual=next(row['text'] for row in observation['lines'] if key(label) in key(row['text']))
+        receipt=ui.select_text(observation,actual,exact=True)
+        receipt['pointer_park']=move_cursor(ui.game,620,410)
+        observation=ui.observe()
+    if not complete(observation):
+        raise RuntimeError('Native graphics dialog changed during preference readback')
+    after={name:checkbox_state(observation,name) for name in GRAPHICS_LABELS}
+    if after[label] is not False or any(after[name]!=prior[name] for name in GRAPHICS_LABELS if name!=label):
+        raise RuntimeError('Native graphics preference changed unexpectedly')
+    verified_image=observation['sha256']
+    inputs+=ui.key('Enter',settle=1.2)
+    closed=ui.observe()
+    return dict(before=before['sha256'],opening=opening,
+        changes=[dict(label=label,before=prior[label],after=False,receipt=receipt,verified_image=verified_image)],
+        checkbox_before=prior,checkbox_after=after,other_checkboxes_unchanged=True,
+        inputs=inputs,after=closed['sha256'],scope='Original presentation preference only; no gameplay command')

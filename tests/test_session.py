@@ -4,8 +4,8 @@ import copy
 from unittest import mock
 import unittest
 
-from civ2.policy import dialog_candidates, unit_candidates
-from civ2.session import Session, snapshot
+from civ2.policy import dialog_candidates, unit_candidates, _recent_actions
+from civ2.session import Session, snapshot, observed_order_outcome
 
 
 def state():
@@ -110,6 +110,85 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(view['empire']['research'],'TEST Alphabet')
         self.assertNotIn('population',view['empire']);self.assertNotIn('net_income',view['empire'])
         self.assertEqual(view['decision'],{})
+
+    def test_skip_checkpoint_reports_unchanged_position_and_spent_bookkeeping(self):
+        s=session();before=copy.deepcopy(s.state)
+        action=unit_candidates(before,rules=s.rules)['skip']
+        s.history.append(dict(decision=1,action=action,order=action['label']))
+        s.pending_decisions=[1]
+        after=copy.deepcopy(before)
+        after['units'][0].update(movement_thirds_spent=3,order_id=255)
+        s.ui.save_native.return_value=(b'TEST SAVE BYTES',{})
+        with mock.patch('civ2.session.parse_save',return_value=after):s.checkpoint()
+        record=s.history[0]
+        self.assertIn('position unchanged (8,8)',record['outcome'])
+        self.assertIn('spent thirds 0->3',record['outcome'])
+        self.assertIn('remaining movement unverified',record['outcome'])
+        self.assertEqual(record['observed_delta']['movement_thirds_spent'],[0,3])
+        self.assertIn('not acceptance',_recent_actions(s.history)[0]['reported_outcome'])
+        self.assertNotIn('progress',record['outcome'])
+
+    def test_move_and_worker_counter_are_observations_not_completion_claims(self):
+        before=state();before['units'][0]['counter_or_commodity']=0
+        action=unit_candidates(before)['move_e']
+        after=copy.deepcopy(before)
+        after['units'][0].update(x=10,movement_thirds_spent=3,counter_or_commodity=1)
+        outcome,facts=observed_order_outcome(before,after,{'action':action},pending_count=1)
+        self.assertEqual(facts['position'],[[8,8],[10,8]])
+        self.assertEqual(facts['worker_counter'],[0,1])
+        self.assertIn('position (8,8)->(10,8)',outcome)
+        self.assertIn('worker counter 0->1',outcome)
+        self.assertNotIn('completed',outcome)
+        self.assertLessEqual(len(outcome),300)
+        before['units'][0]['specification'].update(domain=2,role=4)
+        _,facts=observed_order_outcome(before,after,{'action':action},pending_count=1)
+        self.assertNotIn('worker_counter',facts)
+
+    def test_compaction_does_not_relabel_surviving_slot_as_old_actor(self):
+        before=state()
+        before['units'].append({**copy.deepcopy(before['units'][0]),'id':1,'x':10})
+        action=unit_candidates(before)['settle']
+        after=copy.deepcopy(before)
+        after['units']=[{**copy.deepcopy(before['units'][1]),'id':0}]
+        after['cities']=[dict(id=0,name='TEST Rome',x=8,y=8,size=1)]
+        outcome,facts=observed_order_outcome(before,after,{'action':action},pending_count=1)
+        self.assertEqual(facts['owned_city_count'],[0,1])
+        self.assertEqual(facts['actor_binding'],'unavailable')
+        self.assertIn('possible compaction',outcome)
+        self.assertNotIn('position',facts)
+
+    def test_ambiguous_or_unexplained_transition_stays_unbound(self):
+        before=state();action=unit_candidates(before)['move_e']
+        for mode in ('duplicate','unexpected'):
+            after=copy.deepcopy(before)
+            if mode=='duplicate':after['units'].append({**copy.deepcopy(after['units'][0]),'id':1})
+            else:after['units'][0]['x']=14
+            with self.subTest(mode=mode):
+                outcome,facts=observed_order_outcome(before,after,{'action':action},pending_count=1)
+                self.assertEqual(facts['actor_binding'],'unavailable')
+                self.assertIn('continuity unknown',outcome)
+                self.assertNotIn('movement_thirds_spent',facts)
+
+    def test_all_pending_records_share_batch_limits_not_just_last_order(self):
+        s=session();action=unit_candidates(s.state)['skip']
+        s.pending_decisions=[1,2]
+        s.history.extend([dict(decision=1,action=action),dict(decision=2,order='TEST choose production')])
+        after=state();after['cities']=[dict(id=0,name='TEST Rome',x=8,y=8,size=1)]
+        s.ui.save_native.return_value=(b'TEST SAVE BYTES',{})
+        with mock.patch('civ2.session.parse_save',return_value=after):s.checkpoint()
+        for record in s.history:
+            self.assertIn('cities 0->1',record['outcome'])
+            self.assertIn('not individually attributed',record['outcome'])
+            self.assertEqual(record['observed_delta']['actor_binding'],'unavailable')
+
+    def test_stale_revision_and_legacy_history_do_not_guess_actor(self):
+        before=state();after=copy.deepcopy(before);action=unit_candidates(before)['skip']
+        action['preconditions']['save_sha256']='f'*64
+        for record in ({'action':action},{'actor':action['actor'],'order':'TEST old skip'}):
+            with self.subTest(record=record):
+                _,facts=observed_order_outcome(before,after,record,pending_count=1)
+                self.assertEqual(facts['actor_binding'],'unavailable')
+                self.assertNotIn('position',facts)
 
 
 if __name__ == '__main__':

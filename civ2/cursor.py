@@ -23,6 +23,10 @@ ARROW = (
 )
 CONSTRAINTS = tuple((x, y, (0, 0, 0) if char == 'B' else (255, 255, 255))
                     for y, row in enumerate(ARROW) for x, char in enumerate(row) if char != '.')
+# Start at the existing estimator's upper accepted gain until actual motion
+# calibrates each axis. Starting at 1 made the observed Windows vertical gain 2
+# overshoot near bottom controls and clip the cursor before any readback.
+INITIAL_GAIN = 8.0
 
 
 class CursorError(RuntimeError):
@@ -55,7 +59,7 @@ def _observe(game):
         return locate_cursor(image)
 
 
-def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: bool = True) -> dict:
+def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: bool = True, timeout: float = 20) -> dict:
     """Position by visual feedback, then press/release without extra motion.
 
     Returns ordinary input receipts plus each observed cursor checkpoint. Raises
@@ -68,6 +72,8 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
         raise ValueError('Invalid mouse button')
     if type(tolerance) is not int or not 0 <= tolerance <= 4:
         raise ValueError('Cursor tolerance must be at most four original pixels')
+    if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 1 <= timeout <= 180:
+        raise ValueError('Cursor deadline must be between one and 180 seconds')
     diagnostic = game.rpc('inputDiagnostics')
     if diagnostic.get('paused'):
         raise CursorError('Resume the original runtime before positioning its cursor')
@@ -77,9 +83,9 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
     host_x, host_y = host['x'], host['y']
     if not 0 <= host_x < 640 or not 0 <= host_y < 480:
         raise CursorError('Current emulator mouse coordinates are outside the canvas')
-    gains = [1.0, 1.0]
+    gains = [INITIAL_GAIN, INITIAL_GAIN]
     inputs, checkpoints = [], []
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + timeout
     cursor = _observe(game)
     for step in range(81):
         checkpoints.append({'cursor': list(cursor), 'host': [host_x, host_y]})
@@ -127,8 +133,8 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
             'checkpoints':checkpoints, 'inputs':inputs}
 
 
-def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3) -> dict:
-    return _move(game,x,y,button,tolerance=tolerance)
+def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, timeout: float = 20) -> dict:
+    return _move(game,x,y,button,tolerance=tolerance,timeout=timeout)
 
 
 def move_cursor(game, x: int, y: int, *, tolerance: int = 3) -> dict:

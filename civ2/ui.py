@@ -36,6 +36,13 @@ class UI:
         self.game.capture(path)
         observation = recognize(path)
         observation['path'] = str(path)
+        from .cursor import locate_cursor, CursorError
+        from PIL import Image
+        try:
+            with Image.open(path) as image:
+                observation['cursor_hotspot'] = list(locate_cursor(image))
+        except CursorError:
+            pass
         self.latest = observation
         return observation
 
@@ -57,18 +64,21 @@ class UI:
     def wait_text(self, text, *, timeout=8):
         return self.wait(lambda o: text.casefold() in o['text'].casefold(), timeout=timeout)
 
-    def select_text(self, observation, text, *, exact=False, confirm=False):
+    def park_pointer(self):
+        from .cursor import move_cursor, CursorError
+        try:
+            return move_cursor(self.game,620,410)
+        except CursorError as error:
+            return {'issued':False,'error':str(error)}
+
+    def select_text(self, observation, text, *, exact=False, confirm=False, timeout=20):
         # The caller supplies the fresh screen containing this exact target.
         if self.latest is not observation:
             raise ValueError('Selection requires the latest observed screen')
         point = find_text(observation, text, exact=exact)
-        receipts = self.game.click(*point)
+        receipts = self.game.click(*point, timeout=timeout)
         time.sleep(.2)
-        from .cursor import move_cursor, CursorError
-        try:
-            parking = move_cursor(self.game,620,410)
-        except CursorError as error:
-            parking = {'issued':False,'error':str(error)}
+        parking = self.park_pointer()
         selected = self.observe()
         if confirm:
             receipts += self.key('Enter')

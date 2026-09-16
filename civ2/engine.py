@@ -52,9 +52,9 @@ class Game:
     def key(self, code, **options):
         return self.rpc('key', code, options)
 
-    def click(self, x, y, button=0):
+    def click(self, x, y, button=0, *, timeout=20):
         from .cursor import move_and_click
-        return [move_and_click(self, x, y, button)]
+        return [move_and_click(self, x, y, button, timeout=timeout)]
 
     def chord(self, *codes, hold_ms=70):
         if len(codes) < 2:

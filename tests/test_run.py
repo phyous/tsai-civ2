@@ -20,6 +20,7 @@ def session(observations):
     s.journal.directory=Path('/tmp/TEST-run')
     s.ui.observe.side_effect=observations
     s.choose_dialog=mock.Mock(side_effect=lambda dialog: setattr(s,'decisions',s.decisions+1))
+    controller_context(s)['graphics_configured']=True
     return s
 
 

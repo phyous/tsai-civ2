@@ -53,6 +53,14 @@ def dialog():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_full_observed_dialog_terms_reach_model_without_truncation(self):
+        d=dialog();d['visible_text']='TEST emissary offers:\n'+('TEST terms. '*60)+'\nPay 75 gold.'
+        request,_=dialog_request_for(fixture(),d,rules())
+        self.assertEqual(request['state']['mandatory_dialog']['observed_text'],d['visible_text'])
+        for invalid in ('x'*8001,{'not':'observed text'}):
+            d['visible_text']=invalid
+            with self.assertRaises(PolicyError):dialog_request_for(fixture(),d,rules())
+
     def test_model_labor_projects_center_worker_and_unexplored_without_hidden_data(self):
         s=fixture();r=rules()
         s['cities']=[dict(id=0,owner=1,name='TEST Rome',x=8,y=8,size=1,

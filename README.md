@@ -63,10 +63,14 @@ actions. Planning executes no input, forces no path and uses no hidden map data.
 
 Task choices and command choices have distinct evidence events, probability
 displays and counts. Plans are reviewed after observed completion, invalidation
-or bounded expiry. The CLI remains in baseline mode; see
+or bounded expiry. Add `--planning` to the CLI to enable it, and `--port 3921`
+to select a separately prepared runtime. See
 [planning setup, comparison and limitations](docs/planning.md) for the Python
 entry point and parallel-runtime requirements. Neither mode has a verified
 complete-game victory yet.
+
+Open `/web/watch.html` on a running server for a responsive, read-only live view
+without creating another emulator connection.
 
 ## Acknowledgments
 

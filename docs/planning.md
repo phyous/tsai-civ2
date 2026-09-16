@@ -13,9 +13,17 @@ retains the baseline policy.
 | Task review | No persistent task | Observed completion, invalidation or bounded expiry; a new task is requested when that unit is next selected |
 | Evidence | Command choices and input receipts | Separate planning choices/status events, plus unchanged command choices and input receipts |
 
-The public Python entry point is currently the opt-in; `python -m civ2.run`
-continues to use the baseline and has no planning CLI flag. Once the runtime has
-loaded the matching original initial save, an experimental session can use:
+`python -m civ2.run` uses the baseline by default. Add `--planning` to enable
+observed-target planning and `--port 3921` for a separately prepared runtime.
+Once that runtime has loaded the matching original initial save, use:
+
+```sh
+python3 -m civ2.run --planning --port 3921 \
+  --initial-save .runtime/setup/initial.sav --directory runs/planning-attempt \
+  --env-file /path/to/private/env
+```
+
+The same options are available through Python:
 
 ```python
 from civ2.engine import Game

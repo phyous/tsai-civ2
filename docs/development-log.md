@@ -58,8 +58,11 @@ model losses.
 Attempts 002 and 003 start from the same verified map and settings in separate
 local browser runtimes. Attempt 002 uses immediate action choices; attempt 003
 adds independent Jev-selected persistent objectives. Both retain continuous
-recordings, including controller-development pauses. These are ongoing games,
-not completed victories or defeats.
+recordings, including controller-development pauses. These are now finalized harness-development attempts,
+not completed victories or defeats. Attempt 002 stopped on turn 10 after 25
+model calls; its last research choice failed before button-down. Attempt 003
+reached two cities, Rome and Veii, with a turn-5 native checkpoint and 19 calls
+(5 plans and 14 commands). Their full recordings retain the development pauses.
 
 The baseline repeatedly skipped its second starting Settler through turn 10.
 In the planned run, Jev chose a frontier target and moved north, then proposed
@@ -75,6 +78,31 @@ Varied repaint waits avoid sampling the same unreadable blink phase and issue
 no game input. Planning choices and dispatched commands have separate evidence
 and HUD labels. A responsive read-only live theater at `/web/watch.html` displays
 the recorder's complete composition without opening another emulator.
+
+## Native city controls and runtime performance
+
+City reviews now let Jev open production, request a purchase quote, or exit.
+Opening Buy never authorizes spending: the original COMPLETE1 price and treasury
+are supplied to a separate Jev choice between Complete it and Never mind. A
+calibration with 9 gold verified a 2-gold Warrior quote, declined it, and restored
+the previous Settlers production with identical parsed gameplay fields. An
+unaffordable 110-gold quote had only its original acknowledgment button.
+
+A separate labor calibration removed and restored one worker through the native
+Resource Map. The save confirmed worker slot 17 and the entertainer/resource
+changes. The remaining labor coordinates still need native validation before
+full reassignment can be exposed as model actions.
+
+The automatic Civilopedia page after a discovery exposed slow emulator callbacks
+in the embedded browser. Five-sample measurements in a dedicated local headless
+Chrome process gave median running captures of 5.97 ms on the map and 14.96 ms
+on the original Civilopedia, versus multi-second calls in the previous runtime.
+The game and emulator source were unchanged. This deployment disables background
+page throttling; the experiment does not isolate which browser difference caused
+the improvement. A separate original Graphics Options calibration disabled only
+“Civilopedia for Advances,” leaving all gameplay fields and the other five
+graphics settings unchanged. The runner now applies that presentation setting
+once at a verified map boundary.
 
 ## Evidence conventions
 

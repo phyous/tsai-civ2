@@ -14,6 +14,8 @@ new-city default name. Unknown dialogs never authorize Enter or Escape.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import unicodedata
@@ -115,6 +117,23 @@ def _edit_distance(a,b):
     return previous[-1]
 
 
+def _saved_city_name(raw_name,state):
+    """Resolve only a unique exact/one-edit owned SAV identity, never a new city."""
+    if not isinstance(state,dict) or not isinstance(raw_name,str) or len(_normal(raw_name))<3:
+        return None
+    digest=state.get('evidence',{}).get('save_sha256')
+    player=state.get('player',{}).get('id')
+    if not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest) or type(player) is not int:
+        return None
+    owned=[c for c in state.get('cities',[]) if isinstance(c,dict) and c.get('owner')==player
+           and all(type(c.get(k)) is int for k in ('id','owner','x','y'))
+           and isinstance(c.get('name'),str)]
+    exact=[c for c in owned if _normal(c['name'])==_normal(raw_name)]
+    if exact:return exact[0] if len(exact)==1 else None
+    near=[c for c in owned if _edit_distance(_normal(c['name']),_normal(raw_name))==1]
+    return near[0] if len(near)==1 else None
+
+
 def _production_stat(text):
     return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+/\d+\s+hp:\s*\d+/\d+)?\)',text))
 
@@ -175,6 +194,71 @@ def _native_map_kind(rows, observation, state):
     return None, 'Native moving-unit or end-of-turn status is not uniquely observed'
 
 
+def _civilopedia_reference(rows, observation, rules):
+    """Recognize the measured native advance-reference layout, never a modal.
+
+    Body text remains evidence only. In particular, an OCR parenthetical such
+    as ``(with Masonty)`` is not corrected or used as a technology requirement.
+    Only the observed EXIT control is authorized by this classification.
+    """
+    if not any(r['normal']=='advances menu' for r in rows):
+        return None
+    failure={'reason':'Civilopedia reference title, panels or controls are incomplete or ambiguous'}
+    if (observation['width'],observation['height'])!=(640,480) or not isinstance(rules,dict):
+        return failure
+    top=[r for r in rows if r['bounds'][1]<50]
+    if len(top)!=1 or not 230<=top[0]['center'][0]<=410 or not 10<=top[0]['center'][1]<=40:
+        return failure
+    title=top[0]
+    matches=[advance for advance in rules.get('advances',[])
+             if isinstance(advance,dict) and isinstance(advance.get('name'),str)
+             and type(advance.get('id')) is int and _normal(advance['name'])==title['normal']]
+    if len(matches)!=1:
+        return failure
+    controls={}
+    zones={'advances menu':(85,290),'description':(305,420),'exit':(440,555)}
+    for name,(left,right) in zones.items():
+        found=[r for r in rows if r['normal']==name]
+        if (len(found)!=1 or not left<=found[0]['bounds'][0]
+                or found[0]['bounds'][0]+found[0]['bounds'][2]>right
+                or not 445<=found[0]['center'][1]<=468):
+            return failure
+        controls[name]=found[0]
+    if len([r for r in rows if r['bounds'][1]>=432])!=3:
+        return failure
+    allows=[r for r in rows if r['normal']=='allows' and 328<=r['bounds'][0]<430
+            and 55<=r['center'][1]<=85]
+    repeated=[r for r in rows if r['normal']==title['normal'] and 250<=r['center'][1]<=390
+              and 210<=r['center'][0]<=430]
+    if len(allows)!=1 or len(repeated)!=1:
+        return failure
+    used={r['source_line'] for r in [title,allows[0],*controls.values()]}
+    reference_names={_normal(item['name']) for table in ('advances','units','improvements')
+                     for item in rules.get(table,[]) if isinstance(item,dict) and isinstance(item.get('name'),str)}
+    for r in rows:
+        x,y,w,h=r['bounds']
+        if r['confidence']<.8 or x<64 or x+w>576:
+            return failure
+        if r['source_line'] in used:
+            continue
+        # Upper-left illustration letters are pixels from the original art,
+        # not controls. All other body labels must occupy their original panels.
+        artwork=(68<=x and x+w<=314 and 52<=y and y+h<=240
+                 and 1<=len(r['text'])<=12 and r['text'].isalpha() and r['text'].isupper()
+                 and r['normal'] not in ('ok','yes','no','cancel','help','close'))
+        entry=re.fullmatch(r'(.+?)(?:\s+\(with [a-z ]{1,60}\))?',r['normal'])
+        allowed=(328<=x and x+w<=572 and 85<=y and y+h<=238
+                 and entry is not None and entry[1] in reference_names)
+        chart=(68<=x and x+w<=572 and 248<=y and y+h<=390 and r['normal'] in reference_names)
+        category=(435<=x and x+w<=565 and 394<=y and y+h<=428
+                  and bool(re.fullmatch(r'[a-z]{3,20}',r['normal'])))
+        if not (artwork or allowed or chart or category):
+            return failure
+    return {'title':title,'advance':matches[0],'controls':list(controls.values()),
+            'exit':controls['exit'],'body':[r['text'] for r in rows if r['source_line'] not in used],
+            'anchor_lines':[r['source_line'] for r in [title,allows[0],repeated[0],*controls.values()]]}
+
+
 def classify_dialog(observation, *, rules=None, game_text=None, state=None):
     """Return supported/unknown classification with exact visible option targets.
 
@@ -185,6 +269,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
     rows=_rows(observation);width,height=observation['width'],observation['height']
     result=dict(id='unknown',kind='unknown',supported=False,title='',width=width,height=height,
                 sha256=observation['sha256'],options=[],buttons=[],requires_model=False,
+                visible_text='\n'.join(r['text'] for r in rows),
                 mechanical_action=None,outcome=None,reason='No unambiguous supported original screen',
                 evidence=dict(source='original screenshot OCR',enabled_state='not established by OCR',
                               option_scope='visible labels only; not a complete scrollable menu'))
@@ -212,6 +297,19 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         limit=min(r['bounds'][1] for r in bottom_buttons)
         return [r for r in below if r['bounds'][1]+r['bounds'][3]<=limit+2],bottom_buttons,limit
     full=' '.join(r['normal'] for r in rows)
+    reference=_civilopedia_reference(rows,observation,rules)
+    if reference is not None:
+        if 'reason' in reference:
+            return unknown(reference['reason'],'civilopedia_reference')
+        buttons=[_option(row,'button') for row in reference['controls']]
+        exit_button=_option(reference['exit'],'button')
+        result['reference']={'advance_id':reference['advance']['id'],
+            'advance_name':reference['advance']['name'],'observed_body':reference['body'],
+            'knowledge':'Reference-page text only; does not establish acquired knowledge or authorize research.'}
+        result['evidence']['reference_layout']={'source':'Original 640x480 Civilopedia advance page and RULES advance title',
+                                                'source_lines':reference['anchor_lines']}
+        return finish('civilopedia_reference',reference['title']['text'],[exit_button],buttons,
+                      mechanical='close_reference',reason='Close only the observed EXIT on the complete original advance-reference layout')
     # Do not confuse a generic final score, a rival arrival or the lost-space-race
     # narrative with the player's victory.
     conquest=single_title(r'your civilization has conquered the entire planet')
@@ -227,6 +325,70 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                       model=bool(choices),outcome=outcome,reason='Original terminal text needs screenshot review; not automated outcome proof')
     if re.search(r'\bspaceship arrives on alpha centauri\b',full):
         return unknown('Arrival does not establish that the human player won','space_arrival')
+    buy_titles=single_title(r'buy .+')
+    if buy_titles:
+        if len(buy_titles)!=1 or buy_titles[0]['confidence']<.8 or not isinstance(rules,dict) or not game_text:
+            return unknown('Buy quote requires one original title, original rules and GAME.TXT','buy_quote')
+        title=buy_titles[0]
+        items=[item for table in ('units','improvements') for item in rules.get(table,[])
+               if isinstance(item,dict) and isinstance(item.get('name'),str)
+               and 'buy '+_normal(item['name'])==title['normal']]
+        if len(items)!=1:
+            return unknown('Buy title is not one unambiguous original production item','buy_quote',title['text'])
+        body,controls,_=body_rows(title,{'ok','cancel','yes','no','help'},320)
+        global_controls=[r for r in rows if r['normal'] in ('ok','cancel','yes','no','help')]
+        if (len(controls)!=1 or controls[0]['normal']!='ok' or controls!=global_controls
+                or abs(title['center'][0]-controls[0]['center'][0])>8
+                or any(r['confidence']<.8 for r in body+controls)):
+            return unknown('Buy quote requires one aligned OK and no competing dialog controls','buy_quote',title['text'])
+        choices=[r for r in body if r['normal'] in ('complete it','never mind')]
+        if choices and ([r['normal'] for r in choices]!=['complete it','never mind'] or len(choices)!=2):
+            return unknown('Buy quote does not show both original purchase alternatives','buy_quote',title['text'])
+        if [r for r in rows if r['normal'] in ('complete it','never mind')]!=choices:
+            return unknown('Buy alternatives occur outside the recognized quote','buy_quote',title['text'])
+        content=[r for r in body if r not in choices]
+        if (not content or (choices and max(r['bounds'][1]+r['bounds'][3] for r in content)>choices[0]['bounds'][1]+2)
+                or any(r['bounds'][1]<title['bounds'][1]+title['bounds'][3]-2 for r in body)):
+            return unknown('Buy quote body and choice geometry are ambiguous','buy_quote',title['text'])
+        text=_normal(' '.join(r['text'] for r in content))
+        amount=r'(?:[0-9]{1,9}|[0-9]{1,3}(?:,[0-9]{3}){1,2})'
+        match=re.fullmatch(r'cost to complete '+re.escape(_normal(items[0]['name']))+r': ('+amount+r') gold\. treasury: ('+amount+r') gold',text)
+        if not match:
+            return unknown('Buy quote lacks the complete exact item, cost and treasury body','buy_quote',title['text'])
+        cost,treasury=(int(value.replace(',','')) for value in match.groups())
+        tag='COMPLETE1' if choices else 'COMPLETE0'
+        if (choices and cost>treasury) or (not choices and cost<=treasury):
+            return unknown('Buy controls conflict with the observed affordability','buy_quote',title['text'])
+        templates=[t for t in dialog_resources(game_text) if t['tag']==tag]
+        expected_body='Cost to complete %STRING0: %NUMBER0 gold. Treasury: %NUMBER1 gold.'
+        if (len(templates)!=1 or _normal(templates[0]['title'])!='buy %string0'
+                or _normal(templates[0]['body'].replace('^',' '))!=_normal(expected_body)
+                or templates[0]['options']!=(['Complete it.','Never mind.'] if choices else [])
+                or templates[0]['buttons'] or templates[0]['listbox']):
+            return unknown('Buy resource does not match the calibrated original quote','buy_quote',title['text'])
+        # An OCR conflict inside this modal makes even a matching text unsafe.
+        conflicts=observation.get('ocr',{}).get('conflicts',[])
+        if any(isinstance(c,dict) and isinstance(c.get('bounds'),list) and len(c['bounds'])==4
+               and all(type(v) is int for v in c['bounds'])
+               and c['bounds'][0]<title['center'][0]+160 and c['bounds'][0]+c['bounds'][2]>title['center'][0]-160
+               and c['bounds'][1]<controls[0]['bounds'][1]+controls[0]['bounds'][3]
+               and c['bounds'][1]+c['bounds'][3]>title['bounds'][1] for c in conflicts):
+            return unknown('Conflicting OCR overlaps the native Buy quote','buy_quote',title['text'])
+        result['resource_tag']=tag
+        result['quote']={'item':items[0]['name'],'cost':cost,'treasury':treasury,
+            'source':'Original GAME.TXT '+tag+' and complete visible quote','purchase_executed':False,
+            'knowledge':'Quote only. Opening Buy has not purchased anything; any completion requires its own observed choice.'}
+        result['evidence']['quote']={'source_tag':tag,'title_source_line':title['source_line'],
+            'body_source_lines':[r['source_line'] for r in content],
+            'choice_source_lines':[r['source_line'] for r in choices],
+            'button_source_line':controls[0]['source_line'],
+            'observed_body':'\n'.join(r['text'] for r in content),
+            'template_sha256':hashlib.sha256(json.dumps(templates[0],sort_keys=True).encode()).hexdigest()}
+        ok=_option(controls[0],'button')
+        return finish('buy_quote',title['text'],[_option(r,'option') for r in choices] if choices else [ok],
+                      [ok],model=bool(choices),mechanical=None if choices else 'acknowledge_information',
+                      reason='Original purchase quote; only its observed alternatives authorize a separate choice' if choices
+                      else 'Original unaffordable quote has only an observed OK acknowledgement')
     science_report=single_title(r'science advisor report')
     if science_report:
         if len(science_report)!=1 or science_report[0]['confidence']<.8:
@@ -361,14 +523,17 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
     if not matches and isinstance(state,dict) and isinstance(rules,dict):
         city_names={c['name'] for c in state.get('cities',[]) if isinstance(c,dict) and isinstance(c.get('name'),str)}
         city_names.update(n for n in state.get('observed_city_names',[]) if isinstance(n,str))
+        # A provisional OCR name can coexist with its later native-save name.
+        # Fold only uniquely corroborated aliases instead of making that single
+        # city appear to be two competing identities.
+        city_names={(_saved_city_name(name,state) or {}).get('name',name) for name in city_names}
         rule_names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[]) if r.get('name') and r['name']!='Nothing'}
         approximate=[]
         for title in rows:
-            m=re.fullmatch(r'what shall (.{2,18}) in (.{1,60})',title['normal'])
-            if not m or title['confidence']<.8 or _edit_distance(m[1],'we build')>4:
+            m=re.fullmatch(r'what shall (?:we|me) ([a-z]{3,7}) in (.{1,60})',title['normal'])
+            if not m or title['confidence']<.8 or (_edit_distance(m[1],'build')>2 and m[1]!='bodd'):
                 continue
-            names=[name for name in city_names if _edit_distance(m[2],_normal(name))<=max(1,len(_normal(name))//5)
-                   and _edit_distance(title['normal'],'what shall we build in '+_normal(name))<=6]
+            names=[name for name in city_names if _edit_distance(m[2],_normal(name))<=1]
             if len(names)!=1:
                 continue
             body,buttons,_=body_rows(title,{'ok','auto','help'},440)
@@ -437,15 +602,48 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             return finish(kind,title['text'],choices,buttons,reason='Navigation only; caller must bind its requested owned city, never accept a guessed default')
         if kind=='new_city_name':
             labels=[r for r in body if re.match(r'city name\s*:',r['text'],re.I)]
-            if len(labels)!=1 or not any(r['normal']=='ok' for r in button_rows):
-                return unknown('Name prompt or visible OK is missing',kind,title['text'])
+            if (len(labels)!=1 or {r['normal'] for r in button_rows}!={'ok','cancel'}
+                    or len(button_rows)!=2 or any(r['confidence']<.8 for r in body+button_rows)):
+                return unknown('Name prompt or complete OK/Cancel controls are missing',kind,title['text'])
             label=labels[0];suffix=label['text'].partition(':')[2].strip()
-            values=[r for r in body if r is not label and -18<=r['center'][1]-label['center'][1]<=48]
+            values=[r for r in body if r is not label
+                    and abs(r['center'][1]-label['center'][1])<=12
+                    and r['bounds'][0]>=label['bounds'][0]+label['bounds'][2]]
+            if len(body)!=1+len(values) or (suffix and values):
+                return unknown('Name-entry body contains ambiguous or extra text',kind,title['text'])
             if suffix:
                 result['default_name']=suffix
             elif len(values)==1:
                 result['default_name']=values[0]['text']
-            else:return unknown('Default city name is unreadable or ambiguous',kind,title['text'])
+            elif not values:
+                # A selected native edit value can be absent from OCR. The
+                # source-bound NAMECITY form may still accept its untouched
+                # default: no name is typed, inferred, or added to known cities.
+                templates=[t for t in dialog_resources(game_text) if t['tag']=='NAMECITY'] if game_text else []
+                ok_row=next(r for r in button_rows if r['normal']=='ok')
+                cancel_row=next(r for r in button_rows if r['normal']=='cancel')
+                source_ok=(len(templates)==1 and _normal(templates[0]['title'])=='what shall we name this city'
+                    and _normal(templates[0]['body'])=='city name' and not templates[0]['options']
+                    and not templates[0]['listbox'] and not templates[0]['buttons'])
+                geometry_ok=(label['normal']=='city name'
+                    and title['bounds'][1]+title['bounds'][3] < label['bounds'][1]
+                    and 16 <= ok_row['center'][1]-label['center'][1] <= 100
+                    and abs(ok_row['center'][1]-cancel_row['center'][1])<=12
+                    and ok_row['center'][0] < title['center'][0] < cancel_row['center'][0]
+                    and abs((ok_row['center'][0]+cancel_row['center'][0])/2-title['center'][0])<=24
+                    and title['center'][0]-230 <= label['bounds'][0]
+                    and label['bounds'][0]+label['bounds'][2] < title['center'][0])
+                extra_controls=[r for r in rows if r['normal'] in {'ok','cancel','yes','no','help','goal','auto'}
+                                and r not in button_rows]
+                if not source_ok or not geometry_ok or extra_controls:
+                    return unknown('Unreadable default lacks the complete original name-entry form',kind,title['text'])
+                result['default_name']=None
+                result['resource_tag']='NAMECITY'
+                result['evidence']['name_entry']={'source_tag':'NAMECITY',
+                    'field_label':label['text'],'field_label_source_line':label['source_line'],
+                    'field_label_bounds':label['bounds'],'value_observed':False,
+                    'operation':'Accept the unchanged native default without typing or inferring its value'}
+            else:return unknown('Default city name is ambiguous',kind,title['text'])
             ok=[_option(r,'button') for r in button_rows if r['normal']=='ok']
             return finish(kind,title['text'],ok,buttons,mechanical='accept_observed_default_name')
         if kind in ('research_choice','production_choice','government_choice'):
@@ -588,7 +786,16 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         title=titles[0]['text'] if len(titles)==1 else 'Original city screen'
         if len(titles)==1:
             match=re.match(r'city of (.+?),\s*\d+\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',titles[0]['text'],re.I)
-            if match:result['observed_city_name']=match[1].strip()
+            if match:
+                raw_name=match[1].strip()
+                result['observed_city_name']=raw_name
+                city=_saved_city_name(raw_name,state) if titles[0]['confidence']>=.8 else None
+                if city is not None:
+                    result['observed_city_name']=city['name']
+                    if _normal(city['name'])!=_normal(raw_name):
+                        result['city_name_recovery']={'source':'Unique one-edit match to owned city in original save',
+                            'ocr_text':raw_name,'canonical_name':city['name'],'city_id':city['id'],
+                            'save_sha256':state['evidence']['save_sha256'],'source_line':titles[0]['source_line']}
         return finish('city_screen',title,buttons,buttons,model=True)
     map_kind,map_reason=_native_map_kind(rows,observation,state)
     if map_kind:

@@ -6,7 +6,10 @@ import re
 from pathlib import Path
 import time
 import zipfile
+from copy import deepcopy
+from .city_controls import CityControlError, city_control_candidates
 from .dialogs import classify_dialog
+from .preferences import configure_graphics_preferences
 from .session import Session
 
 
@@ -22,6 +25,9 @@ def controller_context(session):
         session.controller = dict(reviewed={'turn':session.state['turn'],'actions':[]},
             pending_empire=None,pending_empire_confirmed=False,pending_city=None,active_city=None,
             production_reviewed=set(),observed_city_names=set())
+    # Existing live sessions can adopt these transaction fields when paused.
+    session.controller.setdefault('city_controls_reviewed', {})
+    session.controller.setdefault('pending_city_control', None)
     return session.controller
 
 
@@ -39,7 +45,88 @@ def observed_city_identity(dialog):
     # Identity includes the visible year so two cities or later turns cannot
     # share a production-review flag. OCR body resources remain separate.
     match = re.match(r'City of (.+?),\s*(\d+\s*(?:B\.?\s*C\.?|A\.?\s*D\.?))', dialog.get('title',''), re.I)
-    return (match[1],re.sub(r'[^0-9A-Z]','',match[2].upper())) if match else None
+    if not match:
+        return None
+    name = dialog.get('observed_city_name', match[1])
+    if not isinstance(name, str):
+        return None
+    if name.casefold() != match[1].casefold():
+        proof = dialog.get('city_name_recovery', {})
+        if (proof.get('ocr_text') != match[1] or proof.get('canonical_name') != name
+                or proof.get('source') != 'Unique one-edit match to owned city in original save'):
+            return None
+    return name,re.sub(r'[^0-9A-Z]','',match[2].upper())
+
+
+def city_control_transition(session, context, observation, dialog):
+    """Complete a review only after its actual follow-up returns to the city."""
+    pending = context['pending_city_control']
+    if pending is None:
+        return None
+    action = pending['action']; identifier = action['id']; kind = dialog['kind']
+    expected = {'change_production':'production_choice','open_buy_quote':'buy_quote'}.get(identifier)
+    if kind == expected:
+        if pending['response_dispatched']:
+            return 'City review dialog remained after its response; no repeated input authorized.'
+        if kind == 'buy_quote' and dialog.get('resource_tag') not in ('COMPLETE0','COMPLETE1'):
+            return 'City purchase quote is not a reviewed original resource.'
+        pending['observed_dialog'] = {'kind':kind,'sha256':observation['sha256'],
+                                      'resource_tag':dialog.get('resource_tag')}
+    elif kind == 'city_screen':
+        city = observed_city_identity(dialog)
+        if city is None or city[0].casefold()!=pending['city'][0].casefold() or city[1]!=pending['city'][1]:
+            return 'City review returned to a different or unreadable city.'
+        if identifier == 'exit_city':
+            return 'Exit input did not have an observed city-window transition.'
+        if not pending['observed_dialog'] or not pending['response_dispatched']:
+            return 'City control returned without an observed follow-up and response.'
+        record = pending['reviewed']
+        if identifier not in record['actions']:
+            record['actions'].append(identifier)
+        if identifier == 'change_production':
+            context['production_reviewed'].add(city)
+        session.journal.append('city_control_review_completed', decision=pending['decision'],
+            action_id=identifier, reviewed=deepcopy(record),
+            observed_dialog=deepcopy(pending['observed_dialog']),
+            response_decision=pending['response_decision'], completion_screen=observation['sha256'])
+        context['pending_city_control'] = None
+    elif kind in ('normal_map','end_turn'):
+        if identifier != 'exit_city':
+            return 'City review closed without the expected observed completion.'
+        record = pending['reviewed']
+        session.journal.append('city_control_closed', decision=pending['decision'],action_id=identifier,
+            city={'id':record['city_id'],'name':record['city_name'],'year_raw':record['year_raw']},
+            completion_screen=observation['sha256'])
+        context['pending_city_control'] = None
+        context['active_city'] = None
+    return None
+
+
+def city_control_review(session, context, dialog, city):
+    """Return the saved city's review ledger; new unsaved cities use legacy flow."""
+    matches = [c for c in session.state['cities'] if c.get('name','').casefold()==city[0].casefold()]
+    if not matches:
+        return None
+    if len(matches)!=1 or matches[0].get('owner')!=session.state.get('player',{}).get('id'):
+        raise CityControlError('City screen does not identify one saved owned city')
+    year = session.state.get('year_raw')
+    saved_year = f'{abs(year)}'+('BC' if year<0 else 'AD') if type(year) is int else None
+    if city[1] != saved_year:
+        # Automatic production windows can precede the next turn's native
+        # checkpoint. Keep their observed-option workflow until data is fresh.
+        return None
+    saved = matches[0]
+    key = (saved['id'],saved['name'],session.state.get('year_raw'))
+    record = context['city_controls_reviewed'].get(key)
+    if record is None:
+        record = {'city_id':saved['id'],'city_name':saved['name'],
+                  'year_raw':session.state.get('year_raw'),'actions':[]}
+    # A prior production response is only synced once the full city is seen.
+    if city in context['production_reviewed'] and 'change_production' not in record['actions']:
+        record['actions'].append('change_production')
+    city_control_candidates(session.state,dialog,record,session.rules)
+    context['city_controls_reviewed'][key] = record
+    return record
 
 
 def observe_ready(session, resources):
@@ -51,6 +138,15 @@ def observe_ready(session, resources):
     observation = session.ui.observe()
     dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
                              state=classification_state(session))
+    cursor = observation.get('cursor_hotspot')
+    if not dialog['supported'] and cursor and max(abs(cursor[0]-620),abs(cursor[1]-410)) > 3:
+        session.game.rpc('resume')
+        receipt = session.ui.park_pointer()
+        session.game.rpc('pause')
+        session.journal.append('pointer_park_for_observation',before=observation['sha256'],receipt=receipt)
+        observation = session.ui.observe()
+        dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
+                                 state=classification_state(session))
     for delay in (.13, .37, .61, .19, .43, .73, .29, .47):
         if dialog['supported']:
             break
@@ -76,11 +172,22 @@ def run_steps(session, *, max_decisions=10000):
         session.journal.append('screen_observed', screen=observation['sha256'],
                                 classification=dialog['kind'],supported=dialog['supported'],
                                 path=Path(observation['path']).relative_to(session.journal.directory).as_posix(),
-                                **({'native_rejection':dialog['native_rejection']} if dialog.get('native_rejection') else {}))
+                                **({'native_rejection':dialog['native_rejection']} if dialog.get('native_rejection') else {}),
+                                **({'quote':dialog['quote'],'resource_tag':dialog.get('resource_tag')} if dialog.get('quote') else {}))
         if not dialog['supported']:
             return {'status':'paused','reason':'Original screen requires a controller update.',
                     'screen':observation['path'],'classification':dialog}
         kind = dialog['kind']
+        city_error = city_control_transition(session, context, observation, dialog)
+        if city_error:
+            return {'status':'paused','reason':city_error,'screen':observation['path']}
+        if kind in ('normal_map','end_turn') and not context.get('graphics_configured', False):
+            receipt = configure_graphics_preferences(session.ui)
+            session.journal.append('graphics_preferences_configured', receipt=receipt)
+            context['graphics_configured'] = True
+            continue  # Reobserve after the verified presentation-only setup.
+        if dialog.get('observed_city_name'):
+            context['observed_city_names'].add(dialog['observed_city_name'])
         pending = context['pending_empire']
         expected = {'open_tax':{'tax_rate','luxury_rate'},
                     'open_research':{'science_advisor'},
@@ -91,15 +198,29 @@ def run_steps(session, *, max_decisions=10000):
         if kind in ('victory','game_over'):
             return {'status':'paused','reason':'Original end-game screen awaits outcome verification.',
                     'screen':observation['path'],'classification':dialog}
+        if dialog['mechanical_action'] == 'close_reference':
+            exits = [button for button in dialog['buttons'] if button['text'].casefold() == 'exit']
+            if len(exits) != 1:
+                return {'status':'paused','reason':'Reference exit was not uniquely observed.', 'screen':observation['path']}
+            session.game.rpc('resume')
+            receipt = session.ui.select_text(observation, exits[0]['text'], exact=True, timeout=120)
+            session.journal.append('close_native_reference', screen=observation['sha256'], receipt=receipt)
+            time.sleep(1.2)
+            continue
         if dialog['mechanical_action'] in ('acknowledge_information','accept_observed_default_name'):
             housekeeping += 1
             if housekeeping > 20:
                 raise RuntimeError('Repeated information screens need inspection')
-            if kind == 'new_city_name':
+            if kind == 'new_city_name' and dialog.get('default_name'):
                 context['observed_city_names'].add(dialog['default_name'])
             if kind == 'rule_rejection':
                 session.note_native_rejection(dialog)
             session.mechanical(dialog['mechanical_action'])
+            pending_control = context['pending_city_control']
+            if (pending_control and kind=='buy_quote' and dialog.get('resource_tag')=='COMPLETE0'
+                    and pending_control['observed_dialog']):
+                pending_control['response_dispatched'] = True
+                pending_control['response_decision'] = None
             # The founded-city notice can return to the map while the city
             # window is still being created. Let its original repaint finish.
             session.game.rpc('resume')
@@ -117,6 +238,19 @@ def run_steps(session, *, max_decisions=10000):
             context['active_city'] = city
             context['observed_city_names'].add(city[0])
             session.city_report = {'source_image':observation['sha256'],'city_name':city[0],'text':observation['text']}
+            try:
+                review = city_control_review(session, context, dialog, city)
+            except CityControlError as error:
+                return {'status':'paused','reason':str(error),'screen':observation['path']}
+            if review is not None:
+                previous_decisions = session.decisions
+                action, _ = session.choose_city_control(dialog, review)
+                context['pending_city_control'] = {'action':action,'city':city,'reviewed':review,
+                    'decision':session.decisions if session.decisions>previous_decisions else None,
+                    'observed_dialog':None,'response_dispatched':False,'response_decision':None}
+                housekeeping = 0
+                time.sleep(1.2)
+                continue
             # Opening the native production menu exposes the strategic choices;
             # only Jev picks what the city will actually build.
             label = 'Exit' if city in context['production_reviewed'] else 'Change'
@@ -137,7 +271,11 @@ def run_steps(session, *, max_decisions=10000):
             session.checkpoint()
             if context['reviewed']['turn'] != session.state['turn']:
                 context['reviewed'] = {'turn':session.state['turn'],'actions':[]}
-                context['production_reviewed'].clear()
+                year = session.state['year_raw']
+                year_text = f'{abs(year)}'+('BC' if year<0 else 'AD')
+                context['production_reviewed'] = {c for c in context['production_reviewed'] if c[1]==year_text}
+                context['city_controls_reviewed'] = {key:value for key,value in context['city_controls_reviewed'].items()
+                                                    if value['year_raw']==year}
             elif context['pending_empire']:
                 if not context['pending_empire_confirmed']:
                     return {'status':'paused','reason':'Requested empire menu did not have an observed successful review.', 'screen':observation['path']}
@@ -182,7 +320,11 @@ def run_steps(session, *, max_decisions=10000):
             if len(dialog['options']) == 1:
                 return {'status':'paused','reason':'A forced choice needs a verified mechanical handler.', 'screen':observation['path']}
             session.choose_dialog(dialog)
-            if kind == 'production_choice':
+            pending_control = context['pending_city_control']
+            if pending_control and pending_control['observed_dialog'] and kind==pending_control['observed_dialog']['kind']:
+                pending_control['response_dispatched'] = True
+                pending_control['response_decision'] = session.decisions
+            elif kind == 'production_choice':
                 if context['active_city'] is not None:
                     context['production_reviewed'].add(context['active_city'])
             housekeeping = 0
@@ -199,9 +341,13 @@ def main():
     parser.add_argument('--max-decisions', type=int, default=10000)
     parser.add_argument('--max-requests', type=int, default=20000)
     parser.add_argument('--fps',type=int,default=4)
+    parser.add_argument('--port',type=int,default=3920)
+    parser.add_argument('--planning',action='store_true',help='Ask Jev for persistent unit objectives before independent action choices')
     args = parser.parse_args()
+    from .engine import Game
     session = Session(args.directory,args.initial_save,env_file=args.env_file,
-                      max_requests=args.max_requests,fps=args.fps)
+                      max_requests=args.max_requests,fps=args.fps,
+                      game=Game(port=args.port),planning=args.planning)
     outcome = None
     try:
         outcome = run_steps(session,max_decisions=args.max_decisions)

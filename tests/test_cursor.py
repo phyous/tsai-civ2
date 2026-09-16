@@ -1,4 +1,5 @@
 from io import BytesIO
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 from PIL import Image
@@ -43,6 +44,30 @@ class FakeGame:
         return {'type':'mouse',**event}
 
 
+class MeasuredEdgeGame(FakeGame):
+    """Measured native gain2, retaining the real screen's clipped-arrow region.
+
+    The earlier fake's y455/x620 clamps concealed the actual guest behavior:
+    DOSBox/Windows can put the arrow hotspot beyond its fully visible bounds.
+    """
+    def __init__(self,position):
+        super().__init__();self.cursor=position;self.positions=[position]
+    def request(self,path,binary=False):
+        assert path=='/bridge/capture/game' and binary
+        image=Image.new('RGB',(640,480),(131,118,93))
+        x,y=self.cursor
+        for dx,dy,value in CONSTRAINTS:
+            if 0<=x+dx<640 and 0<=y+dy<480:image.putpixel((x+dx,y+dy),value)
+        out=BytesIO();image.save(out,format='PNG');return out.getvalue()
+    def rpc(self,cmd,*args):
+        if cmd=='moveRelative':
+            dx,dy=args;event={'type':'mousemove','dx':dx,'dy':dy};self.inputs.append(event)
+            self.cursor=(max(0,min(639,self.cursor[0]+2*dx)),max(0,min(479,self.cursor[1]+2*dy)))
+            self.positions.append(self.cursor)
+            return event
+        return super().rpc(cmd,*args)
+
+
 class CursorTests(unittest.TestCase):
     def test_exact_arrow_and_unconstrained_background(self):
         self.assertEqual(locate_cursor(picture((403,337))),(403,337))
@@ -82,6 +107,32 @@ class CursorTests(unittest.TestCase):
         for target in ((True,1),(639,479),(-1,20),(10.5,20)):
             with self.assertRaises(ValueError):move_and_click(game,*target)
         self.assertEqual(game.inputs,[])
+
+    @patch('civ2.cursor.time.sleep')
+    def test_measured_gain_two_reproduces_old_bottom_overshoot_without_click(self,_):
+        game=MeasuredEdgeGame((500,447))
+        with patch('civ2.cursor.INITIAL_GAIN',1.0):
+            with self.assertRaisesRegex(CursorError,'not fully visible'):
+                move_and_click(game,500,458)
+        self.assertEqual(game.cursor,(500,469))
+        self.assertTrue(all(event['type']=='mousemove' for event in game.inputs))
+
+    @patch('civ2.cursor.time.sleep')
+    def test_conservative_first_step_keeps_measured_bottom_and_right_arrows_visible(self,_):
+        for start,target in (((500,447),(500,458)),((619,410),(627,410))):
+            game=MeasuredEdgeGame(start)
+            receipt=move_and_click(game,*target)
+            self.assertTrue(receipt['issued'])
+            self.assertTrue(all(x<=627 and y<=460 for x,y in game.positions))
+            self.assertLessEqual(max(abs(a-b) for a,b in zip(game.cursor,target)),3)
+            self.assertEqual(receipt['observed_cursor'],list(game.cursor))
+            self.assertEqual([event['type'] for event in game.inputs[-2:]],['mousedown','mouseup'])
+
+    def test_optional_actual_clipped_arrow_remains_unsupported(self):
+        path=Path(__file__).resolve().parents[1]/'.runtime/headless-benchmark/exit-probe2.png'
+        if not path.exists():self.skipTest('private original clipped-arrow image unavailable')
+        with Image.open(path) as image:
+            with self.assertRaisesRegex(CursorError,'not fully visible'):locate_cursor(image)
 
 
 if __name__=='__main__':unittest.main()
