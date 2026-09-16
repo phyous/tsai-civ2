@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Jev / Civilization II</title>
+  <link rel="stylesheet" href="/web/dashboard.css">
+  <script defer src="/web/dashboard.js"></script>
+</head>
+<body>
+  <main id="viewport" aria-label="Jev Civilization II live dashboard">
+    <section id="stage" aria-label="Game and decision recording">
+      <canvas id="dashboard" width="1920" height="1080" aria-label="Empire statistics, actual Jev probabilities, and recent game events"></canvas>
+      <div id="game-window">
+        <iframe id="game" src="/engine/runtime.html?embed=1" title="Original Civilization II game, spectator view" tabindex="-1" allow="autoplay" sandbox="allow-scripts allow-same-origin allow-pointer-lock"></iframe>
+      </div>
+      <nav id="controls" aria-label="Emulator controls">
+        <button id="start" data-action="start" type="button"><span aria-hidden="true">▶</span> Start game</button>
+        <button id="pause" data-action="pause" type="button" hidden><span aria-hidden="true">Ⅱ</span> Pause</button>
+        <button id="resume" data-action="resume" type="button" hidden><span aria-hidden="true">▶</span> Resume</button>
+      </nav>
+      <p id="screen-reader-state" class="sr-only" aria-live="polite">Waiting for game telemetry. No model decision has been received.</p>
+      <p id="control-error" class="sr-only" role="alert"></p>
+    </section>
+  </main>
+  <noscript>This dashboard needs JavaScript to display the original game and recorded model decisions.</noscript>
+</body>
+</html>

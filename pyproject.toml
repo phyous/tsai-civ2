@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tsai-civ2"
+version = "0.1.0"
+description = "TypeSafe Jev plays original Civilization II with visible decision probabilities"
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.11,<4", "Pillow>=10.4,<13"]
+license = "MIT"
+
+[tool.setuptools.packages.find]
+include = ["civ2*"]

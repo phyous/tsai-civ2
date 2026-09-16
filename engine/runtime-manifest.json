@@ -1,0 +1,20 @@
+{
+  "source_page": "https://playclassic.games/games/turn-based-strategy-dos-games-online/play-sid-meiers-civilization-ii-online/play/",
+  "game": {
+    "name": "Sid Meier's Civilization II",
+    "version": "1.06 27-Mar-96",
+    "executable": "civ2/CIV2.EXE",
+    "format": "16-bit Windows NE",
+    "executable_sha256": "b5a64ecbd8ebdd37e3ca2391c57319fec7ac227fcd2c3b9c96498969ea51ef96",
+    "startup": "windows.bat -> WINDOWS/WIN.COM -> WIN.INI run=c:\\civ2\\CIV2.EXE"
+  },
+  "runtime": "Emularity + Emscripten em-dosbox asm.js + bundled Windows 3.1",
+  "files": [
+    {"path": "vendor/es6-promise.js", "url": "https://playclassic.games/wp-content/themes/playclassic/emulator/emdosbox/es6-promise.js", "bytes": 28549, "sha256": "0800380023fdcadff723895f2d787888a8741e77201d917765ea6ee650aed6c5"},
+    {"path": "vendor/browserfs.min.js", "url": "https://playclassic.games/wp-content/themes/playclassic/emulator/emdosbox/browserfs.min.js", "bytes": 240276, "sha256": "85897678cb2802e0c392948e1752a55331844e75b294e16e816b42ebf40d598f"},
+    {"path": "vendor/loader.js", "url": "https://playclassic.games/wp-content/themes/playclassic/emulator/emdosbox/loader.js", "bytes": 85322, "sha256": "83fd31b30ba71f4b9f05431f09e27789de128fe6781f4917caf406faef689449"},
+    {"path": "vendor/dosbox-sync.js", "url": "https://playclassic.games/wp-content/themes/playclassic/emulator/emdosbox/emulators/em-dosbox/dosbox-sync.js", "bytes": 5522409, "sha256": "e73cd0b0130b2428863f000f3c9a77daf554b8dbed7d4fac02b1ec092871812a"},
+    {"path": "vendor/dosbox-sync.mem", "url": "https://playclassic.games/wp-content/themes/playclassic/emulator/emdosbox/emulators/em-dosbox/dosbox-sync.mem", "bytes": 319163, "sha256": "4427627868e72063098f3b1c647e7bcd4afc3c70e7a93e9725a99fd7ad22b523"},
+    {"path": "game/civ2-win31.zip", "url": "https://playclassic.games/wp-content/themes/playclassic/downloadGameFile.php?01waxVAtrh3e=rIBpv2J5A6z3x5qAOpZevoG", "bytes": 48090199, "sha256": "23df97ce874fca87c8ec430f743448e8f063e22b6eb12ffe0e1d549f907d7647"}
+  ]
+}

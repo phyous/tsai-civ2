@@ -1,0 +1,13 @@
+{
+  "purpose": "Expose the existing original SDL_SendMouseMotion function as a bounded host input path; no game executable or guest memory patch",
+  "original": "vendor/dosbox-sync.js",
+  "original_sha256": "e73cd0b0130b2428863f000f3c9a77daf554b8dbed7d4fac02b1ec092871812a",
+  "derived": "vendor/dosbox-input.js",
+  "derived_bytes": 5522441,
+  "derived_sha256": "99da026fd382927817a0e7b6b561a6e9e36aa248a9a9b6035804293116d1c0bf",
+  "replace_once": "return{_main:ri,",
+  "with": "return{_tsai_sdl_send_mouse_motion:lqa,_main:ri,",
+  "symbol": "lqa = original SDL_SendMouseMotion(window, mouseID, relative, x, y)",
+  "runtime_license": "DOSBox/em-dosbox GPL-2.0; bundled third-party notices remain applicable",
+  "upstream": "https://github.com/dreamlayers/em-dosbox"
+}

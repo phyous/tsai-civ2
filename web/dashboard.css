@@ -1,0 +1,20 @@
+:root { color-scheme: dark; background: #091b28; font-family: Arial, Helvetica, sans-serif; }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: radial-gradient(ellipse at center, #173d47 0%, #091b28 75%); }
+#viewport { position: fixed; inset: 0; display: grid; place-items: center; }
+#stage { position: relative; width: 1920px; height: 1080px; flex: none; transform-origin: center center; box-shadow: 0 24px 120px #0008; }
+#dashboard { display: block; width: 1920px; height: 1080px; }
+#game-window { position: absolute; left: 32px; top: 190px; width: 1120px; height: 840px; overflow: hidden; background: #071015; }
+#game { border: 0; display: block; width: 100%; height: 100%; background: #071015; pointer-events: none; }
+#game-window[data-hidden="true"] { visibility: hidden; }
+#controls { position: absolute; right: 36px; top: 27px; display: flex; gap: 10px; }
+#controls button { min-width: 160px; height: 43px; padding: 0 21px; border: 1px solid #bda26c; border-radius: 3px; color: #f5e9ce; background: #102e3a; font: 600 17px Arial, sans-serif; letter-spacing: .3px; cursor: pointer; }
+#controls button span { margin-right: 8px; }
+#controls button:hover:not(:disabled) { background: #304138; color: #fff5da; border-color: #e2c482; }
+#controls button:focus-visible { outline: 3px solid #fcdda3; outline-offset: 4px; }
+#controls button:disabled { opacity: .45; cursor: wait; }
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+noscript { display: block; padding: 2rem; color: #eee1bd; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
