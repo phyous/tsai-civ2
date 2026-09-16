@@ -29,3 +29,24 @@ dates, claims that a city is safe, or information about hidden opponents.
 The labor description now reflects the completed twenty-position calibration.
 Only separately offered city actions after a fresh native checkpoint authorize
 labor inputs; specialist-type cycling remains unavailable.
+
+## Passenger transport
+
+The original manual's **Ground Units** section describes boarding passenger
+ships and the separate **Make Landfall** choice. The movement candidate builder
+previously rejected every ground move into known Ocean, even when an owned
+passenger transport was observed there. Ground units may now request that
+ordinary directional move when the destination has an owned ship whose original
+rules specify naval domain, passenger-transport role and positive capacity.
+The action binds the current ship identities and original capacities; it does
+not infer their cargo or free space. Carrier/submarine special cargo roles do
+not qualify as ground passenger transports.
+
+A passenger transport on observed Ocean may also request a direction toward
+observed land. This only requests the original landfall interaction; it does not
+claim the ship moved onto land or authorize a subsequent dialog choice. The
+native unload command remains separate. Known land-to-water moves without an
+observed own transport remain unavailable. These additions have policy and
+stale-state tests; a complete original boarding-and-landing transaction has not
+yet been observed in a live campaign. Unsupported follow-up dialogs still pause
+before further input.

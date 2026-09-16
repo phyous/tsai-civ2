@@ -60,6 +60,12 @@ independent Jev vectors in the same live/recording layout, plus recent evaluatio
 when there is room. [Native city labor](docs/labor-controls.md) includes calibrated
 worker reassignment and a fresh save check after every change. The
 [persistent OCR worker](docs/ocr-performance.md) reduces observation overhead.
+The [researched strategy guide](docs/strategy-sources.md) is included in actual
+Jev requests, with its revision and sources retained in the decision evidence.
+
+Current runs use native saves for debugging. The final recorded campaign must
+make no between-turn save calls; a validated read-only live-state observer is
+required before that campaign begins.
 
 ## Optional observed-target planning
 

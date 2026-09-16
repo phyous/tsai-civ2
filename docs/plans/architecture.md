@@ -10,6 +10,11 @@ must be independently inspectable. Development tests and abandoned attempts are
 kept separate from the successful run. A completed dashboard is not completion
 of the task; the original game's victory must be verified.
 
+The final recorded playthrough must not save between turns. The user permits
+native saves for current debugging only. A verified read-only live-state reader
+must replace save-based checkpoints before the final campaign; hiding or cutting
+Save dialogs from a recording would not satisfy this requirement.
+
 ## Runtime findings
 
 The supplied PlayClassic page uses Emularity and Emscripten DOSBox. Its bundle

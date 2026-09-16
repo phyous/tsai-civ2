@@ -345,19 +345,61 @@ class PolicyTests(unittest.TestCase):
         s['units'][0].pop('specification')
         self.assertIn('unload',unit_candidates(s,rules=r))
 
-    def test_unload_never_infers_cargo_or_changes_land_to_ocean_moves(self):
+    def test_unload_never_infers_cargo_and_boarding_requires_observed_transport(self):
         s=fixture();here(s).update(terrain='Grassland',terrain_id=2)
         next(t for t in s['map']['tiles'] if (t['x'],t['y'])==(10,8)).update(terrain='Ocean',terrain_id=10)
         ship=copy.deepcopy(fixture(2)['units'][0]);ship.update(id=8,x=10,y=8)
         s['units'].append(ship)
         self.assertNotIn('unload',unit_candidates(s,rules=rules()))
-        self.assertNotIn('move_e',unit_candidates(s,rules=rules()))
+        boarding=unit_candidates(s,rules=rules())['move_e']
+        self.assertEqual(boarding['parameters']['boarding_transports'],[
+            {'id':8,'owner':1,'type_id':2,'x':10,'y':8,'transport_capacity':2}])
+        self.assertIn('free capacity and success unverified',boarding['label'])
+        validate_action(boarding,s,rules())
         s['selected_unit_id']=8
         first=unit_candidates(s,rules=rules())['unload']
         s['units'][0].update(x=10,y=8)
         self.assertEqual(unit_candidates(s,rules=rules())['unload'],first)
         s['units'][1]['owner']=2
         with self.assertRaises(PolicyError):unit_candidates(s,rules=rules())
+
+    def test_boarding_needs_current_own_original_passenger_transport_at_destination(self):
+        s=fixture();r=rules()
+        next(t for t in s['map']['tiles'] if (t['x'],t['y'])==(10,8)).update(terrain='Ocean',terrain_id=10)
+        self.assertNotIn('move_e',unit_candidates(s,rules=r))
+        ship=copy.deepcopy(fixture(2)['units'][0]);ship.update(id=8,x=10,y=8)
+        s['units'].append(ship);before=copy.deepcopy(s)
+        action=unit_candidates(s,rules=r)['move_e']
+        self.assertEqual(s,before)
+        for field,value in (('owner',2),('x',12),('type_id',1)):
+            altered=copy.deepcopy(s);altered['units'][1][field]=value
+            self.assertNotIn('move_e',unit_candidates(altered,rules=r))
+            with self.assertRaises(PolicyError):validate_action(action,altered,r)
+        altered=copy.deepcopy(s);altered['units'][1]['specification']['transport_capacity']=8
+        self.assertNotIn('move_e',unit_candidates(altered,rules=r))
+        altered=copy.deepcopy(s);altered['units'].append(copy.deepcopy(ship))
+        self.assertNotIn('move_e',unit_candidates(altered,rules=r))
+        altered=copy.deepcopy(s);altered['units']=altered['units'][:1]
+        altered['hidden_units']=[ship];altered['visible_units']=[dict(ship,owner=2)]
+        self.assertNotIn('move_e',unit_candidates(altered,rules=r))
+        r['units'][2]['role']=2;s['units'][1]['specification']['role']=2
+        self.assertNotIn('move_e',unit_candidates(s,rules=r))
+
+    def test_native_landfall_request_is_transport_bound_not_a_cargo_assertion(self):
+        s=fixture(2);r=rules();here(s).update(terrain='Ocean',terrain_id=10)
+        action=unit_candidates(s,rules=r)['move_e']
+        self.assertIs(action['parameters']['request_landfall'],True)
+        self.assertEqual(action['parameters']['key'],'Numpad6')
+        self.assertIn('cargo is unknown',action['label'])
+        self.assertIn('separate choice',action['label'])
+        validate_action(action,s,r)
+        changed=copy.deepcopy(action);changed['parameters']['request_landfall']=False
+        with self.assertRaises(PolicyError):validate_action(changed,s,r)
+        r['units'][2]['role']=2;s['units'][0]['specification']['role']=2
+        self.assertNotIn('move_e',unit_candidates(s,rules=r))
+        s['cities']=[{'x':10,'y':8}]
+        port=unit_candidates(s,rules=r)['move_e']
+        self.assertNotIn('request_landfall',port['parameters'])
 
     def test_unload_canonical_validation_rejects_altered_key_cargo_and_stale_actor(self):
         s=fixture(2);action=unit_candidates(s,rules=rules())['unload']

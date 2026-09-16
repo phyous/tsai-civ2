@@ -42,14 +42,8 @@ STRATEGY = {
     "Explore": "Discover useful nearby land, contacts and routes while preserving units and protecting settlements.",
     "Economy": "Improve treasury, trade, worked land, infrastructure and sustainable unit support.",
 }
-PLAYBOOK = {
-    "development": "Grow a connected, defensible empire of productive settlements, not only a capital. Use known terrain and city spacing to choose useful sites; protect settlers, preserve food for growth, and balance new settlers with improvements and unit support.",
-    "science": "Plan prerequisite chains toward useful government, trade and science advances. Monarchy can remove the Despotism tile penalty and support a young expanding empire; Trade, Writing, Literacy and University can support later trade and science. Weigh current needs and choose only advances actually offered in the original research dialog.",
-    "unit_roles": "Use defensive troops for city protection and, where the government permits it, martial law; mobile units can explore useful frontiers, while offensive forces need support and known objectives. Workers can settle or improve productive land and routes. A unit should wait or fortify for a specific purpose rather than oscillate between visited tiles.",
-    "despotism": "Under original Despotism, a tile that would produce three or more of any one resource produces one less of that resource. For example, ordinary Grassland food 2 plus irrigation 1 still yields 2 before other effects; ordinary Plains food 1 plus irrigation 1 becomes 2. Consider government and actual worked land before spending worker turns.",
-    "city_centers": "Original city squares automatically receive roads and appropriate irrigation/mining, then relevant automatic upgrades. Settlers cannot add ordinary roads, irrigation, mining or railroads to the city square. Improve surrounding useful tiles instead; terrain conversion is a different original-menu action.",
-    "continuity": "Use recent receipts to notice no observed change or repeated back-and-forth attempts. A save change alone does not establish goal progress. Current observations override history; unit record IDs compact, so an old ID alone does not identify a current unit. Map distances are geometric, not verified routes or movement costs.",
-}
+from .strategy import PLAYBOOK, REVISION as STRATEGY_GUIDE_REVISION, SOURCES as STRATEGY_GUIDE_SOURCES
+
 STRATEGY_QUESTION = {
     "type": "choice",
     "instructions": (
@@ -175,6 +169,43 @@ def _specification(unit, rules):
     if not _integer(spec.get("role")) or not _integer(spec.get("attack")):
         raise PolicyError("Original unit role and attack specification are required.")
     return spec
+
+
+def _transport_specification(unit, rules):
+    """Original passenger-transport rule, corroborating any saved specification."""
+    matches = [r for r in rules.get('units', []) if isinstance(r, dict)
+               and r.get('id') == unit.get('type_id')]
+    fields = ('id', 'domain', 'role', 'transport_capacity')
+    if len(matches) != 1:
+        return None
+    original = matches[0]
+    if (not all(_integer(original.get(key)) for key in fields)
+            or original['domain'] != 2 or original['role'] != 4
+            or original['transport_capacity'] <= 0):
+        return None
+    saved = unit.get('specification')
+    if saved is not None and (not isinstance(saved, dict) or any(
+            type(saved.get(key)) is not int or saved[key] != original[key] for key in fields)):
+        return None
+    return {key: original[key] for key in fields}
+
+
+def _boarding_transports(observation, point, rules):
+    """Observed own ships only; co-location does not establish available capacity."""
+    player = observation.get('player', {}).get('id')
+    result = []
+    for ship in observation.get('units', []):
+        if (not isinstance(ship, dict) or ship.get('owner') != player
+                or any(not _integer(ship.get(k)) for k in ('id', 'owner', 'type_id', 'x', 'y'))
+                or (ship['x'], ship['y']) != (point['x'], point['y'])):
+            continue
+        original = _transport_specification(ship, rules)
+        if original is not None:
+            result.append({**{key: ship[key] for key in ('id', 'owner', 'type_id', 'x', 'y')},
+                           'transport_capacity': original['transport_capacity']})
+    if len({ship['id'] for ship in result}) != len(result):
+        return []
+    return sorted(result, key=lambda ship: ship['id'])
 
 
 def _technologies(observation, rules):
@@ -363,9 +394,10 @@ def _recent_actions(recent_actions):
 def unit_candidates(observation, unit_id=None, rules=None):
     """Known-compatible orders for the selected actor; the engine judges effects.
 
-    Unknown destinations remain unknown in labels and model state. Land units
-    never receive a move into known ocean; ships only enter known land at an
-    owned city. No disband, cheat, map-write, or forced end-turn action exists.
+    Unknown destinations remain unknown. Ground units can request boarding an
+    observed own passenger transport; those ships can request native landfall.
+    Neither request establishes cargo, free capacity, or successful movement.
+    No disband, cheat, map-write, or forced end-turn action exists.
     """
     revision = _revision(observation)
     rules = _rules(rules)
@@ -387,26 +419,38 @@ def unit_candidates(observation, unit_id=None, rules=None):
 
     cities = {(c["x"], c["y"]) for c in observation.get("cities", [])}
     visible = observation.get("visible_units", [])
+    transport_spec = _transport_specification(unit, rules)
     for short, name, dx, dy, key in DIRECTIONS:
         point = _destination(observation, unit["x"]+dx, unit["y"]+dy)
         if point is None:
             continue
         tile = tiles.get((point["x"], point["y"]))
         terrain = tile.get("terrain") if tile else None
+        crossing = {}
         if domain == 0 and terrain == "Ocean":
-            continue
+            ships = _boarding_transports(observation, point, rules)
+            if not ships:
+                continue
+            crossing = {'boarding_transports': ships}
         if domain == 2 and tile and terrain != "Ocean" and (point["x"], point["y"]) not in cities:
-            continue
+            if (transport_spec is None
+                    or tiles.get((unit['x'], unit['y']), {}).get('terrain') != 'Ocean'):
+                continue
+            crossing = {'request_landfall': True, 'transport_specification': transport_spec}
         occupants = [u for u in visible if u.get("x") == point["x"] and u.get("y") == point["y"]]
         if occupants and spec["attack"] <= 0:
             continue
         description = _label(terrain) if tile else "unexplored terrain; entry may be blocked"
+        if 'boarding_transports' in crossing:
+            description += '; request boarding an observed own passenger transport; free capacity and success unverified'
+        elif crossing.get('request_landfall'):
+            description += '; request native Make Landfall; cargo is unknown and any dialog requires a separate choice'
         if occupants:
             names = ", ".join(sorted({_label(u.get("type")) or "foreign unit" for u in occupants}))
             description += "; visible " + names + ", combat or diplomacy may follow"
         city_distance = _city_distance_label(observation, point) if cities else ""
         add("move_"+short, "move", f"Move {name} to ({point['x']},{point['y']}) — {description}{city_distance}", key,
-            destination=point, dx=dx, dy=dy, knowledge="explored" if tile else "unexplored")
+            destination=point, dx=dx, dy=dy, knowledge="explored" if tile else "unexplored", **crossing)
     add("skip", "skip", "Skip this unit's remaining movement for this turn", "Space")
     if domain == 0 and not worker:
         add("fortify", "fortify", "Fortify this ground unit at its current position", "KeyF")
@@ -416,19 +460,10 @@ def unit_candidates(observation, unit_id=None, rules=None):
     # the original naval-transport role and capacity, not a ship name or a
     # guessed association with land units sharing its square. The game decides
     # whether cargo exists and what can be activated/unloaded at this location.
-    transport_fields = ("id", "domain", "role", "transport_capacity")
-    transport_rules = [row for row in rules.get("units", [])
-                       if isinstance(row, dict) and row.get("id") == unit["type_id"]]
-    if len(transport_rules) == 1:
-        original = transport_rules[0]
-        if (all(_integer(original.get(key)) for key in transport_fields)
-                and original["domain"] == 2 and original["role"] == 4
-                and original["transport_capacity"] > 0
-                and all(type(spec.get(key)) is int and spec[key] == original[key]
-                        for key in transport_fields)):
-            add("unload", "unload",
-                "Request unloading from this selected transport in the original game; cargo and unloading legality are unverified",
-                "KeyU", transport_specification={key: original[key] for key in transport_fields})
+    if transport_spec is not None:
+        add("unload", "unload",
+            "Request unloading from this selected transport in the original game; cargo and unloading legality are unverified",
+            "KeyU", transport_specification=transport_spec)
     tile = tiles.get((unit["x"], unit["y"]))
     if not worker or not tile or tile.get("terrain") == "Ocean":
         return actions
@@ -593,6 +628,8 @@ def model_state(observation, rules=None, recent_actions=None):
         "known_technology_names": sorted(name for name in _technologies(observation, rules) if name),
         "research_context": _research_context(observation, rules),
         "strategic_playbook": deepcopy(PLAYBOOK),
+        "strategy_guide": {"revision":STRATEGY_GUIDE_REVISION,"sources":deepcopy(STRATEGY_GUIDE_SOURCES),
+                           "scope":"Researched advice adapted to Prince and current observations; no automatic commands or hidden facts."},
         "selected_unit": selected, "neighboring_tiles": nearby,
         "selected_unit_city_context": {"nearest_owned_city": _nearest_city(observation, unit),
             "at_owned_city_center": (unit["x"], unit["y"]) in city_centers,
