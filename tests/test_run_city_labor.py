@@ -42,7 +42,7 @@ def session(observations,after='expected'):
         s.history.append({'decision':s.decisions,'action':deepcopy(action)})
         return action,frame(90)
     s.choose_city_control=mock.Mock(side_effect=choose)
-    ctx=controller_context(s);ctx['graphics_configured']=True
+    ctx=controller_context(s);ctx['graphics_configured']=True;ctx['throne_presentation_disabled']=True
     ctx['pending_empire']={'id':'inspect_city_0'};ctx['pending_city']={'name':'TEST Rome'}
     return s
 

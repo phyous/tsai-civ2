@@ -95,6 +95,13 @@ def _rows(observation):
             raise DialogObservationError('Invalid OCR confidence')
         prepared=dict(text=text,normal=_normal(text),center=list(center),bounds=list(bounds),
                       source_line=index,confidence=confidence)
+        colors=row.get('map_patch_colors')
+        if (isinstance(colors,dict) and colors.get('source_sha256')==observation['sha256']
+                and colors.get('bounds')==list(bounds) and colors.get('rgb_spread_threshold')==24
+                and type(colors.get('pixel_count')) is int and colors['pixel_count']==w*h
+                and type(colors.get('chromatic_pixels')) is int
+                and 0<=colors['chromatic_pixels']<=w*h):
+            prepared['chromatic_fraction']=colors['chromatic_pixels']/(w*h)
         provenance=row.get('provenance',[])
         if isinstance(provenance,list) and any(isinstance(p,dict) and str(p.get('preprocessing','')).startswith('map_label_') for p in provenance):
             readings=[]
@@ -102,12 +109,14 @@ def _rows(observation):
                 if not isinstance(p,dict):continue
                 mode=p.get('preprocessing','');coords=p.get('normalized_bounds')
                 if (mode!='native' and not re.fullmatch(r'map_label_\d+(?:_gray|_white)?_3x',str(mode))):continue
-                if (not isinstance(p.get('text'),str) or not re.fullmatch(r'[A-Z][A-Za-z]{2,24}',p['text'])
+                if (not isinstance(p.get('text'),str) or not re.fullmatch(r'[A-Za-z]{3,25}',p['text'])
                         or type(p.get('confidence')) not in (int,float) or not .8<=p['confidence']<=1
                         or not isinstance(coords,list) or len(coords)!=4
                         or any(type(v) not in (int,float) or not math.isfinite(v) or not 0<=v<=1 for v in coords)):continue
                 px,py,pw,ph=coords;cx=(px+pw/2)*width;cy=(py+ph/2)*height
-                if abs(cx-center[0])<=6 and abs(cy-center[1])<=4 and pw*width<=w+12 and ph*height<=h+8:
+                # Vision's normalized boxes can place an exact integer edge a
+                # few 1e-8 pixels beyond it after scaling back to the source.
+                if abs(cx-center[0])<=6+1e-6 and abs(cy-center[1])<=4+1e-6 and pw*width<=w+12+1e-6 and ph*height<=h+8+1e-6:
                     readings.append(_normal(p['text']))
             if readings:prepared['same_pixel_map_readings']=readings
         rows.append(prepared)
@@ -179,16 +188,49 @@ def _city_sprite_text(row, labels):
     not a city statistic, unit, menu option or reconstructed text.
     """
     glyphs=''.join(row['text'].split())
-    words=_normal(row['text'].translate(str.maketrans({'О':'O','К':'K'}))).split()
+    translated=row['text'].translate(str.maketrans({'О':'O','К':'K'}))
+    words=_normal(''.join(c if c.isalnum() or c.isspace() else ' ' for c in translated)).split()
     controls={'ok','no','yes','exit','help','next','back','buy','auto','cancel','done','name','save','load','menu','quit','warning'}
-    if (not 0<=row['confidence']<.5 or not 1<=len(glyphs)<=8 or not glyphs.isalnum()
+    if (not 0<=row['confidence']<.5 or not 1<=len(glyphs)<=8
+            or not any(c.isalnum() for c in glyphs)
+            or (any(not c.isalnum() and c not in '()[]|/' for c in glyphs)
+                and row.get('chromatic_fraction',0)<.5)
             or any(word in controls for word in words) or ''.join(words) in controls):
         return False
     x,y,w,h=row['bounds']
     if not 1<=w<=96 or not 1<=h<=40:return False
     return any(abs(row['center'][0]-label['center'][0])<=32
                and 12<=label['center'][1]-row['center'][1]<=36
-               and -4<=label['bounds'][1]-(y+h)<=12 for label in labels)
+               and -8<=label['bounds'][1]-(y+h)<=12 for label in labels)
+
+
+def _owned_city_size_sprite(row, labels, state):
+    """Corroborate a tiny icon+badge OCR fragment against a saved owned city.
+
+    Original006/440 reads the Rome sprite and its size2 badge as high-confidence
+    'Bi 2'. The prefix and badge have no decoded semantic value. Growth or
+    Settler completion can change the badge since the last save; only the next
+    native save establishes current size. Ordinary text stays unrecognized.
+    """
+    match=re.fullmatch(r'([A-Za-z]{1,2})\s+(\d{1,2})',row['text'])
+    if (not match or match[1].casefold() in {'ok','no','go'} or row['confidence']<.8
+            or not 1<=row['bounds'][2]<=48 or not 1<=row['bounds'][3]<=20):
+        return False
+    player=state.get('player',{}).get('id')
+    digest=state.get('evidence',{}).get('save_sha256')
+    if (type(player) is not int or not isinstance(digest,str)
+            or not re.fullmatch('[0-9a-f]{64}',digest)):
+        return False
+    size=int(match[2])
+    names={_normal(city['name']) for city in state.get('cities',[])
+           if isinstance(city,dict) and city.get('owner')==player
+           and isinstance(city.get('name'),str) and type(city.get('size')) is int
+           and 1<=size<=99}
+    x,y,w,h=row['bounds']
+    return any(label['normal'] in names
+               and 0<=row['center'][0]-label['center'][0]<=24
+               and 12<=label['center'][1]-row['center'][1]<=28
+               and -2<=label['bounds'][1]-(y+h)<=10 for label in labels)
 
 
 def _native_map_kind(rows, observation, state):
@@ -232,13 +274,19 @@ def _native_map_kind(rows, observation, state):
                 if isinstance(c,dict) and isinstance(c.get('name'),str)}
     def city_label(row):
         readings={row['normal'],*row.get('same_pixel_map_readings',[])}
+        readings.update(_normal(c['name']) for text in list(readings)
+                        if text not in {'ok','cancel','help','exit','buy','yes','no','next','back','auto','done','save','load','menu','quit','warning'}
+                        and (c:=_saved_city_name(text,state)) is not None)
+        readings.update(_normal(n['name']) for text in list(readings)
+                        if (n:=_recent_founded_name(text,years[0]['text'],state)) is not None)
         matches={name for name in city_names if any(re.fullmatch(re.escape(name)+r'(?:\s+\(?\d+\)?)?',reading) for reading in readings)}
         return len(matches)==1
     labels=[r for r in rows if r['bounds'][1]>=65 and r['bounds'][0]<462
             and r['confidence']>=.8 and city_label(r)]
     for r in rows:
         if r['bounds'][1]>=65 and r['bounds'][0]<462:
-            if r not in labels and not _city_sprite_text(r,labels):
+            if (r not in labels and not _city_sprite_text(r,labels)
+                    and not _owned_city_size_sprite(r,labels,state)):
                 return None, 'Unexpected text over the native map playfield; possible unrecognized modal'
     full=' '.join(r['normal'] for r in rows)
     if re.search(r'\b(?:select|choose|emissary|confirmation|warning|please|options|really|are you sure)\b',full):
@@ -841,6 +889,76 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             if len(choices)!=1:return unknown('No visible acknowledgement button',kind,title['text'])
             return finish(kind,title['text'],choices,buttons,mechanical='acknowledge_information')
         return finish(kind,title['text'],choices,buttons,model=True)
+    # @GHOSTTOWN is a strategic choice: completing a worker can remove its
+    # size-one city. Never send its OK through the informational path.
+    if game_text and isinstance(state,dict) and isinstance(rules,dict):
+        ghost=[t for t in dialog_resources(game_text) if t['tag']=='GHOSTTOWN'
+               and _normal(t['title'])=='domestic advisor' and t['width']==320
+               and _normal(t['body'])=='%string0 is about to build %string1, but it is only a size 1 city. continue anyway'
+               and t['options']==['Delay Settler production.','Build Settlers anyway (disbands city).']
+               and not t['buttons'] and not t['listbox']]
+        headings=single_title(r'(?:domestic advisor|domestic admsor)')
+        if len(ghost)==len(headings)==1:
+            title=headings[0];body,controls,_=body_rows(title,{'ok','cancel','yes','no','help'},320)
+            def ghost_option(row):
+                text=re.sub(r'^(?:o|[○●•])\s+','',row['normal'])
+                # Original006/768 visibly prints "disbands". Keep the raw
+                # reading in the model option; only source comparison tolerates
+                # the measured b→h error inside this complete literal choice.
+                return text.replace('(dishands city)','(disbands city)')
+            expected=[_normal(t) for t in ghost[0]['options']]
+            choices=[r for r in body if ghost_option(r) in expected]
+            prose=[r for r in body if r not in choices]
+            sentence=_normal(' '.join(r['text'] for r in prose))
+            match=re.fullmatch(r'(.{3,60}) is about to build (.{3,40}), but it is only a size 1 city\. continue anyway',sentence)
+            city=_saved_city_name(match[1],state) if match else None
+            workers=[u for u in rules.get('units',[]) if isinstance(u,dict) and u.get('role')==5
+                     and isinstance(u.get('name'),str) and match and _normal(u['name'])==match[2]]
+            if (city is not None and len(workers)==1 and len(choices)==2
+                    and [ghost_option(r) for r in choices]==expected
+                    and len(controls)==1 and controls[0]['normal']=='ok'
+                    and all(r['confidence']>=.8 for r in [title,*body,*controls])
+                    and abs(title['center'][0]-controls[0]['center'][0])<=8
+                    and prose and min(r['center'][1] for r in choices)>max(r['center'][1] for r in prose)+8):
+                result['resource_tag']='GHOSTTOWN'
+                result['evidence']['worker_disband_warning']={
+                    'source':'Original GAME.TXT GHOSTTOWN, owned native city and worker-role RULES unit',
+                    'city_name':city['name'],'item_name':workers[0]['name'],
+                    'observed_body':'\n'.join(r['text'] for r in prose),
+                    'observed_options':[r['text'] for r in choices],
+                    'body_source_lines':[r['source_line'] for r in prose],
+                    'choice_source_lines':[r['source_line'] for r in choices],
+                    'template_sha256':hashlib.sha256(json.dumps(ghost[0],sort_keys=True).encode()).hexdigest()}
+                return finish('worker_disband_choice',title['text'],[_option(r,'option') for r in choices],
+                              [_option(r,'button') for r in controls],model=True,
+                              reason='Original size-one worker completion warning; both observed alternatives require a model choice')
+    if game_text:
+        history=[t for t in dialog_resources(game_text) if t['tag']=='HISTORY'
+                 and _normal(t['title'])=='civilization ii' and not t['options'] and not t['listbox']
+                 and _normal(t['body'].replace('^',' '))=="%string1 completes his epic history: 'the %string2 civilizations in the world'"]
+        def resource_lines(tag):
+            found=re.search(r'(?m)^@'+re.escape(tag)+r'\s*\n([\s\S]*?)(?=^@|\Z)',game_text)
+            return [line.strip() for line in found[1].splitlines() if line.strip() and not line.lstrip().startswith(';')] if found else []
+        headings=single_title(r'(?:civilization ii|ciadization i)')
+        authors=resource_lines('HISTORIANS');categories=resource_lines('HISTORIES');ranks=resource_lines('HISTORYRANK')
+        if len(history)==1 and len(headings)==1 and len(authors)>1 and authors[0].isdigit() and int(authors[0])==len(authors)-1 and categories and len(ranks)==7:
+            title=headings[0];body,controls,_=body_rows(title,{'ok','cancel','yes','no','help','continue'},500)
+            author=[r for r in body if any(r['normal']==_normal(a)+' completes his epic history' for a in authors[1:])]
+            category=[r for r in body if (m:=re.fullmatch(r"['\"]the ([a-z ]+) civilizations in the world['\"]",r['normal']))
+                      and m[1].replace(' ','') in {_normal(c).replace(' ','') for c in categories}]
+            ranked=[r for r in body if (m:=re.fullmatch(r'([1-7])\. the ([a-z]+) civilization of the ([a-z ]{3,60})',r['normal']))
+                    and m[2] in {_normal(rank) for rank in ranks}]
+            if (len(author)==len(category)==1 and 1<=len(ranked)<=7 and len(body)==2+len(ranked)
+                    and len({r['normal'].split('.')[0] for r in ranked})==len(ranked)
+                    and len(controls)==1 and controls[0]['normal']=='ok'
+                    and all(r['confidence']>=.8 for r in [title,*body,*controls])
+                    and author[0]['center'][1]<category[0]['center'][1]<min(r['center'][1] for r in ranked)
+                    and abs(controls[0]['center'][0]-title['center'][0])<=8):
+                result['resource_tag']='HISTORY'
+                result['evidence']['history_report']={'source':'Original HISTORY, HISTORIANS, HISTORIES and HISTORYRANK resources',
+                    'observed_body':'\n'.join(r['text'] for r in body),'source_lines':[r['source_line'] for r in body]}
+                button=_option(controls[0],'button')
+                return finish('information',title['text'],[button],[button],mechanical='acknowledge_information')
     # The original BUILT notice can add the LABELS.TXT radio choices to its
     # template body. Both are real choices, so never acknowledge its OK using
     # the information-only path. Bind names to observed own cities/public rules.
@@ -853,7 +971,11 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         if len(built)==1 and len(headings)==1:
             title=headings[0]
             body,button_rows,_=body_rows(title,{'ok','cancel','yes','no','help'},600)
-            radios=[r for r in body if r['normal'] in ('zoom to city','continue')]
+            def radio_label(row):
+                # Original unselected circle can be read as O. Preserve raw
+                # option text and its observed center; only compare the label.
+                return re.sub(r'^(?:o|[○●•])\s+','',row['normal'])
+            radios=[r for r in body if radio_label(r) in ('zoom to city','continue')]
             text_rows=[r for r in body if r not in radios]
             cities={_normal(c['name']) for c in state.get('cities',[]) if isinstance(c,dict) and isinstance(c.get('name'),str)}
             names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[])
@@ -861,7 +983,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             sentence=text_rows[0]['normal'] if len(text_rows)==1 else None
             combinations=[(city,verb,item) for city in cities for verb in ('builds','completes') for item in names
                           if sentence==city+' '+verb+' '+item]
-            if (len(combinations)==1 and len(radios)==2 and {r['normal'] for r in radios}=={'zoom to city','continue'}
+            if (len(combinations)==1 and len(radios)==2 and {radio_label(r) for r in radios}=={'zoom to city','continue'}
                     and len(button_rows)==1 and button_rows[0]['normal']=='ok'
                     and all(r['confidence']>=.8 for r in [title,*body,*button_rows])
                     and abs(title['center'][0]-button_rows[0]['center'][0])<=8

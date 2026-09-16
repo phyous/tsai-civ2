@@ -313,6 +313,150 @@ def labor_evidence(parent, *, mode='remove_worker', outcome='observed_expected_c
 
 
 class VerifyTests(unittest.TestCase):
+    def public_history(self,e,count=1,text_length=70):
+        from civ2.verify import PUBLIC_NOTICE_GAME_SHA256,PUBLIC_NOTICE_RESOURCES,PUBLIC_NOTICE_NOTE
+        notices=[]
+        for index in range(count):
+            content=dict(kind='information',resource_tag='DESTROYED',title='Defense Minister',
+                observed_text='Defense Minister\nTEST notice '+str(index)+' '+('x'*text_length),
+                image_sha256=e.screen['sha256'],observed_at_utc='2026-09-16T19:00:00.000+00:00',
+                observation_elapsed_ms=0,last_checkpoint={'index':0,'turn':1,'year_raw':-4000,'save_sha256':e.initial['sha256']},
+                source={'game_text_sha256':PUBLIC_NOTICE_GAME_SHA256,'resource_sha256':PUBLIC_NOTICE_RESOURCES['DESTROYED']})
+            notices.append({'id':hashlib.sha256(canonical(content)).hexdigest(),**content})
+        retained=notices[-16:]
+        while sum(len(n['observed_text']) for n in retained)>16384:retained=retained[1:]
+        request=deepcopy(e.request);request['state'].update(recent_observed_events=retained,recent_observed_events_note=PUBLIC_NOTICE_NOTE)
+        e.change_artifact('decisions/request.json',request)
+        def insert(rows):
+            index=next(i for i,r in enumerate(rows) if r['kind']=='inference_started')
+            elapsed=rows[index]['elapsed_ms'];added=[]
+            for notice in notices:
+                added += [dict(kind='screen_observed',elapsed_ms=elapsed,payload=dict(
+                    screen=e.screen['sha256'],path=e.screen['path'],classification='information',supported=True)),
+                    dict(kind='observed_public_notice',elapsed_ms=elapsed,payload=dict(notice=notice,source_image=deepcopy(e.screen)))]
+            rows[index:index]=added
+        e.rewrite(insert)
+        return notices,retained,request
+
+    def test_public_notice_requests_match_exact_bounded_prior_observations(self):
+        for count,length,expected in ((1,70,1),(17,70,16),(6,4000,4)):
+            with self.subTest(count=count),tempfile.TemporaryDirectory() as d:
+                e=Evidence(d);notices,retained,request=self.public_history(e,count,length)
+                r=verify_run(e.directory,ffprobe=None)
+                self.assertEqual(r['decisions']['observed_public_notices'],count)
+                self.assertEqual(r['decisions']['retained_public_notice_ids'],[n['id']for n in retained])
+                self.assertEqual(len(retained),expected);self.assertEqual(r['decisions']['model_dispatches'],1)
+                for alteration in ('missing','changed','future','note'):
+                    changed=deepcopy(request)
+                    if alteration=='missing':changed['state'].pop('recent_observed_events')
+                    elif alteration=='changed':changed['state']['recent_observed_events'][0]['observed_text']='Invented current enemy coordinates'
+                    elif alteration=='future':changed['state']['recent_observed_events'].append(deepcopy(notices[0]))
+                    else:changed['state']['recent_observed_events_note']='These facts establish the current world.'
+                    e.change_artifact('decisions/request.json',changed)
+                    with self.subTest(alteration=alteration),self.assertRaisesRegex(VerificationError,'bounded observed history'):
+                        verify_run(e.directory,ffprobe=None)
+
+    def test_public_notice_rejects_stale_checkpoint_unbound_source_and_future_time(self):
+        for mode in ('checkpoint','resource','game','image','kind','elapsed','utc','unsupported','identity','duplicate'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+                e=Evidence(d);self.public_history(e)
+                def corrupt(rows):
+                    event=next(r for r in rows if r['kind']=='observed_public_notice');notice=event['payload']['notice']
+                    if mode=='checkpoint':notice['last_checkpoint']['turn']=2
+                    elif mode=='resource':notice['source']['resource_sha256']='0'*64
+                    elif mode=='game':notice['source']['game_text_sha256']='0'*64
+                    elif mode=='image':notice['image_sha256']='0'*64
+                    elif mode=='kind':notice['kind']='diplomacy'
+                    elif mode=='elapsed':notice['observation_elapsed_ms']=event['elapsed_ms']+1
+                    elif mode=='utc':notice['observed_at_utc']='2026-09-16T19:00:00'
+                    elif mode=='unsupported':next(r for r in rows if r['kind']=='screen_observed' and r['payload']['classification']=='information')['payload']['supported']=False
+                    elif mode=='duplicate':rows.insert(rows.index(event)+1,deepcopy(event))
+                    if mode!='identity':notice['id']=hashlib.sha256(canonical({k:v for k,v in notice.items()if k!='id'})).hexdigest()
+                    else:notice['id']='0'*64
+                e.rewrite(corrupt)
+                with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_cosmetic_display_requires_prior_section_and_identical_reviewed_pixels(self):
+        from civ2.verify import Files,_cosmetic_display
+        with tempfile.TemporaryDirectory() as d:
+            e=Evidence(d);files=Files(e.directory)
+            p=dict(source_hash=e.screen['sha256'],after_hash=e.screen['sha256'],
+                before_path=e.screen['path'],after_path=e.screen['path'],point=[320,380],
+                after_cosmetic_section_sequence=220,visual_reference={k:e.screen[k] for k in ('path','sha256')},
+                scope='Operator mechanical click to close the reviewed completed cosmetic throne-room display; no strategic command',
+                success_not_inferred=True,inputs=[dict(type='mouse',sequence=3+i,event=event,x=320,y=380,button=0)
+                                                for i,event in enumerate(('mousedown','mouseup'))])
+            self.assertEqual(_cosmetic_display(p,files,220),2)
+            for sequence in (None,True,219):
+                with self.subTest(sequence=sequence),self.assertRaises(VerificationError):_cosmetic_display(p,files,sequence)
+            for changed in ({'point':[320,381]},{'success_not_inferred':False},{'decision':1},
+                            {'inputs':[dict(type='key',code='Enter',down=True,repeat=False,sequence=3)]}):
+                with self.subTest(changed=changed),self.assertRaises(VerificationError):_cosmetic_display({**p,**changed},files,220)
+            with Image.open(e.directory/e.screen['path']) as image:
+                image.putpixel((320,380),(255,0,0));image.save(e.directory/'screens/changed.png')
+            changed=deepcopy(p);changed['visual_reference']={'path':'screens/changed.png','sha256':hashlib.sha256((e.directory/'screens/changed.png').read_bytes()).hexdigest()}
+            with self.assertRaisesRegex(VerificationError,'reviewed pixels'):_cosmetic_display(changed,files,220)
+
+    def test_cosmetic_operator_probes_do_not_become_model_dispatches_or_success(self):
+        from civ2.verify import COSMETIC_SCOPES
+        for kind in COSMETIC_SCOPES:
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as d:
+                e=Evidence(d);point=[314,137] if kind=='native_cosmetic_click_attempted' else [302,286]
+                payload=dict(resource_tag='ADDTOTHRONE',template_sha256='c214cbe54af114dbf13aa7a33ec1b48ff73cabbada62ebc07a7d3ba9e2e40ceb',
+                    manual_source='https://archive.org/details/civ2_manual',scope=COSMETIC_SCOPES[kind],
+                    source_hash=e.screen['sha256'],after_hash=e.screen['sha256'],
+                    before_path=e.screen['path'],after_path=e.screen['path'],success_not_inferred=True)
+                if kind=='native_cosmetic_escape_attempted':
+                    payload['inputs']=[dict(type='key',code='Escape',down=down,repeat=False,sequence=3+i) for i,down in enumerate((True,False))]
+                else:
+                    payload['point']=point
+                    payload['inputs']=[dict(type='mouse',sequence=3+i,event=event,x=point[0],y=point[1],button=0)
+                                       for i,event in enumerate(('mousedown','mouseup'))]
+                if kind=='native_cosmetic_section_clicked':
+                    region=[282,258,325,318]
+                    with Image.open(e.directory/e.screen['path']) as image:digest=hashlib.sha256(image.convert('RGB').crop(region).tobytes()).hexdigest()
+                    payload.update(section='Visible central throne chair',visual_reference={**e.screen,'bounds':region,'region_sha256':digest})
+                    payload['visual_reference'].pop('bytes')
+                baseline=deepcopy(payload)
+                e.rewrite(lambda rows:rows.insert(-1,dict(kind=kind,elapsed_ms=rows[-1]['elapsed_ms'],payload=deepcopy(payload))))
+                result=verify_run(e.directory,ffprobe=None)
+                self.assertEqual(result['decisions']['model_dispatches'],1)
+                self.assertEqual(result['decisions']['validated_responses'],1)
+                self.assertEqual(len(result['decisions']['operator_cosmetic_inputs']),1)
+                self.assertEqual(result['outcome']['status'],'unverified')
+                for mutation in ({'success_not_inferred':False},{'accepted':True},{'decision':1},
+                                 {'manual_source':'https://example.invalid'},{'template_sha256':'0'*64},
+                                 {'source_hash':'0'*64},{'source_hash':None},{'after_hash':None},{'scope':'Gameplay automation'}):
+                    def change(rows):
+                        next(r for r in rows if r['kind']==kind)['payload']={**deepcopy(baseline),**mutation}
+                    e.rewrite(change)
+                    with self.subTest(mutation=mutation),self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+                e.rewrite(lambda rows:next(r for r in rows if r['kind']==kind).update(payload=deepcopy(baseline)))
+                if kind=='native_cosmetic_section_clicked':
+                    e.rewrite(lambda rows:next(r for r in rows if r['kind']==kind)['payload']['visual_reference'].update(region_sha256='0'*64))
+                    with self.assertRaisesRegex(VerificationError,'target pixels'):verify_run(e.directory,ffprobe=None)
+                    e.rewrite(lambda rows:next(r for r in rows if r['kind']==kind).update(payload=deepcopy(baseline)))
+                e.rewrite(lambda rows:rows.insert(-1,deepcopy(next(r for r in rows if r['kind']==kind))))
+                with self.assertRaisesRegex(VerificationError,'repeated'):verify_run(e.directory,ffprobe=None)
+
+    def test_throne_preference_is_separate_presentation_only_with_explicit_scope(self):
+        with tempfile.TemporaryDirectory() as d:
+            e=Evidence(d)
+            labels=('Throne Room','Diplomacy Screen','Animated Heralds','Civilopedia for Advances','High Council','Wonder Movies')
+            values={name:name!='Throne Room' for name in labels}
+            keys=[dict(type='key',sequence=i,code=code,down=down,repeat=False) for i,code,down in (
+                (1,'ControlLeft',True),(2,'KeyP',True),(3,'KeyP',False),(4,'ControlLeft',False),(9,'Enter',True),(10,'Enter',False))]
+            receipt=dict(before=e.screen['sha256'],opening=e.screen['sha256'],after=e.screen['sha256'],
+                checkbox_before=values,checkbox_after=values,other_checkboxes_unchanged=True,inputs=keys,
+                changes=[dict(label='Throne Room',before=False,after=False,receipt=None,verified_image=e.screen['sha256'])],
+                scope='Original cosmetic Throne Room presentation only; no gameplay command')
+            e.rewrite(lambda rows:rows.insert(-1,dict(kind='graphics_preferences_configured',elapsed_ms=rows[-1]['elapsed_ms'],payload={'receipt':receipt})))
+            result=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(result['decisions']['cosmetic_presentation_preferences'],1)
+            self.assertEqual(result['decisions']['model_dispatches'],1)
+            e.rewrite(lambda rows:next(r for r in rows if r['kind']=='graphics_preferences_configured')['payload']['receipt'].pop('scope'))
+            with self.assertRaisesRegex(VerificationError,'scope'):verify_run(e.directory,ffprobe=None)
+
     def test_presentation_notice_click_is_not_a_model_or_decoration_choice(self):
         with tempfile.TemporaryDirectory() as d:
             e=Evidence(d)
@@ -1031,6 +1175,17 @@ class VerifyTests(unittest.TestCase):
             e.rewrite(lambda rows:rows[-1]['payload'].update(status='victory',reason='TEST claim'))
             r=verify_run(e.directory,ffprobe=None)
             self.assertEqual(r['outcome']['status'],'unverified')
+
+    def test_assistant_terminal_review_is_distinguished_from_human_review(self):
+        with tempfile.TemporaryDirectory() as d:
+            e=Evidence(d);name=e.terminal(review_method='assistant_visual_review')
+            r=verify_run(e.directory,terminal_review=name,ffprobe=None)
+            self.assertEqual(r['outcome']['status'],'assistant_reviewed')
+            self.assertEqual(r['outcome']['review_method'],'assistant_visual_review')
+            self.assertFalse(r['completeness']['release_review_ready'])
+            for method in ('automatic_score_inference','',None):
+                e.terminal(review_method=method)
+                with self.assertRaises(VerificationError):verify_run(e.directory,terminal_review=name,ffprobe=None)
 
     def test_terminal_screenshot_wrong_size_blank_or_hash_rejected(self):
         for mode in ('wrong_size','blank','wrong_hash'):

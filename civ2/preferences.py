@@ -77,6 +77,21 @@ def configure_graphics_preferences(ui):
     original 640x480 dialog; these are presentation settings, not game rules.
     Other checkbox values are observed before/after and must remain unchanged.
     """
+    return _configure_graphics_option(ui, 'Civilopedia for Advances',
+        'Original presentation preference only; no gameplay command')
+
+
+def configure_throne_presentation(ui):
+    """Disable the cosmetic Throne Room only, at a known native-map boundary.
+
+    The original manual permits ignoring this presentation with no repercussions.
+    All five other graphics checkboxes must remain equal to their observed values.
+    """
+    return _configure_graphics_option(ui, 'Throne Room',
+        'Original cosmetic Throne Room presentation only; no gameplay command')
+
+
+def _configure_graphics_option(ui, label, scope):
     key=lambda text:re.sub(r'[^a-z0-9]','',text.casefold())
     def complete(o):
         labels=[key(row['text']) for row in o['lines']]
@@ -88,7 +103,7 @@ def configure_graphics_preferences(ui):
     observation=ui.wait(complete)
     opening=observation['sha256']
     prior={name:checkbox_state(observation,name) for name in GRAPHICS_LABELS}
-    label='Civilopedia for Advances';receipt=None
+    receipt=None
     if prior[label]:
         actual=next(row['text'] for row in observation['lines'] if key(label) in key(row['text']))
         receipt=ui.select_text(observation,actual,exact=True)
@@ -105,4 +120,4 @@ def configure_graphics_preferences(ui):
     return dict(before=before['sha256'],opening=opening,
         changes=[dict(label=label,before=prior[label],after=False,receipt=receipt,verified_image=verified_image)],
         checkbox_before=prior,checkbox_after=after,other_checkboxes_unchanged=True,
-        inputs=inputs,after=closed['sha256'],scope='Original presentation preference only; no gameplay command')
+        inputs=inputs,after=closed['sha256'],scope=scope)

@@ -40,7 +40,7 @@ The verifier never derives a win from turn count, research, a save, scores, a `s
 }
 ```
 
-These are placeholders, not a completed review. Supported outcomes are `victory_conquest`, `victory_space`, `defeat`, `retired` and `game_over`. Pass the actual relative file with `--terminal-review terminal-review.json`. The declaration must bind the final journal hash. One to eight images are accepted; each must decode as a nonblank original-resolution PNG with matching hash and size. The result becomes `human_reviewed`, explicitly identifying the source of the outcome judgment. The tool checks the declaration and image integrity; it does not recognize victory pixels or independently authenticate the review.
+These are placeholders, not a completed review. Supported outcomes are `victory_conquest`, `victory_space`, `defeat`, `retired` and `game_over`. Pass the actual relative file with `--terminal-review terminal-review.json`. The declaration must bind the final journal hash. One to eight images are accepted; each must decode as a nonblank original-resolution PNG with matching hash and size. Use `human_visual_review` only when a person inspected the screen. An assistant that visually inspected it must use `assistant_visual_review`; the report distinguishes `human_reviewed` from `assistant_reviewed`. The tool checks the declaration and image integrity; it does not recognize victory pixels or independently authenticate the declared reviewer. Neither method bypasses the other recording, input, or completeness checks.
 
 ## Limits and release use
 

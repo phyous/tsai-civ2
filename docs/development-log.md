@@ -116,6 +116,32 @@ model evaluations. Current choices always take priority, and every probability
 comes from a retained Jev response. Planning and command probabilities remain
 separate.
 
+## Parallel campaigns and strategic context
+
+Attempts 004, 005 and 006 use separate emulator instances, native starting saves,
+browser profiles, decision ledgers and continuous recordings. Each has founded
+Rome, Veii and Antium in the original game. None has reached a verified victory.
+
+The early campaigns exposed a context gap: production choices named units that
+were not yet owned, but the compact statistics table described only owned unit
+types. Actual production options now include their exact original rules
+specifications. Current city garrisons, worker production and available government
+concepts are summarized together. These facts guide Jev without selecting its
+commands. See [the strategic context changes](strategy-context.md).
+
+Source-matched original public notices are retained in a bounded recent-event
+memory and included in subsequent Jev requests. Their exact observed text,
+original screenshot hash, resource hash and last-checkpoint reference are logged.
+An old destruction notice does not establish present ownership or the current
+number of surviving civilizations. Evidence verification checks the same retained
+notice sequence against the actual model requests.
+
+The native warning about completing Settlers in a size-one city now presents both
+original alternatives to Jev: delay production or build anyway and disband the
+city. It is a strategic decision, never an automatic acknowledgment. Cosmetic
+throne-room handling and its separately recorded development inputs are described
+in [the presentation record](throne-presentation.md).
+
 ## Evidence conventions
 
 Each model session retains original saves, original screenshots, requests,

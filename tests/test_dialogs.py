@@ -494,6 +494,26 @@ class DialogTests(unittest.TestCase):
         label['provenance'][0]=reading;state['cities'].append({'name':'Veu'})
         self.assertFalse(classify_dialog(o,state=state)['supported'])
 
+    def test_new_map_city_label_requires_same_year_hashed_founding_notice(self):
+        o=native_map();o['lines'].append(row('Veu',x=233,y=229,w=35,h=16))
+        state=copy.deepcopy(ROMAN_STATE);state['cities']=[{'name':'Vei'}]
+        self.assertFalse(classify_dialog(o,state=state)['supported'])
+        year=next(r['text'] for r in o['lines'] if 'B.C.' in r['text'])
+        state['recent_founding_notices']=[{'name':'Vei','year_text':year,'source_tag':'FOUNDED','image_sha256':'a'*64}]
+        self.assertEqual(classify_dialog(o,state=state)['kind'],'normal_map')
+        state['recent_founding_notices'][0]['year_text']='2950 B.C.'
+        self.assertFalse(classify_dialog(o,state=state)['supported'])
+
+    def test_retained_city_reading_tolerates_only_numeric_edge_roundoff(self):
+        o=native_map();s=copy.deepcopy(ROMAN_STATE);s['cities']=[{'name':'TEST'}]
+        label=row('TESU',x=239,y=164,w=70,h=20)
+        label['provenance']=[{'preprocessing':'map_label_9_white_3x','text':'TEST',
+            'confidence':1,'normalized_bounds':[(204-3e-8)/640,154/480,58/640,20/480]}]
+        o['lines'].append(label)
+        self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map')
+        label['provenance'][0]['normalized_bounds'][0]-=.001/640
+        self.assertFalse(classify_dialog(o,state=s)['supported'])
+
     def test_known_city_sprite_low_confidence_glyphs_do_not_become_dialog_text(self):
         o=native_map();s=copy.deepcopy(ROMAN_STATE);s['cities']=[{'name':'Rome'}]
         o['lines'] += [row('Rome',x=234,y=293,w=49,h=15),
@@ -511,11 +531,93 @@ class DialogTests(unittest.TestCase):
 
     def test_city_sprite_fragments_generalize_to_known_foreign_names_and_size_labels(self):
         s=copy.deepcopy(ROMAN_STATE);s['known_cities']=[{'name':'TEST Other'}]
-        for text in ('AB2','Wu Fom 1','ШБ','123'):
+        for text in ('AB2','Wu Fom 1','ШБ','123','(ERT','[AB]'):
             o=native_map();o['lines'] += [row('TEST Other (12)',x=202,y=277,w=110,h=16),
                 row(text,x=196,y=255,w=85,h=35,confidence=.3)]
             self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map',text)
             self.assertFalse(classify_dialog(o,state=ROMAN_STATE)['supported'])
+        for text in ('(OK)','[Help]','N/O'):
+            o=native_map();o['lines'] += [row('TEST Other',x=202,y=277,w=110,h=16),
+                row(text,x=196,y=255,w=85,h=35,confidence=.3)]
+            self.assertFalse(classify_dialog(o,state=s)['supported'])
+
+    def test_punctuated_city_art_requires_bound_chromatic_pixels_not_gray_dialog(self):
+        o=native_map();s=copy.deepcopy(ROMAN_STATE);s['cities']=[{'name':'Rome'}]
+        fragment=row("T'R",x=242,y=272,w=40,h=20,confidence=.3)
+        o['lines'] += [row('Rome',x=234,y=293,w=49,h=15),fragment]
+        self.assertFalse(classify_dialog(o,state=s)['supported'])
+        fragment['map_patch_colors']={'source_sha256':o['sha256'],'bounds':fragment['bounds'],
+            'rgb_spread_threshold':24,'pixel_count':800,'chromatic_pixels':600}
+        self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map')
+        for field,value in [('source_sha256','b'*64),('bounds',[0,0,40,20]),
+                            ('pixel_count',801),('chromatic_pixels',399),('chromatic_pixels',801),
+                            ('rgb_spread_threshold',0)]:
+            bad=copy.deepcopy(o);bad['lines'][-1]['map_patch_colors'][field]=value
+            self.assertFalse(classify_dialog(bad,state=s)['supported'],field)
+        for text in ('Help!','N/O',"O'K",'Save?'):
+            bad=copy.deepcopy(o);bad['lines'][-1]['text']=text
+            self.assertFalse(classify_dialog(bad,state=s)['supported'],text)
+
+    def test_high_confidence_badge_is_geometry_only_and_requires_owned_save_identity(self):
+        o=native_map();s=copy.deepcopy(ROMAN_STATE)
+        s.update(cities=[{'name':'Rome','owner':1,'size':2}],evidence={'save_sha256':'a'*64})
+        o['lines'] += [row('Rome',x=234,y=293,w=49,h=15),row('Bi 2',x=245,y=274,w=34,h=16)]
+        self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map')
+        for text in ('X 2','ab 2','Zz 2','Bi 3','Bi 1'):
+            changed=copy.deepcopy(o);changed['lines'][-1]['text']=text
+            self.assertEqual(classify_dialog(changed,state=s)['kind'],'normal_map')
+        for change in ({'text':'OK 2'},{'text':'NO 2'},{'text':'GO 2'},
+                       {'text':'Help 2'},{'text':'Unknown'},{'text':'Bi 0'},
+                       {'bounds':[210,260,60,24]}, {'center':[320,150],'bounds':[303,142,34,16]}):
+            bad=copy.deepcopy(o);bad['lines'][-1].update(change)
+            self.assertFalse(classify_dialog(bad,state=s)['supported'],change)
+        for city in ({'name':'Rome','owner':2,'size':2},{'name':'Rome','owner':1,'size':True}):
+            changed=copy.deepcopy(s);changed['cities']=[city]
+            self.assertFalse(classify_dialog(o,state=changed)['supported'])
+        missing=copy.deepcopy(s);missing.pop('evidence')
+        self.assertFalse(classify_dialog(o,state=missing)['supported'])
+        modal=copy.deepcopy(o);modal['lines'].append(row('Unknown choice',y=203,w=120))
+        self.assertFalse(classify_dialog(modal,state=s)['supported'])
+
+    def test_optional_actual_map_lowercase_name_and_sprite_box_jitter(self):
+        import json
+        from civ2.observe import recognize
+        from civ2.save import parse_save
+        root=Path(__file__).resolve().parents[1]
+        for attempt,number in [('004',431),('005',588),('005',637),('005',665)]:
+            directory=root/f'runs/attempt-{attempt}';path=directory/f'screens/ui-{number:07d}.png'
+            if not path.exists() or not (directory/'events.jsonl').exists() or not (root/'.runtime/ocr').exists():
+                self.skipTest('Private original map and checkpoint evidence unavailable')
+            checkpoint=None
+            for line in (directory/'events.jsonl').read_text().splitlines():
+                event=json.loads(line);payload=event['payload']
+                if event['kind']=='checkpoint':checkpoint=directory/payload['artifact']['path']
+                if event['kind']=='screen_observed' and payload.get('path')==f'screens/ui-{number:07d}.png':break
+            self.assertIsNotNone(checkpoint)
+            r=classify_dialog(recognize(path),state=parse_save(checkpoint.read_bytes()))
+            self.assertTrue(r['supported'],r);self.assertEqual(r['kind'],'normal_map')
+
+    def test_saved_city_label_uses_unique_one_edit_retained_original_reading(self):
+        o=native_map();s=copy.deepcopy(ROMAN_STATE)
+        s.update(cities=[{'id':1,'owner':1,'name':'Veii','x':61,'y':25}],evidence={'save_sha256':'a'*64})
+        label=row('Veu',x=235,y=229,w=35,h=16)
+        label['provenance']=[{'preprocessing':mode,'text':text,'confidence':1,
+                            'normalized_bounds':[218/640,221/480,35/640,16/480]}
+                           for mode,text in (('native','Vei'),('map_label_1_3x','Veu'))]
+        o['lines'].append(label)
+        self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map')
+        self.assertEqual(label['text'],'Veu')
+        for change in ('no_save','no_native','ambiguous','foreign','distant_reading'):
+            bad=copy.deepcopy(o);state=copy.deepcopy(s)
+            if change=='no_save':state.pop('evidence')
+            elif change=='no_native':bad['lines'][-1]['provenance'].pop(0)
+            elif change=='ambiguous':state['cities'].append({'id':2,'owner':1,'name':'Veit','x':65,'y':25})
+            elif change=='foreign':state['cities'][0]['owner']=2
+            else:bad['lines'][-1]['provenance'][0]['normalized_bounds'][0]=.7
+            self.assertFalse(classify_dialog(bad,state=state)['supported'],change)
+        control=native_map();control['lines'].append(row('Buy',x=235,y=229,w=35,h=16))
+        state=copy.deepcopy(s);state['cities'][0]['name']='Bury'
+        self.assertFalse(classify_dialog(control,state=state)['supported'])
 
     def test_optional_actual006_city_sprite_map(self):
         from civ2.observe import recognize
@@ -603,6 +705,12 @@ class DialogTests(unittest.TestCase):
         self.assertTrue(result['supported']);self.assertEqual(result['kind'],'production_notice')
         self.assertTrue(result['requires_model']);self.assertIsNone(result['mechanical_action'])
         self.assertEqual([r['text'] for r in result['options']],['Zoom to City','Continue'])
+        marked=copy.deepcopy(o);marked['lines'][3]['text']='O Continue'
+        r=classify_dialog(marked,state=state,rules=rules,game_text=source)
+        self.assertTrue(r['supported']);self.assertEqual(r['options'][1]['text'],'O Continue')
+        self.assertEqual(r['options'][1]['center'],o['lines'][3]['center'])
+        marked['lines'][3]['text']='Do Continue'
+        self.assertFalse(classify_dialog(marked,state=state,rules=rules,game_text=source)['supported'])
         for altered in (source.replace('%STRING0 %STRING3 %STRING1.','Do something dangerous.'),None):
             self.assertFalse(classify_dialog(o,state=state,rules=rules,game_text=altered)['supported'])
         self.assertFalse(classify_dialog(o,state={'cities':[{'name':'TEST Veii'}]},rules=rules,game_text=source)['supported'])
@@ -633,6 +741,41 @@ class DialogTests(unittest.TestCase):
         r=classify_dialog(recognize(path),game_text=game_text())
         self.assertTrue(r['supported']);self.assertEqual(r['kind'],'revolution_offer')
         self.assertEqual([c['text'] for c in r['options']],['• Not just yet.','• Begin revolution.'])
+
+    def test_original_history_report_requires_complete_catalogued_body_and_sole_ok(self):
+        source="@HISTORY\n@width=480\n@title=Civilization II\n^^%STRING1 completes his epic history:\n^^'The %STRING2 Civilizations in the World'\n@HISTORIANS\n1\nTEST Historian\n@HISTORIES\nTEST WEALTHIEST\n@HISTORYRANK\nGlorious\nGreat\nFine\nMediocre\nPuny\nPathetic\nHopeless\n"
+        o=observation(row('Ciadization I',y=182,w=100),row('TEST Historian completes his epic history:',y=207,w=310),
+                      row("'The TEST WEAL THIEST Civilizations in the World'",y=230,w=390),
+                      row('3. The Fine Civilization of the TEST Romans',x=275,y=267,w=380),row('OK',y=296,w=24))
+        result=classify_dialog(o,game_text=source)
+        self.assertTrue(result['supported']);self.assertEqual(result['resource_tag'],'HISTORY')
+        self.assertEqual(result['mechanical_action'],'acknowledge_information');self.assertFalse(result['requires_model'])
+        for text in ('Please pay 100 gold.','4. The Unknown Civilization of the TEST Romans'):
+            bad=copy.deepcopy(o);bad['lines'][3]['text']=text
+            self.assertFalse(classify_dialog(bad,game_text=source)['supported'])
+        bad=copy.deepcopy(o);bad['lines'].append(row('Cancel',x=410,y=296,w=40))
+        self.assertFalse(classify_dialog(bad,game_text=source)['supported'])
+
+    def test_optional_original_history_report(self):
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        root=Path(__file__).resolve().parents[1];path=root/'runs/attempt-005/screens/ui-0000430.png'
+        if not path.exists() or not (root/'.runtime/ocr').exists():self.skipTest('Private original history report unavailable')
+        r=classify_dialog(recognize(path),game_text=game_text())
+        self.assertTrue(r['supported']);self.assertEqual(r['resource_tag'],'HISTORY')
+
+    def test_optional_original_completion_radio_markers(self):
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        root=Path(__file__).resolve().parents[1]
+        paths=[root/f'runs/attempt-{a}/screens/ui-{n:07d}.png' for a,n in [('004',401),('005',564)]]
+        if not all(p.exists() for p in paths) or not (root/'.runtime/ocr').exists():self.skipTest('Private original completion dialogs unavailable')
+        for p in paths:
+            r=classify_dialog(recognize(p),state={'cities':[{'name':'Veii'}]},rules=parse_rules(original_rules()),game_text=game_text())
+            self.assertTrue(r['supported']);self.assertEqual(r['kind'],'production_notice')
+            self.assertEqual([x['text'] for x in r['options']],['Zoom to City','O Continue'])
 
 
 if __name__=='__main__':unittest.main()

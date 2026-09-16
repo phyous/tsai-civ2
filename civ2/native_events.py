@@ -17,6 +17,7 @@ import unicodedata
 EVENT_TITLES = {
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
+    'DESTROYED': 'defense minister',
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
                      'INHOCK', 'FERTILE', 'UPGRADED', 'UPGRADE'), 'domestic advisor'),
@@ -29,7 +30,9 @@ EVENT_TITLES = {
 # These aliases never replace observed text and still require a complete body
 # from the matching original resource and the sole aligned OK control.
 TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
-                 'CIVADVANCE': {'ciadization advance'}}
+                 'CIVADVANCE': {'ciadization advance'},
+                 # Original006/608: complete destruction notice and sole OK.
+                 'DESTROYED': {'detense ifinister'}}
 RULE_REJECTIONS = {'ADJACENTCITY': 'Cities cannot be built in adjacent squares.'}
 OBSERVED_EVENT_TITLES = set(EVENT_TITLES.values()) | set().union(*TITLE_ALIASES.values())
 CONTROLS = {'ok', 'cancel', 'yes', 'no', 'help', 'continue', 'back', 'next', 'done', 'close'}
@@ -117,7 +120,13 @@ def _body_pattern(body, values):
     # must be supplied from LABELS.TXT before it can be recognized safely.
     if len(re.sub(r'[^a-z]', '', anchors)) < 5:
         return None
-    return re.compile(''.join(chunks))
+    expression=''.join(chunks)
+    # Original006/734 omits only the last printed dot. Preserve every lexical
+    # token and internal punctuation; these are already whitelisted notices
+    # with no choices and one independently observed OK control.
+    if text.endswith('.') and expression.endswith(r'\.'):
+        expression=expression[:-2]+r'\.?'
+    return re.compile(expression)
 
 
 def classify_information(observation, resources, *, placeholder_values=None):

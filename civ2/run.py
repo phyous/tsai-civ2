@@ -9,7 +9,7 @@ import zipfile
 from copy import deepcopy
 from .city_controls import CityControlError, city_control_candidates, city_labor_result
 from .dialogs import classify_dialog
-from .preferences import configure_graphics_preferences
+from .preferences import configure_graphics_preferences, configure_throne_presentation
 from .session import Session
 
 
@@ -31,6 +31,7 @@ def controller_context(session):
     session.controller.setdefault('pending_labor_refresh', None)
     session.controller.setdefault('city_labor_ready', None)
     session.controller.setdefault('recent_founding_notices', [])
+    session.controller.setdefault('throne_presentation_disabled', False)
     return session.controller
 
 
@@ -322,6 +323,11 @@ def run_steps(session, *, max_decisions=10000):
             session.journal.append('graphics_preferences_configured', receipt=receipt)
             context['graphics_configured'] = True
             continue  # Reobserve after the verified presentation-only setup.
+        if kind in ('normal_map','end_turn') and not context['throne_presentation_disabled']:
+            receipt = configure_throne_presentation(session.ui)
+            session.journal.append('graphics_preferences_configured', receipt=receipt)
+            context['throne_presentation_disabled'] = True
+            continue  # Reobserve after the independently verified cosmetic toggle.
         if dialog.get('observed_city_name'):
             context['observed_city_names'].add(dialog['observed_city_name'])
         founded = dialog.get('founded_city')
@@ -385,6 +391,7 @@ def run_steps(session, *, max_decisions=10000):
                 context['observed_city_names'].add(dialog['default_name'])
             if kind == 'rule_rejection':
                 session.note_native_rejection(dialog)
+            Session.remember_public_notice(session, observation, dialog, resources)
             session.mechanical(dialog['mechanical_action'])
             pending_control = context['pending_city_control']
             if (pending_control and kind=='buy_quote' and dialog.get('resource_tag')=='COMPLETE0'

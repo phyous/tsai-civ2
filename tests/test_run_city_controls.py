@@ -35,6 +35,7 @@ def session(observations,choices):
     s.choose_dialog=mock.Mock(side_effect=lambda d:setattr(s,'decisions',s.decisions+1))
     s.mechanical=mock.Mock()
     controller_context(s)['graphics_configured']=True
+    controller_context(s)['throne_presentation_disabled']=True
     return s
 
 

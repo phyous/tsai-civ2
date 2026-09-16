@@ -21,6 +21,7 @@ def session(observations):
     s.ui.observe.side_effect=observations
     s.choose_dialog=mock.Mock(side_effect=lambda dialog: setattr(s,'decisions',s.decisions+1))
     controller_context(s)['graphics_configured']=True
+    controller_context(s)['throne_presentation_disabled']=True
     return s
 
 

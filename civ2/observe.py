@@ -247,6 +247,24 @@ def _stat_numbers_compatible(old,new):
             (len(previous)==len(fresh)==1 and not old.startswith('(') and previous[0]=='1'+fresh[0]))
 
 
+def _recover_city_section_labels(image,rows,executable,directory,evidence):
+    """Read native city headings from their pixels, never complete truncated text."""
+    if image.size!=(640,480):return
+    exact={r['text'].strip().casefold() for r in rows if r['confidence']>=.8}
+    if not {'food storage','city resources','resource map','buy','change','exit'}<=exact:return
+    for index,row in enumerate(rows):
+        x,y,w,h=row['bounds']
+        if not (260<=row['center'][1]<=310 and h<=24 and row['confidence']>=.8):continue
+        expected='Units Supported' if 0<=x<200 else 'Units Present' if 200<=x<440 else None
+        if expected is None or row['text'].casefold()==expected.casefold() or not _near_text(row['text'].casefold(),expected.casefold(),2):continue
+        first=_crop_text(image,row,f'city_section_{index}_3x',executable,directory,evidence,padding=(3,3))
+        second=_crop_text(image,row,f'city_section_{index}_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
+        if (len(first)==len(second)==1 and first[0]['text']==second[0]['text']==expected
+                and second[0]['confidence']>=.8 and _same_location(row,second[0])):
+            if _replace_crop_row(rows,index,first,lambda old,new:new==expected):
+                rows[index]['provenance']+=second[0]['provenance']
+
+
 def _recover_city_and_production_rows(image, rows, executable, directory, evidence):
     """Narrow native city/list layouts; no rules names or dates are invented."""
     if image.size!=(640,480):return
@@ -269,6 +287,22 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
         return
     bottom=min(r['center'][1] for r in buttons)
     if max(r['center'][1] for r in buttons)-bottom>8:return
+    # Original006/653's full-image "bodkd" is read as "bukd" by both a
+    # separately cropped RGB and grayscale pass. Keep that actual reading;
+    # do not replace the verb or city with a guessed canonical title.
+    heading=lambda text:re.fullmatch(r'what shall (?:we|me) ([a-z]{3,7}) in (.{1,60})',text.strip().rstrip('?'),re.I)
+    old_heading=heading(title['text'])
+    if old_heading and not _near_text(old_heading[1].casefold(),'build',2):
+        first=_crop_text(image,title,'production_title_3x',executable,directory,evidence,padding=(6,6))
+        second=_crop_text(image,title,'production_title_gray_3x',executable,directory,evidence,padding=(6,6),grayscale=True)
+        if len(first)==len(second)==1 and first[0]['text']==second[0]['text']:
+            fresh=heading(first[0]['text'])
+            if (fresh and fresh[2].casefold()==old_heading[2].casefold()
+                    and _near_text(fresh[1].casefold(),'build',2)
+                    and second[0]['confidence']>=.8 and _same_location(title,second[0])):
+                index=rows.index(title)
+                if _replace_crop_row(rows,index,first,lambda old,new:True):
+                    rows[index]['provenance']+=second[0]['provenance'];title=rows[index]
     vocabulary=_production_names()
     for index,row in enumerate(rows):
         if not (title['center'][1]+8<row['center'][1]<bottom-8
@@ -311,17 +345,24 @@ def _recover_map_labels(image,rows,executable,directory,evidence):
     for index,row in enumerate(rows):
         x,y,w,h=row['bounds']
         if not (8<=x and x+w<=456 and 70<=y and y+h<=440 and 10<=h<=20 and 16<=w<=160
-                and row['confidence']>=.8 and re.fullmatch(r'[A-Z][a-zA-Z]{2,24}',row['text'])):continue
+                and row['confidence']>=.8 and re.fullmatch(r'[A-Za-z]{3,25}',row['text'])):continue
         first=_crop_text(image,row,f'map_label_{index}_3x',executable,directory,evidence,padding=(3,3))
         second=_crop_text(image,row,f'map_label_{index}_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
+        for reading in first+second:
+            if (reading['confidence']>=.8 and _same_location(row,reading)
+                    and re.fullmatch(r'[A-Za-z]{3,25}',reading['text'])
+                    and _near_text(row['text'].casefold(),reading['text'].casefold(),2)):
+                row['provenance']+=reading['provenance']
         if len(first)!=1 or len(second)!=1:continue
         a,b=first[0],second[0]
         if a['text']!=b['text']:
             masked=_crop_text(image,row,f'map_label_{index}_white_3x',executable,directory,evidence,padding=(3,3),white_threshold=190)
             if len(masked)!=1:continue
             b=masked[0]
+            if (b['confidence']>=.8 and _same_location(row,b) and re.fullmatch(r'[A-Za-z]{3,25}',b['text'])
+                    and _near_text(row['text'].casefold(),b['text'].casefold(),2)):row['provenance']+=b['provenance']
         if a['text']!=b['text'] or b['confidence']<.8 or not _same_location(row,b):continue
-        if _replace_crop_row(rows,index,first,lambda old,new:bool(re.fullmatch(r'[A-Z][a-zA-Z]{2,24}',new))
+        if _replace_crop_row(rows,index,first,lambda old,new:bool(re.fullmatch(r'[A-Za-z]{3,25}',new))
                              and _near_text(old.casefold(),new.casefold(),2)):
             rows[index]['provenance']+=b['provenance']
 
@@ -341,6 +382,43 @@ def _recover_moving_status(image,rows,executable,directory,evidence):
     a,b=first[0],second[0]
     if a['text']!='Moving Units' or b['text']!='Moving Units' or b['confidence']<.8 or not _same_location(row,b):return
     if _replace_crop_row(rows,index,first,lambda old,new:True):rows[index]['provenance']+=b['provenance']
+
+
+def _recover_completion_zoom(image,rows,executable,directory,evidence):
+    """An original notice label must be read exactly by two real pixel passes."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].casefold()=='domestic advisor' and r['confidence']>=.8]
+    if len(headings)!=1:return
+    title=headings[0]
+    buttons=[r for r in rows if r['text'].strip().casefold()=='ok' and r['center'][1]>title['center'][1]]
+    if len(buttons)!=1:return
+    for index,row in enumerate(rows):
+        if not (title['center'][1]<row['center'][1]<buttons[0]['center'][1] and row['confidence']>=.8
+                and row['text'].casefold()!='zoom to city' and _near_text(row['text'].casefold(),'zoom to city',2)):continue
+        first=_crop_text(image,row,'completion_zoom_3x',executable,directory,evidence,padding=(6,6))
+        second=_crop_text(image,row,'completion_zoom_gray_3x',executable,directory,evidence,padding=(6,6),grayscale=True)
+        if len(first)!=1 or len(second)!=1:continue
+        a,b=first[0],second[0]
+        if a['text']!='Zoom to City' or b['text']!='Zoom to City' or b['confidence']<.8 or not _same_location(row,b):continue
+        if _replace_crop_row(rows,index,first,lambda old,new:True):rows[index]['provenance']+=b['provenance']
+
+
+def _map_patch_colors(image, rows, source_hash):
+    """Retain original-pixel evidence for tiny, uncertain city-art OCR.
+
+    Color cannot identify a city or authorize an input. The classifier still
+    requires a known city label, exact map layout, geometry and no controls.
+    Native dialog text/background is grayscale; these map sprites are colored.
+    """
+    if image.size!=(640,480):return
+    for row in rows:
+        x,y,w,h=row['bounds']
+        if not (row['confidence']<.5 and 8<=x and x+w<=456 and 70<=y and y+h<=440
+                and 1<=w<=96 and 1<=h<=40):continue
+        pixels=list(image.crop((x,y,x+w,y+h)).convert('RGB').getdata())
+        row['map_patch_colors']={'source_sha256':source_hash,'bounds':list(row['bounds']),
+                                 'rgb_spread_threshold':24,'pixel_count':len(pixels),
+                                 'chromatic_pixels':sum(max(p)-min(p)>=24 for p in pixels)}
 
 
 def recognize(path: str | Path) -> dict:
@@ -395,12 +473,13 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            try:
-                _recover_city_and_production_rows(image,rows,executable,directory,evidence)
-                _recover_map_labels(image,rows,executable,directory,evidence)
-                _recover_moving_status(image,rows,executable,directory,evidence)
-            except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
-                evidence['fallback_errors'].append(dict(pass_name='native_row_crops',error=type(error).__name__))
+            for recover in (_recover_city_and_production_rows,_recover_city_section_labels,
+                            _recover_map_labels,_recover_moving_status,_recover_completion_zoom):
+                try:
+                    recover(image,rows,executable,directory,evidence)
+                except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
+                    evidence['fallback_errors'].append(dict(pass_name=recover.__name__,error=type(error).__name__))
+        _map_patch_colors(image,rows,original_hash)
     return {'width': width, 'height': height, 'sha256': original_hash,
             'lines': rows, 'text': '\n'.join(row['text'] for row in rows), 'ocr': evidence}
 

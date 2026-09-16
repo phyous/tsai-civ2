@@ -28,6 +28,19 @@ def broken_status():
 
 
 class ObserveTests(unittest.TestCase):
+    def test_map_art_color_evidence_uses_original_patch_and_hash(self):
+        image=Image.new('RGB',(640,480),(120,120,120))
+        image.paste((50,180,40),(100,200,110,210))
+        rows=[{'text':"T'R",'bounds':[100,200,10,10],'confidence':.3},
+              {'text':'Help!','bounds':[120,200,10,10],'confidence':.3},
+              {'text':'TEST','bounds':[100,200,10,10],'confidence':1}]
+        observe._map_patch_colors(image,rows,'a'*64)
+        self.assertEqual(rows[0]['map_patch_colors']['chromatic_pixels'],100)
+        self.assertEqual(rows[1]['map_patch_colors']['chromatic_pixels'],0)
+        self.assertEqual(rows[0]['map_patch_colors']['source_sha256'],'a'*64)
+        self.assertEqual(rows[0]['map_patch_colors']['bounds'],rows[0]['bounds'])
+        self.assertNotIn('map_patch_colors',rows[2])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -214,6 +227,20 @@ class ObserveTests(unittest.TestCase):
 
 
 class NativeRowCropTests(unittest.TestCase):
+    def test_city_sections_need_complete_layout_and_two_exact_pixel_reads(self):
+        original=self.prepared('Units Preseni',x=276,y=278,width=80,height=12)
+        good=self.prepared('Units Present',x=275,y=277,width=80,height=12,source='TEST crop')
+        anchors=[self.prepared(t) for t in ('Food Storage','City Resources','Resource Map','Buy','Change','Exit')]
+        image=Image.new('RGB',(640,480))
+        for second,accepted in [(good,True),(self.prepared('Units Precent'),False)]:
+            rows=anchors+[dict(original)]
+            with patch.object(observe,'_crop_text',side_effect=[[good],[second]]):
+                observe._recover_city_section_labels(image,rows,None,None,{})
+            self.assertEqual(rows[-1]['text'],'Units Present' if accepted else 'Units Preseni')
+        with patch.object(observe,'_crop_text') as crop:
+            observe._recover_city_section_labels(image,[original],None,None,{})
+        crop.assert_not_called()
+
     """Synthetic TEST readings; crop geometry never becomes a guessed target."""
     def prepared(self,text,x=218,y=222,width=30,height=14,source='native'):
         return observe._prepare_rows([row(text,x,y,width,height)],640,480,source)[0]
@@ -225,6 +252,27 @@ class NativeRowCropTests(unittest.TestCase):
         self.assertFalse(observe._replace_crop_row(rows,0,[self.prepared('Veii',y=180)],lambda a,b:True))
         self.assertTrue(observe._replace_crop_row(rows,0,[fresh],lambda a,b:True))
         self.assertEqual([p['text'] for p in rows[0]['provenance']],['Veu','Veii'])
+
+    def test_production_title_requires_two_agreeing_reads_same_city_and_complete_controls(self):
+        image=Image.new('RGB',(640,480),'gray')
+        original=self.prepared('What shall we bodkd in TEST?',x=200,y=130,width=280)
+        buttons=[self.prepared(t,x=x,y=310,width=30) for t,x in [('Auto',210),('Help',310),('OK',410)]]
+        good=self.prepared('What shall me bukd in TEST?',x=200,y=130,width=280,source='TEST independent crop')
+        for peer,accept in ((good,True),(self.prepared('What shall me bukd in OTHER?',x=200,y=130,width=280),False),
+                            (self.prepared('What shall me bukd in TEST?',x=200,y=200,width=280),False)):
+            rows=[dict(original),*buttons]
+            with patch.object(observe,'_crop_text',side_effect=[[good],[peer]]),patch.object(observe,'_production_names',return_value=set()):
+                observe._recover_city_and_production_rows(image,rows,None,None,{})
+            self.assertEqual(rows[0]['text'],good['text'] if accept else original['text'])
+            if accept:self.assertEqual(rows[0]['provenance'][0]['text'],original['text'])
+        for text in ('What shall me bukd in OTHER?','What shall we purchase in TEST?'):
+            rows=[dict(original),*buttons];bad=self.prepared(text,x=200,y=130,width=280)
+            with patch.object(observe,'_crop_text',side_effect=[[bad],[bad]]),patch.object(observe,'_production_names',return_value=set()):
+                observe._recover_city_and_production_rows(image,rows,None,None,{})
+            self.assertEqual(rows[0]['text'],original['text'])
+        with patch.object(observe,'_crop_text') as crop:
+            observe._recover_city_and_production_rows(image,[original,*buttons[:-1]],None,None,{})
+        crop.assert_not_called()
 
     def test_map_label_requires_two_agreeing_pixel_reads_and_complete_menu(self):
         menu=[self.prepared(s,x=10+i*60,y=22,width=40) for i,s in enumerate(('Game','Kingdom','View','Orders'))]
@@ -282,6 +330,17 @@ class NativeRowCropTests(unittest.TestCase):
         with patch.object(observe,'_crop_text') as crop:observe._recover_moving_status(image,rows,None,None,{})
         crop.assert_not_called()
 
+    def test_completion_zoom_requires_source_heading_and_two_exact_pixel_readings(self):
+        image=Image.new('RGB',(640,480));old=self.prepared('Loom to City',x=206,y=216,width=87,height=19)
+        good=self.prepared('Zoom to City',x=205,y=218,width=88,height=15,source='TEST crop')
+        rows=[self.prepared('Domestic Advisor',x=255,y=166,width=135),old,self.prepared('OK',x=310,y=298,width=24)]
+        with patch.object(observe,'_crop_text',side_effect=[[good],[good]]):
+            observe._recover_completion_zoom(image,rows,None,None,{})
+        self.assertEqual(rows[1]['text'],'Zoom to City')
+        self.assertEqual(rows[1]['provenance'][0]['text'],'Loom to City')
+        with patch.object(observe,'_crop_text') as crop:observe._recover_completion_zoom(image,[old],None,None,{})
+        crop.assert_not_called()
+
     def test_production_never_replaces_an_exact_original_rule_name(self):
         rows=[self.prepared('What shall me boild in TEST?',x=190,y=130,width=280),
               self.prepared('Phalanx',x=180,y=172,width=50),
@@ -303,6 +362,26 @@ class NativeRowCropTests(unittest.TestCase):
 
 
 class PrivateCalibrationTests(unittest.TestCase):
+    def test_optional_original005_city_section_crop_reads_exact_headings(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0000741.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original city frame unavailable')
+        from civ2.dialogs import classify_dialog
+        before=p.read_bytes();o=observe.recognize(p)
+        for heading in ('Units Supported','Units Present'):
+            match=next(r for r in o['lines'] if r['text']==heading)
+            self.assertGreaterEqual(len(match['provenance']),3)
+        self.assertEqual(classify_dialog(o)['kind'],'city_screen')
+        self.assertEqual(p.read_bytes(),before)
+
+    def test_optional_original006_production_heading_keeps_independent_reading(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-006/screens/ui-0000653.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original production frame unavailable')
+        before=p.read_bytes();o=observe.recognize(p)
+        title=next(r for r in o['lines'] if r['text'].startswith('What shall'))
+        self.assertEqual(title['text'],'What shall me bukd in Antiom?')
+        self.assertEqual(title['provenance'][0]['text'],'What shall we bodkd in Antiom?')
+        self.assertEqual(title['center'],[320,145]);self.assertEqual(p.read_bytes(),before)
+
     def test_optional_actual_city_production_and_map_label_crops(self):
         root=Path(__file__).resolve().parents[1]
         production=root/'runs/attempt-005/screens/ui-0000112.png'

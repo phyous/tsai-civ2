@@ -1,7 +1,7 @@
 """Only the calibrated Civilopedia presentation toggle may change."""
 from pathlib import Path
 from unittest import TestCase,mock
-from civ2.preferences import configure_graphics_preferences,checkbox_state,GRAPHICS_LABELS
+from civ2.preferences import configure_graphics_preferences,configure_throne_presentation,checkbox_state,GRAPHICS_LABELS
 
 
 class GraphicsPreferenceTests(TestCase):
@@ -31,6 +31,27 @@ class GraphicsPreferenceTests(TestCase):
         with mock.patch('civ2.preferences.checkbox_state',side_effect=states*2):
             result=configure_graphics_preferences(ui)
         ui.select_text.assert_not_called();self.assertEqual(result['checkbox_before'],result['checkbox_after'])
+
+    def test_throne_helper_disables_only_cosmetic_room_and_preserves_other_five(self):
+        ui=self.ui();prior=[True,True,False,False,True,False];after=[False,*prior[1:]]
+        with mock.patch('civ2.preferences.checkbox_state',side_effect=prior+after) as read:
+            result=configure_throne_presentation(ui)
+        self.assertEqual(read.call_count,12)
+        ui.select_text.assert_called_once()
+        self.assertEqual(ui.select_text.call_args.args[1],'Throne Room')
+        self.assertEqual(result['changes'][0]['label'],'Throne Room')
+        self.assertEqual(result['checkbox_after'],dict(zip(GRAPHICS_LABELS,after)))
+        self.assertEqual(result['scope'],'Original cosmetic Throne Room presentation only; no gameplay command')
+
+    def test_throne_helper_refuses_unexpected_change_and_is_idempotent(self):
+        ui=self.ui();states=[False,True,False,False,True,False]
+        with mock.patch('civ2.preferences.checkbox_state',side_effect=states*2):
+            configure_throne_presentation(ui)
+        ui.select_text.assert_not_called()
+        ui=self.ui()
+        with mock.patch('civ2.preferences.checkbox_state',side_effect=[True]*6+[False,False,True,True,True,True]):
+            with self.assertRaises(RuntimeError):configure_throne_presentation(ui)
+        ui.key.assert_not_called()
 
     def test_failed_target_readback_or_other_changed_checkbox_prevents_confirmation(self):
         for after in ([True]*6,[False,True,True,False,True,True]):
