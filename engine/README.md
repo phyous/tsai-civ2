@@ -16,8 +16,9 @@ or account data is used. The script checks every download and the executable
 inside the ZIP. Proprietary game and Windows files are never repository source.
 Setup also derives `vendor/dosbox-input.js` from the unchanged verified emulator.
 [input-patch.json](input-patch.json) records the exact single export-table
-addition and both hashes. It exposes the already-compiled `SDL_SendMouseMotion`
-function; no function body, game binary or game rule is patched. The derived
+addition and both hashes. It exposes the already-compiled `Mouse_CursorMoved`
+and `SDL_SendMouseMotion` host input functions; no function body, game binary or
+game rule is patched. The derived
 emulator retains DOSBox/em-dosbox's GPL-2.0 terms and its third-party notices;
 both original and derived emulator downloads remain ignored local assets.
 
@@ -81,12 +82,14 @@ mousemove/mousedown/mouseup events. Key and click holds are bounded to 1–1000 
 Each emitted input has a monotonically increasing receipt sequence number.
 Helpers do not silently resume a paused emulator; the controller owns pacing.
 `moveRelative(dx,dy)` accepts nonzero integer deltas bounded to ±32 per axis and
-calls the original SDL input API with `relative=1`. SDL queues a normal
-`SDL_MOUSEMOTION` event whose relative deltas remain intact even at host canvas
-edges. The wrapper only reads SDL's focus pointer and calls that API; it never
-assigns emulator or guest memory. This avoids treating Windows' accelerated PS/2
-cursor as an absolute canvas coordinate. The screenshot feedback helper must
-still verify where the original guest cursor actually moved before clicking.
+calls the original DOSBox host input function
+`Mouse_CursorMoved(dx,dy,0,0,true)`. Its `emulate=true` mode accumulates relative
+motion through the original scaling, PS/2 callback and event/IRQ handlers.
+The wrapper does not assign emulator or guest memory. A receipt proves dispatch;
+the screenshot feedback helper must verify the original guest cursor before clicking.
+An earlier SDL relative-event export preserved SDL deltas but DOSBox's unlocked
+handler still selected absolute cursor positioning, so it could saturate at the
+host edge. The regression test now executes that original downstream handler too.
 `chord` accepts one to three distinct Control/Shift/Alt physical modifiers and one
 ordinary final key. It validates the entire request before input, holds the final
 key for a bounded interval, and releases all modifiers in reverse order even if

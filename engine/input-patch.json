@@ -1,13 +1,21 @@
 {
-  "purpose": "Expose the existing original SDL_SendMouseMotion function as a bounded host input path; no game executable or guest memory patch",
+  "purpose": "Expose existing original DOSBox and SDL host mouse input functions; no function body, game executable or guest memory patch",
   "original": "vendor/dosbox-sync.js",
   "original_sha256": "e73cd0b0130b2428863f000f3c9a77daf554b8dbed7d4fac02b1ec092871812a",
   "derived": "vendor/dosbox-input.js",
-  "derived_bytes": 5522441,
-  "derived_sha256": "99da026fd382927817a0e7b6b561a6e9e36aa248a9a9b6035804293116d1c0bf",
+  "derived_bytes": 5522470,
+  "derived_sha256": "9f3328ea32cec65464ffa6182711ef2b0ec07aacf096a6a731460176d8a7c337",
   "replace_once": "return{_main:ri,",
-  "with": "return{_tsai_sdl_send_mouse_motion:lqa,_main:ri,",
-  "symbol": "lqa = original SDL_SendMouseMotion(window, mouseID, relative, x, y)",
+  "with": "return{_tsai_sdl_send_mouse_motion:lqa,_tsai_dosbox_mouse_motion:Et,_main:ri,",
   "runtime_license": "DOSBox/em-dosbox GPL-2.0; bundled third-party notices remain applicable",
-  "upstream": "https://github.com/dreamlayers/em-dosbox"
+  "upstream": "https://github.com/dreamlayers/em-dosbox",
+  "symbols": {
+    "lqa": "original SDL_SendMouseMotion(window, mouseID, relative, x, y)",
+    "Et": "original Mouse_CursorMoved(xrel:double, yrel:double, normalizedX:double, normalizedY:double, emulate:int)"
+  },
+  "relative_path": "Mouse_CursorMoved(+dx,+dy,0.0,0.0,1); original SDL unlocked dispatch otherwise passes emulate=0 regardless of SDL event relative mode",
+  "source_references": [
+    "src/gui/sdlmain.cpp HandleMouseMotion",
+    "src/ints/mouse.cpp Mouse_CursorMoved"
+  ]
 }

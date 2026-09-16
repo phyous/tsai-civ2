@@ -55,7 +55,7 @@ def _observe(game):
         return locate_cursor(image)
 
 
-def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3) -> dict:
+def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: bool = True) -> dict:
     """Position by visual feedback, then press/release without extra motion.
 
     Returns ordinary input receipts plus each observed cursor checkpoint. Raises
@@ -116,11 +116,21 @@ def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3)
         host_position = game.rpc('inputDiagnostics')['sdlMouse']
         host_x, host_y, cursor = host_position['x'], host_position['y'], after
     # No further mousemove here: SDL canvas positions are not guest positions.
-    try:
-        inputs.append(game.rpc('mouse', {'type':'mousedown','x':host_x,'y':host_y,'button':button}))
-        time.sleep(.09)
-    finally:
-        inputs.append(game.rpc('mouse', {'type':'mouseup','x':host_x,'y':host_y,'button':button}))
-    return {'issued': True, 'target':[x,y], 'observed_cursor':list(cursor),
+    if press:
+        try:
+            inputs.append(game.rpc('mouse', {'type':'mousedown','x':host_x,'y':host_y,'button':button}))
+            time.sleep(.09)
+        finally:
+            inputs.append(game.rpc('mouse', {'type':'mouseup','x':host_x,'y':host_y,'button':button}))
+    return {'issued': press, 'target':[x,y], 'observed_cursor':list(cursor),
             'tolerance':tolerance,'movement_steps':len(checkpoints)-1,
             'checkpoints':checkpoints, 'inputs':inputs}
+
+
+def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3) -> dict:
+    return _move(game,x,y,button,tolerance=tolerance)
+
+
+def move_cursor(game, x: int, y: int, *, tolerance: int = 3) -> dict:
+    """Move with original-image feedback; never press a mouse button."""
+    return _move(game,x,y,tolerance=tolerance,press=False)

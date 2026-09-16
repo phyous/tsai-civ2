@@ -29,6 +29,30 @@ been claimed or verified.
   bounded heading match plus the Roman leader notice is backed by reading and
   parsing the actual original save file.
 
+## Campaign-controller calibration
+
+Attempt 001 began from the verified untouched start and records its development
+pauses continuously. Jev founded Rome, selected Settlers in its actual production
+menu, and skipped the remaining starting Settler's movement. A native save
+confirmed Rome and the compacted unit roster. Jev selected Alphabet in the first research menu; a mouse failure before
+button-down required a separately recorded, visually verified keyboard recovery.
+The final native checkpoint is turn 2, 3950 BC, one city, Alphabet research.
+The finalized 27:59 calibration video and ledger pass integrity checks, with
+three automatic dispatches and one explicit recovery. No full-game outcome
+exists yet.
+
+The first city exposed several controller defects: an intermediate map repaint
+preceded the city window; native bitmap OCR missed short OK controls and read
+selected labels incorrectly; and mouse positioning stalled near the bottom edge.
+The controller now waits for city transitions, uses separate OCR analysis copies
+with original-coordinate provenance, preserves menu transactions across pauses,
+and binds production reviews to each city's observed name and year. The original
+Escape shortcut successfully closes the city screen. The boundary came from DOSBox choosing its unlocked absolute-motion path even
+when SDL supplied relative deltas. The corrected export calls the original
+DOSBox relative input handler; a fresh live menu selection reached pixel
+(512,378) exactly in eight feedback steps. These are harness calibrations, not
+model losses.
+
 ## Evidence conventions
 
 Each model session retains original saves, original screenshots, requests,

@@ -65,19 +65,17 @@ test('Emterpreter pause survives yield-resume callbacks and drains exactly once'
   assert.equal(calls.includes('resume'),false,'does not call empty Browser.mainLoop.resume');
   assert.equal(api.status().pauseBackend,'emterpreter_async_callbacks');
 });
-test('relative mouse exposes only bounded deltas through the original SDL API',async()=>{
+test('relative mouse exposes only bounded deltas through original DOSBox relative host input',async()=>{
   const {api,module}=await runtime();const calls=[];
-  module.HEAPU8=new Uint8Array(30064344);module.HEAP32=new Int32Array(module.HEAPU8.buffer);
-  module.HEAP32[7175725]=64;
-  module.asm={_tsai_sdl_send_mouse_motion(...args){calls.push(args);return 1;}};
+  module.asm={_tsai_dosbox_mouse_motion(...args){calls.push(args);}};
   const result=api.moveRelative(12,-8);
-  assert.deepEqual(calls,[[64,0,1,12,-8]]);assert.equal(result.queued,true);
-  assert.equal(module.HEAP32[7175725],64);
+  assert.deepEqual(calls,[[12,-8,0,0,1]]);assert.equal(result.dispatched,true);
+  assert.equal(result.emulate,true);assert.equal(result.via,'DOSBox Mouse_CursorMoved');
+  assert.equal(result.queued,undefined,'void host handler is dispatch evidence, not queue or guest acknowledgement');
   for(const delta of [[0,0],[33,0],[0,-33],[1.5,0],['1',0],[true,0]])assert.throws(()=>api.moveRelative(...delta),/integer/);
   assert.equal(calls.length,1);
-  module.HEAP32[7175725]=-1;assert.throws(()=>api.moveRelative(1,0),/focus/);
-  module.HEAP32[7175725]=64;module.asm._tsai_sdl_send_mouse_motion=()=>0;
-  assert.throws(()=>api.moveRelative(1,0),/queue/);
+  delete module.asm._tsai_dosbox_mouse_motion;
+  assert.throws(()=>api.moveRelative(1,0),/unavailable/);
 });
 test('input diagnostics expose bounded host symbols without a memory-write path',async()=>{
   const {api,module,files}=await runtime();

@@ -229,19 +229,15 @@
       requireStarted();
       if (!isInt(dx,-32,32) || !isInt(dy,-32,32) || (dx === 0 && dy === 0))
         throw new Error('Relative mouse movement requires nonzero integer deltas within -32..32');
-      const module = window.Module;
-      const sendMotion = module.asm?._tsai_sdl_send_mouse_motion;
-      if (typeof sendMotion !== 'function' || !module.HEAP32 || !module.HEAPU8 || module.HEAPU8.length <= 28702900)
-        throw new Error('The verified SDL relative-input runtime is unavailable');
-      // Read SDL's own focused-window pointer, never a Civ II pointer. Passing
-      // relative=1 routes bounded deltas through the existing SDL input queue.
-      // The original SDL code preserves xrel/yrel even at a clamped host edge.
-      const focus = module.HEAP32[7175725];
-      if (!Number.isInteger(focus) || focus < 0 || focus % 4 !== 0 || focus + 64 > module.HEAPU8.length)
-        throw new Error('SDL mouse focus is invalid');
-      const queued = sendMotion(focus,0,1,dx,dy);
-      if (queued !== 1) throw new Error('SDL did not queue the relative mouse event');
-      return receipt('relativeMouse',{dx,dy,queued:true,via:'SDL_SendMouseMotion'});
+      const moveCursor = window.Module.asm?._tsai_dosbox_mouse_motion;
+      if (typeof moveCursor !== 'function')
+        throw new Error('The verified DOSBox relative-input runtime is unavailable');
+      // Original Mouse_CursorMoved(xrel,yrel,x,y,emulate). DOSBox's unlocked
+      // SDL handler forces emulate=false even for SDL relative events, causing
+      // host-edge saturation. Use the existing relative host-input mode here;
+      // original scaling, PS/2 callback, event queue and IRQ handling remain.
+      moveCursor(+dx,+dy,0.0,0.0,1);
+      return receipt('relativeMouse',{dx,dy,dispatched:true,emulate:true,via:'DOSBox Mouse_CursorMoved'});
     },
     async click(x,y,{button = 0,holdMs = 60} = {}) {
       if (!isInt(holdMs,1,1000)) throw new Error('Mouse hold must be 1..1000 milliseconds');

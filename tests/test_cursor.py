@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 from PIL import Image
 
-from civ2.cursor import CONSTRAINTS, CursorError, locate_cursor, move_and_click
+from civ2.cursor import CONSTRAINTS, CursorError, locate_cursor, move_and_click, move_cursor
 
 
 def picture(*positions):
@@ -69,6 +69,13 @@ class CursorTests(unittest.TestCase):
         game=FakeGame(stalled=True)
         with self.assertRaisesRegex(CursorError,'acknowledge'):move_and_click(game,247,377)
         self.assertTrue(all(event['type']=='mousemove' for event in game.inputs))
+    @patch('civ2.cursor.time.sleep')
+    def test_cursor_parking_never_presses_a_button(self,_):
+        game=FakeGame();result=move_cursor(game,620,410)
+        self.assertFalse(result['issued'])
+        self.assertTrue(all(e['type']=='mousemove' for e in game.inputs))
+        self.assertLessEqual(abs(game.cursor[0]-620),3)
+
     def test_invalid_targets_or_paused_game_emit_no_input(self):
         game=FakeGame(paused=True)
         with self.assertRaises(CursorError):move_and_click(game,247,377)

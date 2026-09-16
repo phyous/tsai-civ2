@@ -63,7 +63,7 @@ class Session:
                             settings=self.initial_settings, model=self.client.model)
         self.publish('paused', 'Rome, at the beginning.')
         time.sleep(.6)  # Allow the live spectator poll to show the actual start.
-        self.recorder = Recorder(self.journal.directory/'video', fps=fps).start() if record else None
+        self.recorder = Recorder(self.journal.directory/'video', game=self.game, fps=fps).start() if record else None
 
     def publish(self, status='paused', message=''):
         state = dict(self.state)

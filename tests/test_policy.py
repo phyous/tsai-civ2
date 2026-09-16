@@ -53,6 +53,62 @@ def dialog():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_model_labor_projects_center_worker_and_unexplored_without_hidden_data(self):
+        s=fixture();r=rules()
+        s['cities']=[dict(id=0,owner=1,name='TEST Rome',x=8,y=8,size=1,
+            worked_tiles_bits=[32,0,16],specialist_count=0,specialists={},
+            happy=0,unhappy=0,disorder=False,celebrating=False,food_produced=4)]
+        s['map']['tiles']=[here(s),dict(x=6,y=8,terrain_id=2,terrain='Grassland',river=True,
+            known_improvements=['road'],actual_improvements=['SECRET'],hidden_owner='SECRET')]
+        s['map']['hidden_tiles']=[dict(x=8,y=6,terrain_id=5,terrain='SECRET')]
+        r['terrain'][2].update(food=2,shields=0,trade=0)
+        old=copy.deepcopy(s)
+        actions=unit_candidates(s,rules=r)
+        request=unit_request_for(s,actions,r)
+        labor=request['state']['city_labor'];city=labor['cities'][0]
+        self.assertEqual(labor['revision'],{'save_sha256':'a'*64,'turn':1})
+        self.assertEqual(len(city['radius']),21)
+        center=next(row for row in city['radius'] if row[3])
+        self.assertEqual(center[:6],[8,8,True,True,'explored',2])
+        self.assertEqual(center[8],[2,0,0])
+        west=next(row for row in city['radius'] if row[:2]==[6,8])
+        self.assertEqual(west,[6,8,True,False,'explored',2,True,['road'],[2,0,0]])
+        north=next(row for row in city['radius'] if row[:2]==[8,6])
+        self.assertEqual(north[4:],['unexplored',None,None,None,None])
+        self.assertNotIn('SECRET',json.dumps(labor))
+        self.assertIn('not actual tile yields',labor['yield_note'])
+        self.assertIn('not verified',labor['action_note'])
+        self.assertEqual(request['questions']['unit_action']['criteria'],{k:v['label'] for k,v in actions.items()})
+        self.assertEqual(s,old)
+
+    def test_model_labor_partial_observation_unavailable_not_invented(self):
+        s=fixture();s['cities']=[dict(id=0,name='TEST Rome',x=8,y=8,size=1)]
+        labor=model_state(s,rules())['city_labor']
+        self.assertEqual(labor['cities'][0]['available'],False)
+        self.assertNotIn('radius',labor['cities'][0])
+        s['cities'][0].update(owner=1,worked_tiles_bits=[32,0,16],specialist_count=0,specialists={})
+        city=model_state(s,rules())['city_labor']['cities'][0]
+        self.assertTrue(city['available'])
+        self.assertTrue(all(row[8] is None for row in city['radius']))
+
+    def test_model_labor_supplied_invalid_bitmap_fails_instead_of_silently_omitting(self):
+        s=fixture();s['cities']=[dict(id=0,owner=1,name='TEST Rome',x=8,y=8,size=1,
+            worked_tiles_bits=[32,0,0],specialist_count=0,specialists={})]
+        with self.assertRaisesRegex(PolicyError,'city-center worked bit'):
+            model_state(s,rules())
+
+    def test_model_labor_specialist_uncertainty_is_available_to_dialog_decision(self):
+        s=fixture();s['cities']=[dict(id=0,owner=1,name='TEST Rome',x=8,y=8,size=3,
+            worked_tiles_bits=[32,0,16],specialist_count=2,specialists={'entertainer':1},
+            happy=1,unhappy=2,disorder=True)]
+        request,_=dialog_request_for(s,dialog(),rules())
+        city=request['state']['city_labor']['cities'][0]
+        self.assertTrue(city['labor_balance']['consistent'])
+        self.assertEqual(city['specialists']['untyped_count'],1)
+        self.assertFalse(city['specialists']['type_counts_complete'])
+        self.assertTrue(city['happiness']['disorder'])
+        self.assertTrue(city['warnings'])
+
     def test_full_known_map_retains_odd_row_coordinates_and_remembered_works_only(self):
         s=fixture();s['map']['tiles']=[
             {'x':8,'y':8,'terrain_id':2,'terrain':'Grassland','river':True,'known_improvements':['road','irrigation'], 'live_enemy':'SECRET_LIVE'},
@@ -91,6 +147,8 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(len(state['owned_city_locations']),40)
         self.assertEqual(len(state['owned_cities']),32)
         self.assertEqual(state['omitted_owned_city_details'],8)
+        self.assertEqual(len(state['city_labor']['cities']),32)
+        self.assertEqual(state['city_labor']['omitted_city_count'],8)
 
     def test_city_distance_is_geometric_and_wrap_aware(self):
         s=fixture();s['units'][0].update(x=0,y=8)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from .native_events import EVENT_TITLES, classify_information
 
 
 class DialogObservationError(ValueError):
@@ -104,6 +105,20 @@ def _unique(rows):
     return len({_normal(r['text']) for r in rows})==len(rows) and len({tuple(r['center']) for r in rows})==len(rows)
 
 
+def _edit_distance(a,b):
+    previous=list(range(len(b)+1))
+    for i,ca in enumerate(a,1):
+        current=[i]
+        for j,cb in enumerate(b,1):
+            current.append(min(current[-1]+1,previous[j]+1,previous[j-1]+(ca!=cb)))
+        previous=current
+    return previous[-1]
+
+
+def _production_stat(text):
+    return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+/\d+\s+hp:\s*\d+/\d+)?\)',text))
+
+
 def _native_map_kind(rows, observation, state):
     """Recognize the observed 640x480 Roman map layout, never a generic backdrop.
 
@@ -131,7 +146,9 @@ def _native_map_kind(rows, observation, state):
     status=[r for r in rows if r['bounds'][0]>=466 and 175<=r['center'][1]<=246]
     people=[r for r in status if re.fullmatch(r'[0-9,]+\s+people',r['normal'])]
     years=[r for r in status if re.fullmatch(r'\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',r['normal'])]
-    gold=[r for r in status if re.fullmatch(r'[0-9,]+\s+gold(?:\s+[0-9.]+)?',r['normal'])]
+    # Original narrow status-font 1 is observed as I/l. This is only a pane
+    # layout marker, never an OCR-derived treasury value; economy comes from SAV.
+    gold=[r for r in status if re.fullmatch(r'[0-9il,]{1,16}\s+gold(?:\s+[0-9.]+)?',r['normal'])]
     if len(people)!=1 or len(years)!=1 or len(gold)!=1:
         return None, 'Native population, year and treasury status markers are incomplete'
     if any(r['confidence']<.8 for r in map_titles+worlds+people+years+gold):
@@ -210,8 +227,98 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                       model=bool(choices),outcome=outcome,reason='Original terminal text needs screenshot review; not automated outcome proof')
     if re.search(r'\bspaceship arrives on alpha centauri\b',full):
         return unknown('Arrival does not establish that the human player won','space_arrival')
+    science_report=single_title(r'science advisor report')
+    if science_report:
+        if len(science_report)!=1 or science_report[0]['confidence']<.8:
+            return unknown('Science report title is ambiguous','science_advisor')
+        title=science_report[0]
+        templates=[t for t in dialog_resources(game_text) if t['tag']=='REPORTSCIENCE'] if game_text else []
+        if len(templates)!=1 or _normal(templates[0]['title'])!='science advisor report' or not isinstance(rules,dict):
+            return unknown('Original REPORTSCIENCE resource and advance names are required','science_advisor',title['text'])
+        template=templates[0]
+        if set(template['buttons'])!={'Info','Goal'} or not template['listbox']:
+            return unknown('Science report resource does not match its original controls','science_advisor',title['text'])
+        body,button_rows,_=body_rows(title,{'ok','info','goal','cancel'},template['width'] or 540)
+        if len(button_rows)!=3 or {r['normal'] for r in button_rows}!={'ok','info','goal'} or any(r['confidence']<.8 for r in button_rows):
+            return unknown('Science report requires unambiguous observed OK, Info and Goal controls','science_advisor',title['text'])
+        advances={_normal(r['name']):r for r in rules.get('advances',[]) if isinstance(r.get('name'),str)}
+        researching=[];discoveries=[];headings=[];achieved=[];unexpected=[]
+        for r in body:
+            research=re.fullmatch(r'researching:\s*(.+?)\s*\((\d+)\s+of\s+(\d+)\)',r['normal'])
+            interval=re.fullmatch(r'discoveries every\s+(\d+)\s+turns?',r['normal'])
+            if research and research[1] in advances:
+                researching.append((r,research))
+            elif interval:
+                discoveries.append((r,interval))
+            elif r['normal']=='civilization advances achieved':
+                headings.append(r)
+            elif r['normal'] in advances:
+                achieved.append(r)
+            else:
+                unexpected.append(r)
+        if unexpected or len(researching)!=1 or len(discoveries)!=1 or len(headings)!=1 or any(r['confidence']<.8 for r in body):
+            return unknown('Science report body is incomplete or contains unrecognized text','science_advisor',title['text'])
+        heading=headings[0]
+        if (not researching[0][0]['center'][1]<discoveries[0][0]['center'][1]<heading['center'][1]
+            or any(r['bounds'][1]<heading['bounds'][1]+heading['bounds'][3]-2 for r in achieved)
+            or not _unique(achieved)):
+            return unknown('Science report header and achieved-advance list geometry are ambiguous','science_advisor',title['text'])
+        buttons=[_option(r,'button') for r in button_rows];ok=next(r for r in buttons if _normal(r['text'])=='ok')
+        research=researching[0][1];interval=discoveries[0][1]
+        result['resource_tag']='REPORTSCIENCE'
+        result['report']={'observed_body':[r['text'] for r in body],
+            'researching':advances[research[1]]['name'],'research_progress':int(research[2]),
+            'research_required':int(research[3]),'discoveries_every_turns':int(interval[1]),
+            'visible_achieved_advances':[advances[r['normal']]['name'] for r in achieved],
+            'knowledge':'Actual visible report labels only; the scrollable advance list may be incomplete. This report does not change research.'}
+        return finish('science_advisor',title['text'],[ok],buttons,mechanical='acknowledge_information',
+                      reason='Acknowledge only observed OK on the complete original Science Advisor Report; Info and Goal are not dispatched')
+    # GAME.TXT @CITYMODAL1 is a navigation warning, not a strategic choice.
+    # Acknowledge only its observed OK, preserving the city window for the next
+    # classification. The alternative "Close City Window" is not dispatched.
+    city_warning=single_title(r'city window')
+    if city_warning:
+        if len(city_warning)!=1 or city_warning[0]['confidence']<.8:
+            return unknown('City-window warning title is ambiguous','city_window_warning')
+        title=city_warning[0]
+        body,button_rows,_=body_rows(title,{'ok','close city window'},400)
+        body_text=' '.join(r['normal'] for r in body)
+        if body_text!='you must close the city window before the game can proceed':
+            return unknown('City-window warning body does not match the original notice','city_window_warning',title['text'])
+        if {_normal(r['text']) for r in button_rows}!={'ok','close city window'} or any(r['confidence']<.8 for r in body+button_rows):
+            return unknown('City-window warning controls are incomplete','city_window_warning',title['text'])
+        buttons=[_option(r,'button') for r in button_rows]
+        ok=[r for r in buttons if _normal(r['text'])=='ok']
+        if len(ok)!=1:return unknown('City-window OK is ambiguous','city_window_warning',title['text'])
+        result['resource_tag']='CITYMODAL1'
+        return finish('information',title['text'],ok,buttons,mechanical='acknowledge_information',
+                      reason='Dismiss only the exact original City Window warning with its observed default OK')
+    # Measured original OCR reads Found as Foond in the illustrated notice.
+    # Do not accept that variant without its native founded-city body and OK.
+    founded=single_title(r'f(?:ou|oo)nd new city')
+    if founded:
+        if len(founded)!=1 or founded[0]['confidence']<.8:
+            return unknown('Founding notice title is ambiguous','founding_notice')
+        title=founded[0]
+        body,button_rows,_=body_rows(title,{'ok','cancel','yes','no'},600)
+        # The illustrated notice can expose unrelated map labels outside its
+        # horizontal body band. Only the single actual founding line establishes
+        # the notice; other text inside that band would be an unknown modal.
+        matching=[(r,re.fullmatch(r'(.+?)\s+founded\s*:\s*(\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',r['normal'])) for r in body]
+        matching=[(r,m) for r,m in matching if m]
+        if len(matching)!=1 or len(body)!=1 or matching[0][0]['confidence']<.8:
+            return unknown('Founding notice lacks one complete original founded-city line','founding_notice',title['text'])
+        if len(button_rows)!=1 or button_rows[0]['normal']!='ok' or button_rows[0]['confidence']<.8:
+            return unknown('Founding notice requires one observed OK button','founding_notice',title['text'])
+        result['resource_tag']='FOUNDED'
+        result['founded_city']={'name':re.split(r'\s+founded\s*:',matching[0][0]['text'],maxsplit=1,flags=re.I)[0].strip(),
+                                'year_text':matching[0][1].group(2),'source':'Original founding notice text'}
+        result['observed_city_name']=result['founded_city']['name']
+        ok=_option(button_rows[0],'button')
+        return finish('information',title['text'],[ok],[ok],mechanical='acknowledge_information',
+                      reason='Original founding notice acknowledged after observed title, body and OK')
     patterns={
-        'new_city_name':r'what shall we name this city',
+        'new_city_name':r'what shall we name "?this city',
         'research_choice':r'what discovery shall our .+ pursue',
         'production_choice':r'what shall we build in .+',
         'government_choice':r'select type of government',
@@ -223,12 +330,46 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         'city_locator':r'where in the heck is',
     }
     matches=[(kind,r) for kind,p in patterns.items() for r in single_title(p)]
+    # Match only the original production-title template, and only against city
+    # names already observed by the caller. Corrupted title spelling alone is
+    # insufficient: exact rule names, paired stat rows and native Auto/Help/OK
+    # controls must independently establish this specific original dialog.
+    if not matches and isinstance(state,dict) and isinstance(rules,dict):
+        city_names={c['name'] for c in state.get('cities',[]) if isinstance(c,dict) and isinstance(c.get('name'),str)}
+        city_names.update(n for n in state.get('observed_city_names',[]) if isinstance(n,str))
+        rule_names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[]) if r.get('name') and r['name']!='Nothing'}
+        approximate=[]
+        for title in rows:
+            m=re.fullmatch(r'what shall (.{2,18}) in (.{1,60})',title['normal'])
+            if not m or title['confidence']<.8 or _edit_distance(m[1],'we build')>4:
+                continue
+            names=[name for name in city_names if _edit_distance(m[2],_normal(name))<=max(1,len(_normal(name))//5)
+                   and _edit_distance(title['normal'],'what shall we build in '+_normal(name))<=6]
+            if len(names)!=1:
+                continue
+            body,buttons,_=body_rows(title,{'ok','auto','help'},440)
+            options=[r for r in body if r['normal'] in rule_names and r['confidence']>=.8]
+            stats=[r for r in body if _production_stat(r['normal'])]
+            corroborated=({r['normal'] for r in buttons}=={'auto','help','ok'} and len(buttons)==3
+                and all(r['confidence']>=.8 for r in buttons)
+                and len(options)>=2 and len(options)==len(stats) and len(body)==len(options)+len(stats)
+                and all(any(abs(r['center'][1]-s['center'][1])<=8 and s['bounds'][0]>r['center'][0] for s in stats) for r in options))
+            if corroborated:
+                approximate.append((title,names[0]))
+        if len(approximate)==1:
+            title,city_name=approximate[0]
+            matches=[('production_choice',title)]
+            result['observed_city_name']=city_name
+            result['title_match']={'source':'Original production template plus known city, exact options, paired stats and Auto/Help/OK',
+                                   'observed_text':title['text'],'template':'What shall we build in '+city_name+'?'}
+        elif len(approximate)>1:
+            return unknown('Multiple corroborated production headings are ambiguous','production_choice')
     if len(matches)>1:return unknown('Multiple recognized native dialog titles')
     if matches:
         kind,title=matches[0]
         if title['confidence']<.8:return unknown('Low-confidence title',kind,title['text'])
         source_width={'research_choice':300,'production_choice':440,'government_choice':240,
-                      'new_city_name':320,'diplomacy':440,'tax_rate':260,'luxury_rate':260,
+                      'new_city_name':460,'diplomacy':440,'tax_rate':260,'luxury_rate':260,
                       'revolution_choice':240,'revolution_offer':440,'city_locator':360}[kind]
         body,button_rows,_=body_rows(title,{'ok','cancel','help','goal','auto','zoom to city'},source_width)
         buttons=[_option(r,'button') for r in button_rows]
@@ -292,6 +433,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                 if not isinstance(rules,dict):return unknown('Original rules names are required',kind,title['text'])
                 tables=['advances'] if kind=='research_choice' else ['units','improvements']
                 names={_normal(r['name']) for table in tables for r in rules.get(table,[]) if r.get('name') and r.get('name')!='Nothing'}
+            recover_research=(kind=='research_choice'
+                and len(button_rows)==3 and {r['normal'] for r in button_rows}=={'help','goal','ok'}
+                and all(r['confidence']>=.8 for r in button_rows)
+                and sum(r['normal'] in names and r['confidence']>=.8 for r in body)>=2)
             choices=[];unknown_rows=[]
             for row in body:
                 # Production suffixes must be native parenthesized stat/turn
@@ -300,7 +445,19 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                 if row['normal'] in names or (kind=='production_choice' and base in names):
                     if row['confidence']<.8:return unknown('Low-confidence option text',kind,title['text'])
                     choices.append(_option(row,'list_item'))
-                elif re.fullmatch(r'[0-9]+\s+turns?',row['normal']):
+                elif (recover_research and len(row['normal'])>=5 and row['confidence']>=.8
+                      and re.fullmatch(r'[a-z ]+',row['normal'])
+                      and row['normal'] not in ('civilization advances','city improvements','military units','wonders of the world')):
+                    recovered=[r for r in rules.get('advances',[]) if isinstance(r.get('name'),str)
+                               and len(_normal(r['name']))>=5 and _edit_distance(row['normal'],_normal(r['name']))==1]
+                    if len(recovered)==1:
+                        option=_option(row,'list_item');option['ocr_text']=row['text']
+                        option['text']=recovered[0]['name']
+                        option['name_recovery']={'source':'Unique one-edit match to original advance table, corroborated by research title, controls and exact peer options',
+                                                 'original_advance_id':recovered[0].get('id'),'edit_distance':1}
+                        choices.append(option)
+                    else:unknown_rows.append(row)
+                elif re.fullmatch(r'[0-9]+\s+turns?',row['normal']) or _production_stat(row['normal']):
                     # Independently recognized display-only timing column.
                     continue
                 elif row['normal'] not in ('civilization advances','city improvements','military units','wonders of the world'):
@@ -353,7 +510,19 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             if len(choices)!=1:return unknown('No visible acknowledgement button',kind,title['text'])
             return finish(kind,title['text'],choices,buttons,mechanical='acknowledge_information')
         return finish(kind,title['text'],choices,buttons,model=True)
-    info_titles=[r for r in rows if (r['normal'] in ('game saved','in the beginning','found new city','civilization advance')
+    if game_text:
+        # Original LABELS.TXT supplies these finite completion verbs. Without
+        # them BUILT's all-placeholder body could match arbitrary advisor text.
+        event=classify_information(observation,dialog_resources(game_text),
+            placeholder_values={tag:{'STRING3':['completes','builds']} for tag in ('BUILT','BUILT3')})
+        if event['supported']:
+            result['resource_tag']=event['resource_tag']
+            result['evidence']={**result['evidence'],**event['evidence']}
+            return finish('information',event['title'],event['options'],event['buttons'],
+                          mechanical='acknowledge_information',reason=event['reason'])
+        if any(r['normal'] in set(EVENT_TITLES.values()) for r in rows):
+            return unknown(event['reason'],'information')
+    info_titles=[r for r in rows if (r['normal'] in ('game saved','in the beginning','civilization advance')
                  or r['normal'].startswith('civ tutorial:') or r['normal'].startswith('civ rules:'))]
     if len(info_titles)>1:return unknown('Multiple informational headings')
     if info_titles:
@@ -376,14 +545,24 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
     if any(r['normal'] in ('ok','cancel','yes','no','repeat search') and r['center'][1]>40 for r in rows):
         return unknown('Unrecognized foreground dialog controls')
     labels={r['normal'].replace(' ','') for r in rows}
+    # Narrow observed OCR alias from the complete original city screen. A
+    # truncated label under a foreground popup ("Units Sup") does not qualify.
+    if any(r['normal']=='units supporied' and 0<=r['bounds'][0]<200 and 260<=r['center'][1]<=310
+           and r['confidence']>=.8 for r in rows):
+        labels.add('unitssupported')
     city_markers={'foodstorage','cityresources','unitssupported','unitspresent','resourcemap'}
     if city_markers<=labels:
+        if re.search(r'\b(?:select|choose|emissary|confirmation|warning|please|really|are you sure)\b',full):
+            return unknown('Possible unrecognized foreground modal over the city screen','city_screen')
         buttons=[_option(r,'button') for r in rows if r['normal'] in ('buy','change','info','map','happy','view','rename','exit')
                  and r['center'][0]>width*.65 and r['center'][1]>height*.45]
         if not {'buy','change','exit'}<={_normal(b['text']) for b in buttons}:
             return unknown('City controls incomplete','city_screen')
         titles=[r for r in rows if r['bounds'][1]<height*.15 and ('treasury' in r['normal'] or 'dreasury' in r['normal'])]
         title=titles[0]['text'] if len(titles)==1 else 'Original city screen'
+        if len(titles)==1:
+            match=re.match(r'city of (.+?),\s*\d+\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',titles[0]['text'],re.I)
+            if match:result['observed_city_name']=match[1].strip()
         return finish('city_screen',title,buttons,buttons,model=True)
     map_kind,map_reason=_native_map_kind(rows,observation,state)
     if map_kind:

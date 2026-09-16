@@ -20,7 +20,7 @@ def checked(path: Path, entry: dict) -> bool:
 
 
 def derive_input_runtime(engine: Path = ENGINE) -> None:
-    """One hash-bound export-table addition; keep the downloaded original intact."""
+    """Hash-bound original host-input exports; keep downloaded function bodies intact."""
     patch = json.loads((engine / "input-patch.json").read_text())
     source = (engine / patch["original"]).read_bytes()
     if hashlib.sha256(source).hexdigest() != patch["original_sha256"]:

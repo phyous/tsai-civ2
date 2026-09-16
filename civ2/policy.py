@@ -27,6 +27,7 @@ import re
 
 from .save import parse_rules
 from .rules import eligible_research
+from .city import CityLaborError, city_labor_projection
 
 
 class PolicyError(ValueError):
@@ -447,6 +448,44 @@ def unit_candidates(observation, unit_id=None, rules=None):
     return actions
 
 
+def _city_labor_context(observation, rules, cities):
+    """Bounded reference labor facts; never infer tile output or click targets."""
+    # Dialog-only callers sometimes supply partial rules/city observations.
+    # Omit missing specifications explicitly; malformed supplied data still fails.
+    terrain = [row for row in rules.get("terrain", [])
+               if all(key in row for key in ("food", "shields", "trade"))]
+    rows = []
+    required = ("owner", "size", "worked_tiles_bits", "specialist_count", "specialists")
+    for city in cities[:32]:
+        if any(key not in city for key in required):
+            rows.append({"city_id": city["id"], "available": False,
+                         "reason": "Complete owned-city labor fields were not supplied."})
+            continue
+        try:
+            labor = city_labor_projection(observation, city["id"], {"terrain": terrain})
+        except CityLaborError as exc:
+            raise PolicyError("Invalid supplied city labor observation: " + str(exc)) from exc
+        radius = []
+        for square in labor["city_radius"]:
+            point, tile = square["position"], square["terrain"]
+            base = square["original_base_yields"]
+            radius.append([point["x"] if point else None, point["y"] if point else None,
+                           square["worked"], square["is_center"], square["knowledge"],
+                           tile["id"] if tile else None, square["river"],
+                           square["remembered_improvements"],
+                           [base[k] for k in ("food", "shields", "trade")] if base else None])
+        rows.append({"city_id": city["id"], "available": True,
+                     "labor_balance": labor["labor_balance"], "specialists": labor["specialists"],
+                     "happiness": labor["happiness"], "warnings": labor["warnings"], "radius": radius})
+    return {"revision": _revision(observation), "cities": rows,
+            "omitted_city_count": max(0, len(cities)-32),
+            "radius_columns": ["x", "y", "worked", "city_center", "knowledge", "terrain_id",
+                               "river", "remembered_improvements", "original_base_yields_food_shields_trade"],
+            "yield_note": "Base yields are original RULES.TXT specifications, not actual tile yields or a reassignment forecast. Do not sum them as city income: government, resources, city-center rules and improvements are not calculated. Actual tile yields are unavailable; city totals remain separately reported as saved.",
+            "knowledge_note": "Only explored terrain and remembered works are joined. Unknown/out-of-map cells remain unknown. Worker-bit mapping is reference-backed; only center and one west-worker case have been compared with the original display.",
+            "action_note": "This observation does not add labor-reassignment actions. Native Resource Map and specialist click targets are not verified."}
+
+
 def model_state(observation, rules=None, recent_actions=None):
     """Compact projection of the already visibility-filtered save observation."""
     _revision(observation)
@@ -500,6 +539,7 @@ def model_state(observation, rules=None, recent_actions=None):
         "owned_city_count": len(own_cities),
         "owned_cities": deepcopy(own_cities[:32]),
         "owned_city_locations": [{k: deepcopy(c[k]) for k in ("id", "name", "x", "y", "size", "disorder", "production") if k in c} for c in own_cities],
+        "city_labor": _city_labor_context(observation, rules, own_cities),
         "omitted_owned_city_details": max(0, len(own_cities)-32),
         "omitted_owned_cities": max(0, len(own_cities)-32),
         "currently_visible_foreign_units": [{k:deepcopy(u[k]) for k in ("id", "type_id", "type", "owner", "x", "y", "hp", "veteran", "specification") if k in u} for u in observation.get("visible_units", [])[:64]],

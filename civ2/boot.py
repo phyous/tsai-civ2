@@ -84,13 +84,15 @@ def new_game(ui, *, from_startup=True, checkpoint='initial.sav'):
             continue
         if 'moving' in observation['text'].casefold() or 'moves:' in observation['text'].casefold():
             break
+    from .preferences import configure_preferences
+    preferences = configure_preferences(ui)
     data, save_receipt = ui.save_native(checkpoint)
     output = ui.directory / checkpoint
     output.write_bytes(data)
     state = parse_save(data, rules_text=original_rules())
     checks = verify_setup(state)
     (ui.directory / 'setup.json').write_text(json.dumps({'checks': checks, 'receipts': receipts,
-        'save_receipt': save_receipt, 'initial_save_sha256': state['evidence']['save_sha256'],
+        'save_receipt': save_receipt, 'preferences':preferences, 'initial_save_sha256': state['evidence']['save_sha256'],
         'settings': state['settings'], 'player': state['player'], 'map_dimensions':
         [state['map']['width'], state['map']['height']]}, indent=2))
     ui.game.rpc('pause')
