@@ -51,9 +51,12 @@ type Snapshot = {
     selected_action_question?:string; // selected child question, if present
     selected_intent?:string; // must match selected root answer
     action_label?:string;
-    receipt?:'pending'|'accepted'|'refused';
+    stage?:'command'|'planning';
+    executes_input?:boolean; // false for a planning response
+    receipt?:'pending'|'dispatched'|'accepted'|'refused';
     metadata?:object; // existing decision_graph/latency/token metadata supported
   };
+  recent_decisions?: Snapshot['decision'][]; // up to3 prior primary vectors, oldest first
   chronicle?: {id?:string,turn?:number,year?:string,label:string,kind?:string}[];
   message?:string; // short, safe operator text; never raw exceptions/server bodies
   playback_speed?:number;
@@ -72,6 +75,23 @@ vectors are present. Up to three actual vectors have distinct panels labelled
 command, routing, or companion (not dispatched). Further vectors and omitted
 options are explicitly noted. The empty council names six strategic domains
 without assigning probabilities. Labels use canvas text, never HTML interpolation.
+
+Unused council height may show up to three **Recent decisions / Past evaluations**
+cards. These contain the actual earlier primary Choice vector, its evaluated turn,
+decision ID and command/objective stage. They never replace current options or
+promote a companion vector into a command. A full 16-option current display keeps
+its original layout; history disappears when insufficient room remains. Historical
+cards show up to six options as space allows, mark omitted options, and preserve
+raw API probabilities and rounding notes.
+
+`Session.publish` retains four bounded primary-response snapshots to supply the
+three previous decisions. Repeated publication updates the same decision's receipt
+without creating history entries. These copies are presentation telemetry only:
+they do not enter model context, action dispatch or game-effect evidence. The view
+rejects malformed, duplicate, current and numerically future history entries and
+applies the same label sanitization as the current vector. An existing session
+starts collecting history on its next publication; no past response is invented.
+
 
 ## Injection, replay and capture
 

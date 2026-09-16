@@ -83,6 +83,35 @@ class PlanningTests(unittest.TestCase):
         s['map']['tiles'].append(dict(x=38,y=8,terrain='Plains',terrain_id=1,river=False,known_improvements=[]))
         self.assertNotIn('settle_38_8',task_candidates(s,r,limit=255)[0])
 
+    def test_approach_remembered_city_never_exposes_private_owner_or_defenses(self):
+        s,r=fixture(False)
+        s['map']['tiles'].append(dict(x=12,y=8,terrain='Plains',terrain_id=1,known_improvements=[]))
+        s['known_cities']=[dict(id=3,name='TEST Distant',x=12,y=8,current_information=False,
+                                owner='PRIVATE_OWNER',garrison='PRIVATE_GARRISON')]
+        candidates,_=task_candidates(s,r)
+        c=candidates['approach_city_12_8']
+        self.assertEqual(c['target'],{'x':12,'y':8})
+        self.assertIn('unknown',c['label'])
+        self.assertNotIn('PRIVATE',json.dumps(c))
+        s['known_cities'][0].update(x=30,y=10)
+        self.assertFalse(any(c['task']=='approach_city' for c in task_candidates(s,r)[0].values()))
+        s,r=fixture();s['known_cities']=[dict(name='TEST City',x=12,y=8)]
+        s['map']['tiles'].append(dict(x=12,y=8,terrain='Plains',terrain_id=1,known_improvements=[]))
+        self.assertFalse(any(c['task']=='approach_city' for c in task_candidates(s,r)[0].values()))
+
+    def test_approach_completes_near_city_for_reassessment_not_attack(self):
+        s,r=fixture(False)
+        s['map']['tiles'].append(dict(x=12,y=8,terrain='Plains',terrain_id=1,known_improvements=[]))
+        s['known_cities']=[dict(id=3,name='TEST Distant',x=12,y=8)]
+        plan=select(s,r,'approach_city')
+        action=unit_candidates(s,rules=r)['move_e']
+        after=fresh(s);after['units'][0]['x']=10
+        result=advance_plan(plan,s,after,action,r)
+        self.assertEqual(result['status'],'complete')
+        self.assertIn('reassess',result['reason'])
+        after=fresh(s);after['known_cities']=[]
+        self.assertEqual(advance_plan(plan,s,after,rules=r)['status'],'invalidated')
+
     def test_candidate_cap_is_deterministic_reports_omissions_and_reserves_hold(self):
         s,r=fixture();s['map']['tiles']=[dict(x=2*c+y%2,y=y,terrain='Plains',terrain_id=1,
             river=False,known_improvements=[]) for y in range(20) for c in range(20)]

@@ -196,13 +196,22 @@ def start(*, port=None, chrome=None, identifier=None):
                 process = subprocess.Popen(launch_commands[role], cwd=ROOT, env=environment,
                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             children.append(process)
+            # macOS Python may exec its framework interpreter after Popen.
+            # Capture the durable identity after readiness, while the original
+            # direct child is still alive, rather than a transient argv[0].
+            _wait_ready(port, children, connected=role=='chrome')
             identity = process_identity(process.pid)
             if (identity is None or identity['pgid'] != process.pid
-                    or identity['command'] != ' '.join(launch_commands[role])):
+                    or process.poll() is not None):
                 raise LauncherError('Could not establish ownership of a launched process')
+            suffix = ' ' + ' '.join(launch_commands[role][1:])
+            if not identity['command'].endswith(suffix):
+                raise LauncherError('A launched process changed its expected arguments')
+            # Preserve the interpreter actually executing this direct child.
+            # _load still validates every argument and its full recorded identity.
+            value['commands'][role][0] = identity['command'][:-len(suffix)]
             value['processes'][role] = identity
             _write(directory, value)
-            _wait_ready(port, children, connected=role=='chrome')
         value['status'] = 'connected'
         _write(directory, value)
         return value

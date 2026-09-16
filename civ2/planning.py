@@ -15,7 +15,7 @@ class PlanningError(PolicyError):
     pass
 
 
-TASKS = ('survey', 'settle', 'road', 'irrigate', 'mine', 'defend', 'engage')
+TASKS = ('survey', 'settle', 'road', 'irrigate', 'mine', 'defend', 'engage', 'approach_city')
 ACTOR_FIELDS = ('id', 'owner', 'type_id', 'x', 'y', 'home_city_id', 'veteran')
 
 
@@ -88,6 +88,18 @@ def task_candidates(state, rules=None, limit=64):
             if enemy.get('owner') in enemies or enemy.get('owner') == 0:
                 target = {k:enemy[k] for k in ('id','owner','type_id','x','y')}
                 add('engage', target, f"Engage currently visible {enemy.get('type', 'hostile unit')} at ({enemy['x']},{enemy['y']}); current visibility required")
+    if not worker and spec['domain'] == 0 and spec['attack'] > 0:
+        for city in state.get('known_cities', []):
+            point = (city.get('x'), city.get('y'))
+            if point not in tiles or point in {(c['x'],c['y']) for c in cities}:
+                continue
+            target = {key:city[key] for key in ('x','y')}
+            if _grid_distance(state, unit, target) <= 1:
+                continue
+            add('approach_city', target,
+                f"Approach remembered foreign city {city.get('name','')} at ({target['x']},{target['y']}) "
+                'to reassess its current situation; current owner and defenses are unknown. '
+                'This objective does not authorize an attack or assert a safe route.')
     hold = dict(id='hold_one_turn', task='hold', label='Hold this unit for one turn, then reassess',
                 actor=_actor(unit), preconditions={**revision, 'selected_unit_id':unit['id']}, target={'turn':state['turn']+1})
     for bucket in groups.values():
@@ -175,6 +187,13 @@ def advance_plan(plan, before, after, action=None, rules=None):
         return stop('expired', 'Bounded review interval reached; ask Jev for a new task')
     if task == 'defend' and point not in new_cities:
         return stop('invalidated', 'Target is no longer an observed owned city')
+    if task == 'approach_city':
+        if point in new_cities:
+            return stop('complete', 'An owned city is now observed at the target; conquest is not inferred')
+        if not any((c.get('x'),c.get('y'))==point for c in after.get('known_cities',[])):
+            return stop('invalidated', 'The remembered city location is no longer in the observation')
+        if _grid_distance(after, result['actor'], target) <= 1:
+            return stop('complete', 'The actor is now near the remembered city; reassess current diplomacy and visible threats')
     if task == 'engage' and not any(all(u.get(k)==v for k,v in target.items()) for u in after.get('visible_units', [])):
         return stop('invalidated', 'Exact hostile target is no longer currently visible; destruction is not inferred')
     if task == 'settle' and (not tile or tile.get('terrain') not in ('Grassland','Plains') or any(

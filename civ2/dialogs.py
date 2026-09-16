@@ -93,8 +93,24 @@ def _rows(observation):
         confidence=row.get('confidence',1.)
         if type(confidence) not in (int,float) or not math.isfinite(confidence) or not 0<=confidence<=1:
             raise DialogObservationError('Invalid OCR confidence')
-        rows.append(dict(text=text,normal=_normal(text),center=list(center),bounds=list(bounds),
-                         source_line=index,confidence=confidence))
+        prepared=dict(text=text,normal=_normal(text),center=list(center),bounds=list(bounds),
+                      source_line=index,confidence=confidence)
+        provenance=row.get('provenance',[])
+        if isinstance(provenance,list) and any(isinstance(p,dict) and str(p.get('preprocessing','')).startswith('map_label_') for p in provenance):
+            readings=[]
+            for p in provenance:
+                if not isinstance(p,dict):continue
+                mode=p.get('preprocessing','');coords=p.get('normalized_bounds')
+                if (mode!='native' and not re.fullmatch(r'map_label_\d+(?:_gray|_white)?_3x',str(mode))):continue
+                if (not isinstance(p.get('text'),str) or not re.fullmatch(r'[A-Z][A-Za-z]{2,24}',p['text'])
+                        or type(p.get('confidence')) not in (int,float) or not .8<=p['confidence']<=1
+                        or not isinstance(coords,list) or len(coords)!=4
+                        or any(type(v) not in (int,float) or not math.isfinite(v) or not 0<=v<=1 for v in coords)):continue
+                px,py,pw,ph=coords;cx=(px+pw/2)*width;cy=(py+ph/2)*height
+                if abs(cx-center[0])<=6 and abs(cy-center[1])<=4 and pw*width<=w+12 and ph*height<=h+8:
+                    readings.append(_normal(p['text']))
+            if readings:prepared['same_pixel_map_readings']=readings
+        rows.append(prepared)
     return sorted(rows,key=lambda r:(r['bounds'][1],r['bounds'][0]))
 
 
@@ -134,8 +150,45 @@ def _saved_city_name(raw_name,state):
     return near[0] if len(near)==1 else None
 
 
+def _recent_founded_name(raw_name,year_text,state):
+    """A same-year native founding notice binds a label, never a SAV actor."""
+    if not isinstance(state,dict) or not isinstance(raw_name,str) or len(_normal(raw_name))<3:return None
+    if not isinstance(year_text,str) or not re.fullmatch(r'\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',year_text,re.I):return None
+    notices=state.get('recent_founding_notices',[])
+    if not isinstance(notices,list) or len(notices)>4:return None
+    year=re.sub(r'[^a-z0-9]','',year_text.casefold());matches=[]
+    for notice in notices:
+        if (not isinstance(notice,dict) or notice.get('source_tag')!='FOUNDED'
+                or not re.fullmatch('[a-f0-9]{64}',str(notice.get('image_sha256','')))
+                or not isinstance(notice.get('name'),str) or not 3<=len(notice['name'])<=60
+                or not isinstance(notice.get('year_text'),str)
+                or re.sub(r'[^a-z0-9]','',notice['year_text'].casefold())!=year):continue
+        if _edit_distance(_normal(raw_name),_normal(notice['name']))<=1:matches.append(notice)
+    return matches[0] if len(matches)==1 else None
+
+
 def _production_stat(text):
     return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+/\d+\s+hp:\s*\d+/\d+)?\)',text))
+
+
+def _city_sprite_text(row, labels):
+    """Ignore only low-confidence glyph fragments on a known city's sprite.
+
+    The Rome icons at006/34 and005/295 were read as 'ОБ П' and 'Wu Fom 1'
+    (confidence.30), directly above the independently read Rome label. This is artwork evidence,
+    not a city statistic, unit, menu option or reconstructed text.
+    """
+    glyphs=''.join(row['text'].split())
+    words=_normal(row['text'].translate(str.maketrans({'О':'O','К':'K'}))).split()
+    controls={'ok','no','yes','exit','help','next','back','buy','auto','cancel','done','name','save','load','menu','quit','warning'}
+    if (not 0<=row['confidence']<.5 or not 1<=len(glyphs)<=8 or not glyphs.isalnum()
+            or any(word in controls for word in words) or ''.join(words) in controls):
+        return False
+    x,y,w,h=row['bounds']
+    if not 1<=w<=96 or not 1<=h<=40:return False
+    return any(abs(row['center'][0]-label['center'][0])<=32
+               and 12<=label['center'][1]-row['center'][1]<=36
+               and -4<=label['bounds'][1]-(y+h)<=12 for label in labels)
 
 
 def _native_map_kind(rows, observation, state):
@@ -167,19 +220,25 @@ def _native_map_kind(rows, observation, state):
     years=[r for r in status if re.fullmatch(r'\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',r['normal'])]
     # Original narrow status-font 1 is observed as I/l and 5 as E. This is only a pane
     # layout marker, never an OCR-derived treasury value; economy comes from SAV.
-    gold=[r for r in status if re.fullmatch(r'[0-9ile,]{1,16}\s+gold(?:\s+[0-9.]+)?',r['normal'])]
+    gold=[r for r in status if re.fullmatch(r'[0-9ile,]{1,16}\s+(?:gold|cold)(?:\s+[0-9.]+)?',r['normal'])]
     if len(people)!=1 or len(years)!=1 or len(gold)!=1:
         return None, 'Native population, year and treasury status markers are incomplete'
     if any(r['confidence']<.8 for r in map_titles+worlds+people+years+gold):
         return None, 'Native map pane or status text has low OCR confidence'
     # City labels legitimately appear over the playfield. Only names already in
     # the supplied owned/remembered observation qualify; no unseen city is inferred.
-    city_names={_normal(c['name']) for key in ('cities','known_cities') for c in state.get(key,[])
+    city_names={_normal((_saved_city_name(c['name'],state) or _recent_founded_name(c['name'],years[0]['text'],state) or c)['name'])
+                for key in ('cities','known_cities') for c in state.get(key,[])
                 if isinstance(c,dict) and isinstance(c.get('name'),str)}
+    def city_label(row):
+        readings={row['normal'],*row.get('same_pixel_map_readings',[])}
+        matches={name for name in city_names if any(re.fullmatch(re.escape(name)+r'(?:\s+\(?\d+\)?)?',reading) for reading in readings)}
+        return len(matches)==1
+    labels=[r for r in rows if r['bounds'][1]>=65 and r['bounds'][0]<462
+            and r['confidence']>=.8 and city_label(r)]
     for r in rows:
         if r['bounds'][1]>=65 and r['bounds'][0]<462:
-            known_city=r['confidence']>=.8 and any(re.fullmatch(re.escape(name)+r'(?:\s+\(?\d+\)?)?',r['normal']) for name in city_names)
-            if not known_city:
+            if r not in labels and not _city_sprite_text(r,labels):
                 return None, 'Unexpected text over the native map playfield; possible unrecognized modal'
     full=' '.join(r['normal'] for r in rows)
     if re.search(r'\b(?:select|choose|emissary|confirmation|warning|please|options|really|are you sure)\b',full):
@@ -297,6 +356,28 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         limit=min(r['bounds'][1] for r in bottom_buttons)
         return [r for r in below if r['bounds'][1]+r['bounds'][3]<=limit+2],bottom_buttons,limit
     full=' '.join(r['normal'] for r in rows)
+    # Original untitled @THRONE notice. Only dismiss its complete narrative;
+    # this does not choose a decoration on the following interactive screen.
+    throne = re.search(r'(?ms)^@THRONE\s*\n(.*?)(?=^@|\Z)', game_text or '')
+    prompt = [r for r in rows if r['normal']=='(click mouse to continue...)']
+    if throne and len(prompt)==1 and (width,height)==(640,480):
+        notice = [r for r in rows if r is not prompt[0]]
+        expected = _normal(' '.join(line.strip() for line in throne[1].splitlines() if line.strip()))
+        if (len(expected)>80 and notice
+                and _normal(' '.join(r['text'] for r in notice))==expected
+                and all(r['confidence']>=.8 and 60<=r['bounds'][0]
+                        and r['bounds'][0]+r['bounds'][2]<=580
+                        and 90<=r['center'][1]<=310 for r in notice)
+                and prompt[0]['confidence']>=.8
+                and 280<=prompt[0]['center'][0]<=360 and 450<=prompt[0]['center'][1]<=476
+                and not observation.get('ocr',{}).get('conflicts')):
+            button=_option(prompt[0],'button')
+            result['resource_tag']='THRONE'
+            result['acknowledgement_point']=list(notice[0]['center'])
+            result['presentation_scope']='Dismiss the original notice only; no decoration or gameplay choice'
+            result['evidence']['template_sha256']=hashlib.sha256(expected.encode()).hexdigest()
+            return finish('presentation_notice','Throne room notice',[button],[button],
+                          mechanical='acknowledge_presentation')
     reference=_civilopedia_reference(rows,observation,rules)
     if reference is not None:
         if 'reason' in reference:
@@ -457,7 +538,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                       reason='Dismiss only the exact original City Window warning with its observed default OK')
     # Measured original OCR reads Found as Foond in the illustrated notice.
     # Do not accept that variant without its native founded-city body and OK.
-    founded=single_title(r'f(?:ou|oo)nd new city')
+    founded=single_title(r'f(?:ou|oo)nd new ci(?:t|c)y')
     if founded:
         if len(founded)!=1 or founded[0]['confidence']<.8:
             return unknown('Founding notice title is ambiguous','founding_notice')
@@ -488,8 +569,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         'tax_rate':r'select new tax rate',
         'luxury_rate':r'select new luxury rate',
         'revolution_choice':r'revolution',
-        'revolution_offer':r'civ rules: governments',
-        'city_locator':r'where in the (?:heck|beck) is',
+        'revolution_offer':r'(?:civ rules: governments|cir roles: gopernments)',
+        'city_locator':r'where in the (?:heck is|beck is|heckis)',
     }
     matches=[(kind,r) for kind,p in patterns.items() for r in single_title(p)]
     # The original selected-font research screenshot reads the @RESEARCH
@@ -526,7 +607,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         # A provisional OCR name can coexist with its later native-save name.
         # Fold only uniquely corroborated aliases instead of making that single
         # city appear to be two competing identities.
-        city_names={(_saved_city_name(name,state) or {}).get('name',name) for name in city_names}
+        headers=[re.match(r'city of .+?,\s*(\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',r['text'],re.I)
+                 for r in rows if r['confidence']>=.8 and 32<=r['bounds'][1]<=56]
+        header_years={m[1] for m in headers if m};header_year=next(iter(header_years)) if len(header_years)==1 else None
+        city_names={(_saved_city_name(name,state) or _recent_founded_name(name,header_year,state) or {}).get('name',name) for name in city_names}
         rule_names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[]) if r.get('name') and r['name']!='Nothing'}
         approximate=[]
         for title in rows:
@@ -592,6 +676,31 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             if 'do we want a revolution to overthrow' not in body_text or {_normal(r['text']) for r in choices}!={'yes','no'}:
                 return unknown('Revolution question or both actual alternatives missing',kind,title['text'])
             return finish(kind,title['text'],choices,buttons,model=True)
+        if kind=='revolution_offer':
+            templates=[t for t in dialog_resources(game_text or '') if t['tag'] in ('AUTOMONARCHY','AUTOREV')
+                       and _normal(t['title'])=='civ rules: governments' and len(t['options'])==2]
+            matches=[]
+            for template in templates:
+                choices=[];prose=[]
+                for line in body:
+                    text=re.sub(r'^[•○●]\s*','',line['normal'])
+                    if any(re.fullmatch(_pattern(option),text) for option in template['options']):choices.append(line)
+                    else:prose.append(line)
+                actual=_normal(' '.join(r['text'] for r in prose))
+                # Measured ui328 glyph readings only, within the complete
+                # original government explanation. No strategic text omitted.
+                actual=re.sub(r'\blo switch governments\b','to switch governments',actual)
+                actual=re.sub(r'\bbriel period\b','brief period',actual)
+                if (len(choices)==2 and all(r['confidence']>=.8 for r in [*body,*button_rows])
+                        and len(button_rows)==1 and button_rows[0]['normal']=='ok'
+                        and re.fullmatch(_pattern(template['body']),actual)
+                        and all(sum(bool(re.fullmatch(_pattern(option),re.sub(r'^[•○●]\s*','',r['normal'])))
+                                    for r in choices)==1 for option in template['options'])
+                        and prose and min(r['center'][1] for r in choices)>max(r['center'][1] for r in prose)):
+                    matches.append((template,choices))
+            if len(matches)!=1:return unknown('Government offer requires its complete original body and both observed choices',kind,title['text'])
+            template,choices=matches[0];result['resource_tag']=template['tag']
+            return finish(kind,title['text'],[_option(r,'option') for r in choices],buttons,model=True)
         if kind=='city_locator':
             if not isinstance(state,dict):return unknown('Owned city observation required for navigation',kind,title['text'])
             names={_normal(c['name']) for c in state.get('cities',[]) if isinstance(c.get('name'),str)}
@@ -732,6 +841,37 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             if len(choices)!=1:return unknown('No visible acknowledgement button',kind,title['text'])
             return finish(kind,title['text'],choices,buttons,mechanical='acknowledge_information')
         return finish(kind,title['text'],choices,buttons,model=True)
+    # The original BUILT notice can add the LABELS.TXT radio choices to its
+    # template body. Both are real choices, so never acknowledge its OK using
+    # the information-only path. Bind names to observed own cities/public rules.
+    if game_text and isinstance(state,dict) and isinstance(rules,dict):
+        built=[t for t in dialog_resources(game_text) if t['tag']=='BUILT'
+               and _normal(t['title'])=='domestic advisor'
+               and _normal(t['body'])=='%string0 %string3 %string1'
+               and t['options']==[] and not t['listbox']]
+        headings=single_title('domestic advisor')
+        if len(built)==1 and len(headings)==1:
+            title=headings[0]
+            body,button_rows,_=body_rows(title,{'ok','cancel','yes','no','help'},600)
+            radios=[r for r in body if r['normal'] in ('zoom to city','continue')]
+            text_rows=[r for r in body if r not in radios]
+            cities={_normal(c['name']) for c in state.get('cities',[]) if isinstance(c,dict) and isinstance(c.get('name'),str)}
+            names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[])
+                   if isinstance(r,dict) and isinstance(r.get('name'),str)}
+            sentence=text_rows[0]['normal'] if len(text_rows)==1 else None
+            combinations=[(city,verb,item) for city in cities for verb in ('builds','completes') for item in names
+                          if sentence==city+' '+verb+' '+item]
+            if (len(combinations)==1 and len(radios)==2 and {r['normal'] for r in radios}=={'zoom to city','continue'}
+                    and len(button_rows)==1 and button_rows[0]['normal']=='ok'
+                    and all(r['confidence']>=.8 for r in [title,*body,*button_rows])
+                    and abs(title['center'][0]-button_rows[0]['center'][0])<=8
+                    and all(r['center'][1]>text_rows[0]['center'][1]+8 for r in radios)):
+                result['resource_tag']='BUILT'
+                result['evidence']['completion_notice']={'source':'Original GAME.TXT BUILT and LABELS.TXT Zoom to City/Continue',
+                    'observed_body':text_rows[0]['text'],'body_source_line':text_rows[0]['source_line'],
+                    'city_name':combinations[0][0],'item_name':combinations[0][2]}
+                return finish('production_notice',title['text'],[_option(r,'option') for r in radios],
+                              [_option(r,'button') for r in button_rows],model=True)
     if game_text:
         # Original LABELS.TXT supplies these finite completion verbs. Without
         # them BUILT's all-placeholder body could match arbitrary advisor text.
@@ -782,10 +922,15 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                  and r['center'][0]>width*.65 and r['center'][1]>height*.45]
         if not {'buy','change','exit'}<={_normal(b['text']) for b in buttons}:
             return unknown('City controls incomplete','city_screen')
+        anchors={key:[r for r in rows if r['normal']==label and r['confidence']>=.8]
+                 for key,label in (('resource_map','resource map'),('citizens','citizens'))}
+        if all(len(matches)==1 for matches in anchors.values()):
+            result['evidence']['city_resource_map']={key:{field:matches[0][field]
+                for field in ('center','bounds','source_line')} for key,matches in anchors.items()}
         titles=[r for r in rows if r['bounds'][1]<height*.15 and ('treasury' in r['normal'] or 'dreasury' in r['normal'])]
         title=titles[0]['text'] if len(titles)==1 else 'Original city screen'
         if len(titles)==1:
-            match=re.match(r'city of (.+?),\s*\d+\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',titles[0]['text'],re.I)
+            match=re.match(r'city of (.+?),\s*(\d+\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',titles[0]['text'],re.I)
             if match:
                 raw_name=match[1].strip()
                 result['observed_city_name']=raw_name
@@ -796,6 +941,13 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                         result['city_name_recovery']={'source':'Unique one-edit match to owned city in original save',
                             'ocr_text':raw_name,'canonical_name':city['name'],'city_id':city['id'],
                             'save_sha256':state['evidence']['save_sha256'],'source_line':titles[0]['source_line']}
+                elif titles[0]['confidence']>=.8:
+                    notice=_recent_founded_name(raw_name,match[2],state)
+                    if notice is not None:
+                        result['observed_city_name']=notice['name']
+                        result['city_name_recovery']={'source':'Unique same-year original founding notice label; no native actor binding',
+                            'ocr_text':raw_name,'canonical_name':notice['name'],'year_text':notice['year_text'],
+                            'notice_image_sha256':notice['image_sha256'],'source_line':titles[0]['source_line']}
         return finish('city_screen',title,buttons,buttons,model=True)
     map_kind,map_reason=_native_map_kind(rows,observation,state)
     if map_kind:

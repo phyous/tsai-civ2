@@ -32,10 +32,8 @@
     if (answer.confidence !== undefined && (!finite(answer.confidence) || answer.confidence < 0 || answer.confidence > 1)) return null;
     return {name: text(name, 100), choice: answer.choice, confidence: number(answer.confidence), total: entries.reduce((sum,[,p])=>sum+p,0), options: entries.map(([id,p])=>({id, label: text(obj(labels) ? labels[id] : '', 160) || text(id, 160), p})).sort((a,b)=>b.p-a.p || Number(b.id===answer.choice)-Number(a.id===answer.choice) || a.id.localeCompare(b.id))};
   }
-  function normalize(snapshot) {
-    if (!obj(snapshot)) throw new TypeError('Dashboard snapshot must be an object.');
-    const d = obj(snapshot.decision) ? snapshot.decision : {};
-    const e = obj(snapshot.empire) ? snapshot.empire : {};
+  function normalizeDecision(value) {
+    const d = obj(value) ? value : {};
     const metadata = obj(d.metadata) ? d.metadata : {};
     const graph = obj(metadata.decision_graph) ? metadata.decision_graph : {};
     const labels = obj(d.labels) ? d.labels : {};
@@ -53,14 +51,33 @@
     const planning = d.stage === 'planning' && d.executes_input === false;
     const rawReceipt = planning ? null : d.receipt;
     const receipt = ['pending','dispatched','accepted','refused'].includes(rawReceipt) ? rawReceipt : null;
+    return {id:text(d.id,30),model:/^jev[a-zA-Z0-9._-]*$/.test(d.model) ? d.model : '',latency_ms:nonnegative(d.latency_ms ?? metadata.latency_ms) ? (d.latency_ms ?? metadata.latency_ms) : null,observed_turn:number(d.observed_turn),observed_revision:text(d.observed_revision,40),
+        stage:planning?'planning':'command',groups: invalid || pathInvalid || disagreement ? [] : groups,invalid:invalid||pathInvalid||disagreement,rootName,childName,selectedIntent,action_label:text(d.action_label,220),receipt,
+        input_tokens:nonnegative(d.input_tokens ?? metadata.input_tokens_total) ? (d.input_tokens ?? metadata.input_tokens_total) : null};
+  }
+  function recentDecisions(raw, current) {
+    if (!Array.isArray(raw) || !current.id) return [];
+    const seen=new Set([current.id]), recent=[];
+    for(const item of raw.slice(-12).reverse()) {
+      const decision=normalizeDecision(item);
+      const primary=decision.groups.find(g=>g.name===(decision.childName||decision.rootName));
+      if(!decision.id || seen.has(decision.id) || decision.invalid || !primary)continue;
+      if(/^\d+$/.test(decision.id) && /^\d+$/.test(current.id) && Number(decision.id)>=Number(current.id))continue;
+      seen.add(decision.id);recent.push({...decision,groups:[primary],rootName:primary.name,childName:''});
+      if(recent.length===3)break;
+    }
+    return recent;
+  }
+  function normalize(snapshot) {
+    if (!obj(snapshot)) throw new TypeError('Dashboard snapshot must be an object.');
+    const e = obj(snapshot.empire) ? snapshot.empire : {};
+    const decision=normalizeDecision(snapshot.decision);
     return {
       status: STATUSES.has(snapshot.status) ? snapshot.status : 'setup', mode: snapshot.mode === 'replay' ? 'replay' : 'live',
       civilization: text(snapshot.civilization,50), turn: number(snapshot.turn), year: text(snapshot.year,30), message: text(snapshot.message,190),
       settings: Array.isArray(snapshot.settings) ? snapshot.settings.filter(obj).slice(0,6).map(s=>({label:text(s.label,30),value:text(s.value,60)})).filter(s=>s.label&&s.value) : [],
       empire: {cities:number(e.cities),population:number(e.population),treasury:number(e.treasury),net_income:number(e.net_income),science:number(e.science),research:text(e.research,70),research_turns:number(e.research_turns)},
-      decision: {id:text(d.id,30),model:/^jev[a-zA-Z0-9._-]*$/.test(d.model) ? d.model : '',latency_ms:nonnegative(d.latency_ms ?? metadata.latency_ms) ? (d.latency_ms ?? metadata.latency_ms) : null,observed_turn:number(d.observed_turn),observed_revision:text(d.observed_revision,40),
-        stage:planning?'planning':'command',groups: invalid || pathInvalid || disagreement ? [] : groups,invalid:invalid||pathInvalid||disagreement,rootName,childName,selectedIntent,action_label:text(d.action_label,220),receipt,
-        input_tokens:nonnegative(d.input_tokens ?? metadata.input_tokens_total) ? (d.input_tokens ?? metadata.input_tokens_total) : null},
+      decision, recent_decisions:recentDecisions(snapshot.recent_decisions,decision),
       chronicle: Array.isArray(snapshot.chronicle) ? snapshot.chronicle.filter(obj).slice(-30).map((event,i)=>({id:text(event.id,40)||String(i),turn:number(event.turn),year:text(event.year,30),label:text(event.label,180),kind:text(event.kind,40)})).filter(event=>event.label) : [],
       playback_speed: finite(snapshot.playback_speed) && snapshot.playback_speed>0 ? snapshot.playback_speed : null,
       runtime_ready: snapshot.runtime_ready === true,
@@ -87,6 +104,19 @@
     let y=286;
     for(const plan of plans){plan.y=y;plan.rowHeight=rowHeight;plan.height=40+plan.rows*rowHeight;y+=plan.height+10;}
     return {panels:plans,additional:ordered.slice(3)};
+  }
+  function historyLayout(layout, recent) {
+    if(!layout.panels.length || !recent.length)return {y:0,cards:[]};
+    const y=Math.max(...layout.panels.map(p=>p.y+p.height))+19;
+    const bottom=layout.additional.length?841:864,available=bottom-y;
+    const count=Math.min(3,recent.length,Math.floor((available-25+8)/79));
+    if(count<1)return {y,cards:[]};
+    const height=Math.min(114,Math.floor((available-25-8*(count-1))/count));
+    return {y,cards:recent.slice(0,count).map((decision,i)=>{
+      const group=decision.groups[0],rows=Math.max(1,Math.min(3,Math.floor((height-31)/20)));
+      const visible=Math.min(group.options.length,rows*2);
+      return {decision,group,y:y+25+i*(height+8),height,visible,rows:Math.ceil(visible/2)};
+    })};
   }
   function font(size=20,kind='sans',weight='normal') {
     return `${weight} ${size}px ${kind==='serif'?'Georgia, "Times New Roman", serif':kind==='mono'?'"Courier New", monospace':'Arial, Helvetica, sans-serif'}`;
@@ -149,6 +179,32 @@
     if(group.confidence!==null)notes.push(`confidence ${group.confidence.toFixed(2)}`);
     if(notes.length)write(ctx,notes.join('   ·   '),1208,y+27+rows*rowHeight,10,'#8a806b','mono');
   }
+  function paintHistory(ctx,layout) {
+    if(!layout.cards.length)return;
+    rule(ctx,1208,layout.y-8,656,C.paperLine);
+    write(ctx,'RECENT DECISIONS',1208,layout.y,10,'#756b58','mono');
+    write(ctx,'PAST EVALUATIONS',1864,layout.y,10,'#927952','mono','normal','right');
+    for(const card of layout.cards) {
+      const {decision,group,y,height,visible,rows}=card;
+      rect(ctx,1201,y-3,670,height,'#fbf7ee',null,3);
+      const when=decision.observed_turn!==null?'T'+shown(decision.observed_turn)+'  ·  ':'';
+      const stage=decision.stage==='planning'?'OBJECTIVE · NO INPUT':'COMMAND';
+      write(ctx,clipped(ctx,when+'#'+decision.id+'  /  '+stage+'  /  '+vectorName(group.name),648,10,'mono'),1208,y+2,10,'#796b54','mono');
+      group.options.slice(0,visible).forEach((option,index)=>{
+        const col=Math.floor(index/rows),row=index%rows,x=1208+col*337,top=y+21+row*20;
+        const chosen=option.id===group.choice;
+        if(chosen)diamond(ctx,x+2,top+6,2.5,C.teal);
+        write(ctx,clipped(ctx,option.label,chosen?254:266,12,'sans',chosen?'bold':'normal'),x+(chosen?12:0),top,12,chosen?C.teal:C.ink,'sans',chosen?'bold':'normal');
+        write(ctx,probabilityText(option.p),x+319,top,12,chosen?C.teal:'#6c6c5e','mono',chosen?'bold':'normal','right');
+        rect(ctx,x,top+16,319,2,'#e7dfcd',null,1);
+        if(option.p>0)rect(ctx,x,top+16,Math.max(1,319*option.p),2,chosen?'#648d7d':'#c1ad83',null,1);
+      });
+      const notes=[];
+      if(group.options.length>visible)notes.push('+'+(group.options.length-visible)+' options in trace');
+      if(Math.abs(group.total-1)>1e-6)notes.push('API total '+(group.total*100).toFixed(0)+'% · unchanged');
+      if(notes.length)write(ctx,notes.join('  ·  '),1208,y+21+rows*20,9,'#8a806b','mono');
+    }
+  }
   function paint(ctx,s,view={},gameImage=null) {
     ctx.clearRect(0,0,W,H);ctx.fillStyle=C.bg;ctx.fillRect(0,0,W,H);
     const wash=ctx.createLinearGradient(0,0,W,H);wash.addColorStop(0,'#0c2230');wash.addColorStop(1,'#183d43');ctx.fillStyle=wash;ctx.fillRect(0,0,W,H);
@@ -188,6 +244,7 @@
     if(layout.panels.length) {
       layout.panels.forEach((panel,i)=>{if(i)rule(ctx,1208,panel.y-7,656,C.paperLine);paintVector(ctx,panel);});
       if(layout.additional.length)write(ctx,clipped(ctx,'Other returned vectors: '+layout.additional.map(g=>vectorName(g.name)).join(', '),656,11),1208,855,11,'#857a65');
+      paintHistory(ctx,historyLayout(layout,s.recent_decisions));
     } else {
       if(s.decision.invalid)write(ctx,'Probability data unavailable',1208,304,19,C.red);
       else write(ctx,s.status==='setup'?'Connect the game to begin.':'The next observed position will appear here.',1208,304,18,'#887b62');
@@ -215,7 +272,7 @@
       rect(ctx,300,94,1320,72,'#3b2927',C.red,4);write(ctx,'ATTENTION',324,105,11,C.red,'mono');write(ctx,clipped(ctx,message,1260,19),324,128,19,C.ivory);
     }
   }
-  const exported={normalize,choiceGroup,probabilityTotalValid,fitRect,vectorLayout,text,paint,W,H,GAME};
+  const exported={normalize,normalizeDecision,choiceGroup,probabilityTotalValid,fitRect,vectorLayout,historyLayout,text,paint,W,H,GAME};
   if(typeof module!=='undefined'&&module.exports)module.exports=exported;
   if(typeof window==='undefined'||typeof document==='undefined')return;
   const canvas=document.getElementById('dashboard'),ctx=canvas.getContext('2d');

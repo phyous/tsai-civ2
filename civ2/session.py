@@ -18,7 +18,7 @@ from .typesafe import TypeSafeClient
 from .ui import UI
 
 
-def snapshot(state, *, status='paused', decision=None, chronicle=(), message='', ledger=None):
+def snapshot(state, *, status='paused', decision=None, recent_decisions=(), chronicle=(), message='', ledger=None):
     player = state.get('player', {})
     cities = state.get('cities', [])
     settings = state.get('settings', {})
@@ -40,8 +40,30 @@ def snapshot(state, *, status='paused', decision=None, chronicle=(), message='',
                     {'label':'Barbarians','value':settings.get('barbarians','')},
                     {'label':'Rules','value':'Standard' if not settings.get('bloodlust') and not settings.get('simplified_combat') else 'Observed'},
                     {'label':'Leader','value':'Male / Rome'}],
-        'decision':decision or {},'chronicle':list(chronicle),'message':message,
+        'decision':decision or {},'recent_decisions':list(recent_decisions),
+        'chronicle':list(chronicle),'message':message,
         **({'ledger':ledger} if ledger is not None else {})}
+
+
+
+def _primary_decision_snapshot(decision):
+    """Keep only the actual primary returned vector for historical HUD telemetry."""
+    if not isinstance(decision, dict) or type(decision.get('id')) is not int or decision['id'] < 1:
+        return None
+    question = decision.get('selected_action_question') or decision.get('selected_question')
+    answers = decision.get('answers')
+    answer = answers.get(question) if isinstance(answers, dict) else None
+    if (not isinstance(question, str) or not isinstance(answer, dict)
+            or answer.get('type') != 'choice' or not isinstance(answer.get('probabilities'), dict)
+            or not 2 <= len(answer['probabilities']) <= 255):
+        return None
+    keys = ('id','model','latency_ms','observed_turn','observed_revision',
+            'stage','executes_input','action_label','receipt')
+    result = {key:deepcopy(decision[key]) for key in keys if key in decision}
+    labels = decision.get('labels')
+    result.update(selected_question=question, answers={question:deepcopy(answer)},
+                  labels={question:deepcopy(labels.get(question, {})) if isinstance(labels, dict) else {}})
+    return result
 
 
 def observed_order_outcome(before, after, record, *, pending_count):
@@ -147,7 +169,16 @@ class Session:
         research_id = state['player'].get('researching_id')
         state['player'] = {**state['player'], 'researching_name': next(
             (t['name'] for t in self.rules['advances'] if t['id'] == research_id), None)}
-        self.game.state(snapshot(state, status=status, decision=self.decision,
+        # Publishing the same response again only updates its dispatch label.
+        # This telemetry never enters model context, commands or effect evidence.
+        published = getattr(self, '_published_decisions', deque(maxlen=4))
+        latest = _primary_decision_snapshot(self.decision)
+        if latest is not None:
+            published = deque((item for item in published if item['id'] != latest['id']), maxlen=4)
+            published.append(latest)
+        self._published_decisions = published
+        recent = [deepcopy(item) for item in published if latest and item['id'] < latest['id']][-3:]
+        self.game.state(snapshot(state, status=status, decision=self.decision, recent_decisions=recent,
                                  chronicle=self.chronicle, message=message, ledger=self.ledger()))
 
     def ledger(self):
@@ -407,8 +438,8 @@ class Session:
         self.publish('running')
         return action, after
 
-    def choose_city_control(self, screen, reviewed):
-        actions = city_control_candidates(self.state, screen, reviewed, self.rules)
+    def choose_city_control(self, screen, reviewed, *, labor_ready=False):
+        actions = city_control_candidates(self.state, screen, reviewed, self.rules, labor_ready=labor_ready)
         decision_id = None
         if len(actions) == 1:
             action = actions['exit_city']
@@ -416,7 +447,7 @@ class Session:
                 reason='Only observed Exit remains after city review. No model distribution created.')
         else:
             request = city_control_request_for(self.state, screen, actions, reviewed, self.rules,
-                                               recent_actions=list(self.history))
+                                               recent_actions=list(self.history), labor_ready=labor_ready)
             request['state']['checkpoint_freshness'] = {
                 'pending_decisions_since_native_save':list(self.pending_decisions),
                 'note':'Saved city statistics may precede pending orders; this city window and its control labels are current.'}
@@ -424,7 +455,7 @@ class Session:
                 request['state']['latest_observed_city_report'] = deepcopy(self.city_report)
             action = self._evaluate(request, actions, 'city_action')
             decision_id = self.decisions
-        validate_city_control(action, self.state, screen, reviewed, self.rules)
+        validate_city_control(action, self.state, screen, reviewed, self.rules, labor_ready=labor_ready)
         current = self.ui.observe()
         if current['sha256'] != screen['sha256']:
             raise RuntimeError('Native city screen changed before the chosen control')
@@ -438,7 +469,8 @@ class Session:
             self._mark_dispatched(decision_id, 'city_action', action, inputs)
         self.history.append({'turn':self.state['turn'],'actor':action['actor'],
             'decision':decision_id,'action':deepcopy(action),'order':action['label'],
-            'outcome':'Native city control dispatched; awaiting its observed follow-up, no purchase inferred'})
+            'outcome':('Labor click dispatched; awaiting a native save comparison' if action['kind']=='city_labor'
+                       else 'Native city control dispatched; awaiting its observed follow-up, no purchase inferred')})
         self.chronicle.append({'id':str(decision_id) if decision_id is not None else f'city-exit-{self.checkpoints}',
             'turn':self.state['turn'],'label':action['label'],'kind':'city_control'})
         self.publish('running')

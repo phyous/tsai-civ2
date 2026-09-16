@@ -59,6 +59,50 @@ def _observe(game):
         return locate_cursor(image)
 
 
+def locate_clipped_cursor(image: Image.Image) -> tuple[int, int]:
+    """Recognize a substantial exact arrow fragment only at a canvas edge.
+
+    This never authorizes a click. Its sole use is moving away from the edge,
+    after which the complete original arrow must be observed again.
+    """
+    if image.size != (640, 480):
+        raise CursorError('Expected the original 640x480 game image')
+    pixels = image.convert('RGB').load()
+    candidates = []
+    for y in range(469):
+        for x in range(633):
+            if x <= 627 and y <= 460:
+                continue
+            visible = [(dx,dy,value) for dx,dy,value in CONSTRAINTS
+                       if x+dx < 640 and y+dy < 480]
+            if len(visible) < 85 or pixels[x,y] != (0,0,0):
+                continue
+            if all(pixels[x+dx,y+dy] == value for dx,dy,value in visible):
+                candidates.append((x,y))
+                if len(candidates) > 1:
+                    raise CursorError('Clipped original arrow is ambiguous')
+    if len(candidates) != 1:
+        raise CursorError('No sufficiently complete clipped original arrow is visible')
+    return candidates[0]
+
+
+def _initial_observe(game, inputs):
+    data = game.request('/bridge/capture/game', binary=True)
+    with Image.open(BytesIO(data)) as image:
+        try:
+            return locate_cursor(image), None
+        except CursorError as error:
+            if str(error) != 'The original Windows arrow is not fully visible':
+                raise
+        clipped = locate_clipped_cursor(image)
+    delta = (-8 if clipped[0] > 627 else 0, -8 if clipped[1] > 460 else 0)
+    inputs.append(game.rpc('moveRelative', *delta))
+    time.sleep(.1)
+    restored = _observe(game)  # Full arrow is mandatory before any click.
+    return restored, {'clipped_cursor':list(clipped), 'delta':list(delta),
+                      'restored_full_cursor':list(restored), 'button_pressed':False}
+
+
 def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: bool = True, timeout: float = 20) -> dict:
     """Position by visual feedback, then press/release without extra motion.
 
@@ -86,7 +130,7 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
     gains = [INITIAL_GAIN, INITIAL_GAIN]
     inputs, checkpoints = [], []
     deadline = time.monotonic() + timeout
-    cursor = _observe(game)
+    cursor, edge_recovery = _initial_observe(game, inputs)
     for step in range(81):
         checkpoints.append({'cursor': list(cursor), 'host': [host_x, host_y]})
         error = (x - cursor[0], y - cursor[1])
@@ -130,7 +174,8 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
             inputs.append(game.rpc('mouse', {'type':'mouseup','x':host_x,'y':host_y,'button':button}))
     return {'issued': press, 'target':[x,y], 'observed_cursor':list(cursor),
             'tolerance':tolerance,'movement_steps':len(checkpoints)-1,
-            'checkpoints':checkpoints, 'inputs':inputs}
+            'checkpoints':checkpoints, 'inputs':inputs,
+            **({'edge_recovery':edge_recovery} if edge_recovery else {})}
 
 
 def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, timeout: float = 20) -> dict:

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 from PIL import Image
 
-from civ2.cursor import CONSTRAINTS, CursorError, locate_cursor, move_and_click, move_cursor
+from civ2.cursor import CONSTRAINTS, CursorError, locate_cursor, locate_clipped_cursor, move_and_click, move_cursor
 
 
 def picture(*positions):
@@ -133,6 +133,39 @@ class CursorTests(unittest.TestCase):
         if not path.exists():self.skipTest('private original clipped-arrow image unavailable')
         with Image.open(path) as image:
             with self.assertRaisesRegex(CursorError,'not fully visible'):locate_cursor(image)
+
+    @patch('civ2.cursor.time.sleep')
+    def test_clipped_right_arrow_is_restored_before_any_button_press(self,_):
+        game=MeasuredEdgeGame((631,425))
+        result=move_and_click(game,280,110)
+        self.assertEqual(result['edge_recovery']['clipped_cursor'],[631,425])
+        self.assertEqual(result['edge_recovery']['delta'],[-8,0])
+        self.assertEqual(result['edge_recovery']['restored_full_cursor'],[615,425])
+        self.assertFalse(result['edge_recovery']['button_pressed'])
+        self.assertEqual([e['type'] for e in game.inputs[-2:]],['mousedown','mouseup'])
+        self.assertTrue(all(e['type']=='mousemove' for e in game.inputs[:-2]))
+
+    @patch('civ2.cursor.time.sleep')
+    def test_tiny_arrow_fragment_or_missing_cursor_never_moves_or_clicks(self,_):
+        for position in ((638,425),(500,475)):
+            game=MeasuredEdgeGame(position)
+            with self.assertRaises(CursorError):move_and_click(game,280,110)
+            self.assertEqual(game.inputs,[])
+        with self.assertRaises(CursorError):locate_clipped_cursor(picture())
+
+    @patch('civ2.cursor.time.sleep')
+    def test_edge_motion_must_restore_full_arrow_before_click(self,_):
+        game=MeasuredEdgeGame((631,425))
+        original=game.rpc
+        def stalled(command,*args):
+            if command=='moveRelative':
+                event={'type':'mousemove','dx':args[0],'dy':args[1]}
+                game.inputs.append(event);return event
+            return original(command,*args)
+        game.rpc=stalled
+        with self.assertRaises(CursorError):move_and_click(game,280,110)
+        self.assertEqual(len(game.inputs),1)
+        self.assertEqual(game.inputs[0]['type'],'mousemove')
 
 
 if __name__=='__main__':unittest.main()

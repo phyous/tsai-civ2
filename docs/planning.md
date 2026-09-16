@@ -79,8 +79,11 @@ the helpers themselves do not call Jev or the game.
 
 Candidates cover known frontiers, observed Plains/Grassland settlement proposals,
 rule-compatible roads/irrigation/mines, friendly-city defense for military land
-units, currently visible units belonging to declared enemies or barbarians, and
-Hold for one turn. Original-game legality and reachability remain authoritative;
+units, currently visible units belonging to declared enemies or barbarians,
+approaching remembered foreign cities with military land units, and Hold for one
+turn. Approaching a remembered city reveals no hidden owner or garrison and
+authorizes no attack: the task ends nearby so Jev reassesses current diplomacy
+and visible threats through its ordinary choices. Original-game legality and reachability remain authoritative;
 these are known-compatible proposals, not guaranteed legal or safe destinations.
 City-center improvements are omitted. No unknown terrain, foreign orders or
 private rival state is used.

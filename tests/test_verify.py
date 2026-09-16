@@ -219,7 +219,327 @@ def city_evidence(parent, identifier='open_buy_quote', *, forced=False):
     return e,action,reviewed
 
 
+def labor_evidence(parent, *, mode='remove_worker', outcome='observed_expected_change', complete=True):
+    """Synthetic native bytes exercise a real close/save/reopen transaction."""
+    e,action,reviewed=city_evidence(parent)
+    city_base=13432+14+13*2000+2*20*13+1024+26
+    data=bytearray((e.directory/'city-test.sav').read_bytes())
+    data[city_base+48:city_base+51]=bytes([128 if mode=='remove_worker' else 0,0,16])
+    data[city_base+22]=0 if mode=='remove_worker' else 1
+    data[city_base+51]=0 if mode=='remove_worker' else 4
+    # Slot0 is the explored (8,6) square, independently encoded in save bytes.
+    tile=6*40+4
+    data[13446+7*2000+6*tile]=2
+    data[13446+7*2000+6*tile+4]=2
+    before=parse_save(bytes(data))
+    def artifact(name,content):
+        content=bytes(content);(e.directory/name).write_bytes(content)
+        return dict(path=name,sha256=hashlib.sha256(content).hexdigest(),bytes=len(content))
+    source=artifact('city-test.sav',data)
+    actor=action['actor'];city={k:actor[k] for k in ('id','owner','name','x','y')}
+    def values(state):
+        c=state['cities'][0]
+        return {k:deepcopy(c[k]) for k in ('worked_tiles_bits','specialist_count','specialists','size')}
+    old=values(before);expected=deepcopy(old)
+    expected['worked_tiles_bits'][0]^=128
+    expected['specialist_count']=1 if mode=='remove_worker' else 0
+    expected['specialists']={'entertainer':1} if mode=='remove_worker' else {}
+    action.update(id=f'labor_{mode}_0',kind='city_labor',label='TEST original labor click')
+    action['preconditions'].update(save_sha256=source['sha256'],labor_before=old,
+        labor_review_used=0,labor_review_limit=2,labor_calibration='classic640-labor-grid-20-native-save-v1')
+    action['parameters']=dict(control='resource_map',center=[104,168],slot=0,position={'x':8,'y':6},
+        mode=mode,source_byte=48,source_bit=7,only_open_menu=False,purchase_authorized=False,
+        expected_screen='city_screen',native_checkpoint_required=True,city_center_immutable=True)
+    request=json.loads((e.directory/'decisions/request.json').read_text())
+    criteria={action['id']:action['label'],'exit_city':'TEST exit'}
+    request['questions']['city_action']['criteria']=criteria
+    request['state']['city_control_review'].update(controls=criteria,labor_checkpoint_ready=True,
+        labor_review=dict(used=0,limit=2,remaining=2,scope='Budget omission does not establish native illegality'))
+    response=deepcopy(e.response)
+    response['answers']={'city_action':dict(type='choice',choice=action['id'],confidence=.7,
+                                          probabilities={action['id']:.7,'exit_city':.3})}
+    e.change_artifact('decisions/request.json',request);e.change_artifact('decisions/response.json',response)
+    after_data=bytearray(data)
+    if outcome=='observed_expected_change':
+        after_data[city_base+48]=expected['worked_tiles_bits'][0]
+        after_data[city_base+22]=1 if mode=='remove_worker' else 0
+        after_data[city_base+51]=4 if mode=='remove_worker' else 0
+    elif outcome=='unexpected_change':
+        after_data[city_base+48]=64
+        after_data[city_base+22]=after_data[city_base+51]=0
+    after=parse_save(bytes(after_data));followup=artifact('labor-after.sav',after_data)
+    result=dict(status=outcome,before=old,expected=expected,after=values(after),
+        before_save_sha256=source['sha256'],after_save_sha256=followup['sha256'],turn=1,
+        city={k:after['cities'][0][k] for k in ('id','owner','name','x','y','size')},
+        observation='TEST actual retained byte comparison; no yield attribution')
+    seq=10
+    def keys(*codes):
+        nonlocal seq
+        rows=[]
+        for code,down in [(c,True) for c in codes]+[(c,False) for c in reversed(codes)]:
+            rows.append(dict(type='key',sequence=seq,code=code,down=down,repeat=False));seq+=1
+        return rows
+    def click(label,point):
+        nonlocal seq
+        rows=[dict(type='mouse',sequence=seq+i,event=event,x=point[0],y=point[1],button=0)
+              for i,event in enumerate(('mousedown','mouseup'))];seq+=2
+        return dict(before=e.screen['sha256'],target=label,point=point,inputs=rows)
+    def refresh(event,purpose,descriptor,action=None):
+        identifier=1 if action else None
+        base=dict(decision=identifier,purpose=purpose)
+        return [event('city_labor_refresh_started',**base,action=action,city=city,before_save_sha256=source['sha256']),
+            event('city_labor_refresh_input',**base,step='close_city',before=e.screen['sha256'],inputs=keys('Escape')),
+            event('checkpoint',artifact=descriptor,turn=1,year=-4000),
+            event('city_labor_checkpoint',**base,checkpoint=2 if action else 1,
+                  save_sha256=descriptor['sha256'],result=result if action else None),
+            event('city_labor_refresh_input',**base,step='open_locator',before=e.screen['sha256'],inputs=keys('ShiftLeft','KeyC')),
+            event('navigate_selected_city',city=city,receipt=click('TEST Rome',[100,100]),
+                  zoom_receipt=click('Zoom To City',[150,400])),
+            event('city_labor_ready',**base,city=city,save_sha256=descriptor['sha256'],screen=e.screen['sha256'])]
+    def rewrite(rows):
+        cp=next(r for r in rows if r['kind']=='checkpoint');cp['payload']['artifact']=source
+        elapsed=cp['elapsed_ms']
+        def event(kind,**payload):return dict(kind=kind,elapsed_ms=elapsed,payload=payload)
+        rows[rows.index(cp)+1:rows.index(cp)+1]=refresh(event,'prepare_labor_choices',source)
+        for row in rows:
+            if row['kind'] in ('model_decision','city_control_dispatched'):row['payload']['action']=deepcopy(action)
+            if row['kind']=='city_control_dispatched':
+                row['payload']['inputs']=click(action['label'],[104,168])['inputs']
+        if complete:
+            elapsed=rows[-1]['elapsed_ms']
+            rows[-1:-1]=refresh(event,'verify_labor',followup,deepcopy(action))
+    e.rewrite(rewrite)
+    return e,action,result
+
+
 class VerifyTests(unittest.TestCase):
+    def test_presentation_notice_click_is_not_a_model_or_decoration_choice(self):
+        with tempfile.TemporaryDirectory() as d:
+            e=Evidence(d)
+            def add(rows):
+                elapsed=rows[-1]['elapsed_ms']
+                rows[-1:-1]=[dict(kind='screen_observed',elapsed_ms=elapsed,payload=dict(
+                    screen=e.screen['sha256'],classification='presentation_notice',supported=True)),
+                    dict(kind='native_presentation_acknowledged',elapsed_ms=elapsed,payload=dict(
+                        source_hash=e.screen['sha256'],resource_tag='THRONE',receipt=dict(
+                            before=e.screen['sha256'],target='(Click mouse to continue...)',point=[320,135],method='Original full-screen click-to-continue prompt; clicked observed narrative',inputs=[
+                                dict(type='mouse',sequence=i,event=operation,x=320,y=135,button=0)
+                                for i,operation in ((3,'mousedown'),(4,'mouseup'))])))]
+            e.rewrite(add);result=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(result['decisions']['native_presentation_acknowledgments'],1)
+            self.assertEqual(result['decisions']['model_dispatches'],1)
+            def provenance(rows, point, digest):
+                p=next(r for r in rows if r['kind']=='native_presentation_acknowledged')['payload']
+                p.update(acknowledgement_point=point,template_sha256=digest)
+            e.rewrite(lambda rows:provenance(rows,[320,135],'a'*64))
+            self.assertEqual(verify_run(e.directory,ffprobe=None)['integrity'],'passed')
+            for point,digest in (([317,141],'a'*64),([320,135],None)):
+                e.rewrite(lambda rows:provenance(rows,point,digest))
+                with self.assertRaisesRegex(VerificationError,'classified narrative'):
+                    verify_run(e.directory,ffprobe=None)
+            e.rewrite(lambda rows:provenance(rows,[320,135],'a'*64))
+            for mode in ('resource','prompt','position','Enter','unsupported'):
+                def bad(rows):
+                    p=next(r for r in rows if r['kind']=='native_presentation_acknowledged')['payload']
+                    p.update(resource_tag='THRONE');p['receipt'].update(target='(Click mouse to continue...)',point=[320,135])
+                    p['receipt']['inputs']=p['receipt']['inputs'][:2]
+                    observed=[r for r in rows if r['kind']=='screen_observed'][-1]['payload'];observed['supported']=True
+                    if mode=='resource':p['resource_tag']='THRONE_UPGRADE'
+                    elif mode=='prompt':p['receipt']['target']='Choose decoration'
+                    elif mode=='position':p['receipt']['point']=[320,465]
+                    elif mode=='unsupported':observed['supported']=False
+                    else:p['receipt']['inputs']+=[dict(type='key',sequence=5+i,code='Enter',down=down,repeat=False) for i,down in enumerate((True,False))]
+                e.rewrite(bad)
+                with self.subTest(mode=mode),self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_checkpoint_reuse_requires_actual_advanced_save_and_observation_only_gap(self):
+        def fixture(directory):
+            e=Evidence(directory)
+            a=dict(id='finish_turn',kind='empire_control',label='TEST finish turn',actor={'kind':'empire'},
+                preconditions=dict(save_sha256=e.initial['sha256'],turn=1,screen_kind='end_turn',image_sha256=e.screen['sha256']),
+                parameters=dict(key='Enter',modifiers=[]))
+            req=dict(state={'turn':1},questions={'empire_action':dict(type='choice',instructions='TEST',criteria={'finish_turn':a['label'],'open_tax':'TEST tax'})})
+            response=deepcopy(e.response);response['answers']={'empire_action':dict(type='choice',choice='finish_turn',confidence=.7,probabilities={'finish_turn':.7,'open_tax':.3})}
+            e.change_artifact('decisions/request.json',req);e.change_artifact('decisions/response.json',response)
+            data=bytearray(initial_save());struct.pack_into('<Hh',data,28,2,-3950)
+            (e.directory/'advanced.sav').write_bytes(data)
+            desc=dict(path='advanced.sav',sha256=hashlib.sha256(data).hexdigest(),bytes=len(data))
+            def rewrite(rows):
+                for r in rows:
+                    if r['kind']=='model_decision':r['payload'].update(action=a,selected_question='empire_action')
+                    if r['kind']=='command_dispatched':
+                        r['kind']='empire_command_dispatched';r['payload']['action']=a
+                        for x in r['payload']['inputs']:x['code']='Enter'
+                elapsed=rows[-1]['elapsed_ms']
+                rows[-1:-1]=[
+                    dict(kind='checkpoint',elapsed_ms=elapsed,payload=dict(artifact=desc,turn=2,year=-3950)),
+                    dict(kind='screen_observed',elapsed_ms=elapsed,payload=dict(screen=e.screen['sha256'],classification='end_turn',supported=True)),
+                    dict(kind='checkpoint_reused',elapsed_ms=elapsed,payload=dict(checkpoint=1,save_sha256=desc['sha256'],turn=2,year=-3950,screen=e.screen['sha256'],ordinary_inputs_since_checkpoint=False,
+                        reason='TEST use existing checkpoint without gameplay input'))]
+            e.rewrite(rewrite);return e
+        with tempfile.TemporaryDirectory() as d:
+            e=fixture(d);r=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(r['decisions']['reused_native_checkpoints'],1)
+            self.assertEqual(r['decisions']['model_dispatches'],1)
+        for mode in ('duplicate','input','old_hash','wrong_index','wrong_year','normal_map','claimed_no_input','no_finish'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+                e=fixture(d)
+                def bad(rows):
+                    reused=next(r for r in rows if r['kind']=='checkpoint_reused');p=reused['payload']
+                    if mode=='duplicate':rows.insert(rows.index(reused)+1,deepcopy(reused))
+                    elif mode=='input':rows.insert(rows.index(reused),dict(kind='pointer_park_for_observation',elapsed_ms=reused['elapsed_ms'],payload={'receipt':{'issued':False}}))
+                    elif mode=='old_hash':p['save_sha256']=e.initial['sha256']
+                    elif mode=='wrong_index':p['checkpoint']=2
+                    elif mode=='wrong_year':p['year']=-3900
+                    elif mode=='normal_map':[r for r in rows if r['kind']=='screen_observed'][-1]['payload']['classification']='normal_map'
+                    elif mode=='claimed_no_input':p['ordinary_inputs_since_checkpoint']=True
+                    else:rows.remove(next(r for r in rows if r['kind']=='empire_command_dispatched'))
+                e.rewrite(bad)
+                with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_labor_native_byte_comparison_distinguishes_effect_failure_and_unobserved(self):
+        for mode in ('remove_worker','assign_entertainer'):
+            for outcome in ('observed_expected_change','no_observed_change','unexpected_change'):
+                with self.subTest(mode=mode,outcome=outcome),tempfile.TemporaryDirectory() as d:
+                    e,_,result=labor_evidence(d,mode=mode,outcome=outcome)
+                    r=verify_run(e.directory,ffprobe=None)
+                    actual=r['decisions']['city_labor_results'][0]
+                    self.assertEqual(actual['status'],outcome)
+                    self.assertEqual(actual['after'],result['after'])
+                    self.assertFalse(r['completeness']['pending_labor_refresh'])
+                    self.assertFalse(r['completeness']['pending_city_control'])
+                    self.assertNotIn('accepted',actual)
+        with tempfile.TemporaryDirectory() as d:
+            e,_,_=labor_evidence(d,complete=False);r=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(r['decisions']['city_labor_results'][0]['status'],'unobserved')
+            self.assertTrue(r['completeness']['pending_city_control'])
+
+    def test_labor_tampered_bound_native_actor_bitmap_slot_geometry_or_allowance_refuses(self):
+        for mode in ('actor','bitmap','bool_bitmap','center','source_bit','position','slot','budget','used','mixed_type'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+                e,_,_=labor_evidence(d)
+                def change(rows):
+                    a=next(r['payload']['action'] for r in rows if r['kind']=='model_decision')
+                    if mode=='actor':a['actor']['name']='Different city'
+                    elif mode=='bitmap':a['preconditions']['labor_before']['worked_tiles_bits'][0]=64
+                    elif mode=='bool_bitmap':a['preconditions']['labor_before']['size']=True
+                    elif mode=='center':a['parameters']['center']=[105,168]
+                    elif mode=='source_bit':a['parameters']['source_bit']=6
+                    elif mode=='position':a['parameters']['position']={'x':8,'y':10}
+                    elif mode=='slot':a['parameters']['slot']=16
+                    elif mode=='budget':a['preconditions']['labor_review_limit']=200
+                    elif mode=='used':a['preconditions']['labor_review_used']=2
+                    else:a['preconditions']['labor_before']['specialists']={'scientist':1}
+                e.rewrite(change)
+                with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_labor_outcome_cannot_be_claimed_without_exact_followup_native_transaction(self):
+        for mode in ('claim','old_save','wrong_city','skip_close','skip_checkpoint','skip_locator','skip_ready','extra_key','wrong_click'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as d:
+                e,_,_=labor_evidence(d,outcome='no_observed_change')
+                def change(rows):
+                    start=next(i for i,r in enumerate(rows) if r['kind']=='city_labor_refresh_started' and r['payload']['purpose']=='verify_labor')
+                    tail=rows[start:]
+                    if mode=='claim':next(r for r in tail if r['kind']=='city_labor_checkpoint')['payload']['result']['status']='observed_expected_change'
+                    elif mode=='old_save':rows[:]=[r for r in rows if r not in tail or r['kind']!='checkpoint']
+                    elif mode=='wrong_city':next(r for r in tail if r['kind']=='city_labor_ready')['payload']['city']['name']='Other'
+                    elif mode.startswith('skip_'):
+                        kind={'skip_close':'city_labor_refresh_input','skip_checkpoint':'city_labor_checkpoint','skip_locator':'navigate_selected_city','skip_ready':'city_labor_ready'}[mode]
+                        target=next(r for r in tail if r['kind']==kind);rows.remove(target)
+                    elif mode=='extra_key':next(r for r in tail if r['kind']=='city_labor_refresh_input')['payload']['inputs'][0]['code']='Enter'
+                    else:next(r for r in rows if r['kind']=='city_control_dispatched')['payload']['inputs'][0]['x']=150
+                e.rewrite(change)
+                if mode=='skip_ready':
+                    r=verify_run(e.directory,ffprobe=None)
+                    self.assertTrue(r['completeness']['pending_labor_refresh'])
+                    self.assertFalse(r['completeness']['release_review_ready'])
+                else:
+                    with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
+    def test_labor_preparation_proof_and_current_policy_independence(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,_,_=labor_evidence(d)
+            with mock.patch('civ2.city_controls.city_control_candidates',side_effect=AssertionError('Do not regenerate old policy')):
+                self.assertEqual(verify_run(e.directory,ffprobe=None)['integrity'],'passed')
+            e.rewrite(lambda rows:rows.__setitem__(slice(None),[r for r in rows if not (r['kind']=='city_labor_ready' and r['payload']['purpose']=='prepare_labor_choices')]))
+            with self.assertRaisesRegex(VerificationError,'completed native refresh'):
+                verify_run(e.directory,ffprobe=None)
+
+    def test_labor_refresh_failure_is_explicit_without_inventing_native_effect(self):
+        for after_checkpoint in (False,True):
+            with self.subTest(after_checkpoint=after_checkpoint),tempfile.TemporaryDirectory() as d:
+                e,_,_=labor_evidence(d,outcome='unexpected_change')
+                def failed(rows):
+                    start=next(i for i,r in enumerate(rows) if r['kind']=='city_labor_refresh_started' and r['payload']['purpose']=='verify_labor')
+                    end=next(i for i in range(start,len(rows)) if rows[i]['kind']=='city_labor_checkpoint') if after_checkpoint else start
+                    stop=rows[-1];rows[:]=rows[:end+1]+[dict(kind='city_labor_refresh_failed',elapsed_ms=stop['elapsed_ms'],
+                        payload=dict(decision=1,purpose='verify_labor',reason='TEST ambiguous original follow-up')),stop]
+                e.rewrite(failed);r=verify_run(e.directory,ffprobe=None)
+                status='unexpected_change' if after_checkpoint else 'unobserved'
+                self.assertEqual(r['decisions']['city_labor_results'][0]['status'],status)
+                self.assertTrue(r['decisions']['city_labor_results'][0]['refresh_failed'])
+                self.assertEqual(r['decisions']['city_labor_refresh_failures'][0]['native_result_status'],status)
+                self.assertTrue(r['completeness']['pending_labor_refresh'])
+                self.assertEqual(r['completeness']['uninterpreted_event_counts'],{})
+
+    def test_labor_review_usage_cannot_reset_after_an_unchanged_click(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,_,_=labor_evidence(d,outcome='no_observed_change')
+            def repeat(rows):
+                extra=[deepcopy(next(r for r in rows if r['kind']==kind)) for kind in ('inference_started','model_decision')]
+                for row in extra:row['payload']['decision']=2;row['elapsed_ms']=rows[-1]['elapsed_ms']
+                rows[-1:-1]=extra
+            e.rewrite(repeat)
+            with self.assertRaisesRegex(VerificationError,'reuses its review allowance'):
+                verify_run(e.directory,ffprobe=None)
+
+    def test_labor_locator_keeps_observed_case_but_cannot_select_another_city(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,_,_=labor_evidence(d)
+            def observed_case(rows):
+                for row in rows:
+                    if row['kind']=='navigate_selected_city':
+                        for key in ('receipt','zoom_receipt'):
+                            row['payload'][key]['target']=row['payload'][key]['target'].upper()
+            e.rewrite(observed_case)
+            self.assertEqual(verify_run(e.directory,ffprobe=None)['integrity'],'passed')
+            e.rewrite(lambda rows:next(r for r in rows if r['kind']=='navigate_selected_city')['payload']['receipt'].update(target='Different city'))
+            with self.assertRaisesRegex(VerificationError,'locator'):
+                verify_run(e.directory,ffprobe=None)
+
+    def test_labor_locator_cannot_add_an_unobserved_confirmation_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,_,_=labor_evidence(d)
+            def extra_enter(rows):
+                receipt=next(r for r in rows if r['kind']=='navigate_selected_city')['payload']['zoom_receipt']
+                receipt['inputs'].extend(dict(type='key',sequence=90+i,code='Enter',down=down,repeat=False)
+                                         for i,down in enumerate((True,False)))
+            e.rewrite(extra_enter)
+            with self.assertRaisesRegex(VerificationError,'without confirmation keys'):
+                verify_run(e.directory,ffprobe=None)
+
+    def test_city_recovered_title_keeps_raw_text_and_exact_native_identity_proof(self):
+        with tempfile.TemporaryDirectory() as d:
+            e,a,_=city_evidence(d)
+            digest=a['preconditions']['save_sha256'];raw='City of TEST Rme, 4000 B.C.'
+            proof=dict(source='Unique one-edit match to owned city in original save',ocr_text='TEST Rme',
+                canonical_name='TEST Rome',city_id=0,save_sha256=digest,source_line=3)
+            request=json.loads((e.directory/'decisions/request.json').read_text())
+            request['state']['city_control_review']['observed_title']=raw
+            e.change_artifact('decisions/request.json',request)
+            def recover(rows):
+                for row in rows:
+                    if row['kind'] in ('model_decision','city_control_dispatched'):
+                        row['payload']['action']['preconditions'].update(observed_city_title=raw,
+                            observed_city_name='TEST Rome',city_name_recovery=deepcopy(proof))
+            e.rewrite(recover)
+            self.assertEqual(verify_run(e.directory,ffprobe=None)['integrity'],'passed')
+            for key,value in (('save_sha256','0'*64),('ocr_text','TEST Wrong'),('city_id',True),('source_line',-1)):
+                e.rewrite(recover)
+                e.rewrite(lambda rows:next(r for r in rows if r['kind']=='model_decision')['payload']['action']['preconditions']['city_name_recovery'].update({key:value}))
+                with self.subTest(key=key),self.assertRaisesRegex(VerificationError,'provenance'):
+                    verify_run(e.directory,ffprobe=None)
+
     def test_city_fixture_keeps_time_monotonic_when_initial_artifact_takes_time(self):
         ticks=iter(range(100))
         with tempfile.TemporaryDirectory() as d, mock.patch('civ2.evidence.time.monotonic',side_effect=lambda:next(ticks)/1000):
@@ -254,6 +574,9 @@ class VerifyTests(unittest.TestCase):
                 r=verify_run(e.directory,ffprobe=None)
                 self.assertEqual(r['decisions']['graphics_preference_reviews'],1)
                 self.assertEqual(r['decisions']['model_dispatches'],1)
+                if initially_checked:
+                    e.rewrite(lambda rows:next(r for r in rows if r['kind']=='graphics_preferences_configured')['payload']['receipt']['changes'][0]['receipt'].update(target='M Civilopedia for Advances'))
+                    self.assertEqual(verify_run(e.directory,ffprobe=None)['decisions']['graphics_preference_reviews'],1)
                 def unrelated(rows):
                     p=next(r['payload']['receipt'] for r in rows if r['kind']=='graphics_preferences_configured')
                     p['checkbox_after']['Wonder Movies']=False

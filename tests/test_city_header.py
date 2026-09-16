@@ -17,6 +17,19 @@ def saved_state():
             'cities':[{'id':1,'owner':1,'name':'Veii','x':19,'y':23}]}
 
 class CityHeaderTests(unittest.TestCase):
+    def test_same_year_founding_notice_binds_only_transient_label(self):
+        state={'recent_founding_notices':[{'name':'Veii','year_text':'3000 B.C.',
+                'source_tag':'FOUNDED','image_sha256':'a'*64}]}
+        result=classify_dialog(screen(),state=state)
+        self.assertEqual(result['observed_city_name'],'Veii')
+        self.assertEqual(result['city_name_recovery']['notice_image_sha256'],'a'*64)
+        self.assertNotIn('city_id',result['city_name_recovery'])
+        for key,value in [('year_text','2950 B.C.'),('source_tag','NAMECITY'),('image_sha256','bad')]:
+            wrong=copy.deepcopy(state);wrong['recent_founding_notices'][0][key]=value
+            self.assertEqual(classify_dialog(screen(),state=wrong)['observed_city_name'],'Vei')
+        ambiguous=copy.deepcopy(state);ambiguous['recent_founding_notices'].append({**state['recent_founding_notices'][0],'name':'Wei'})
+        self.assertEqual(classify_dialog(screen(),state=ambiguous)['observed_city_name'],'Vei')
+
     def test_unique_owned_native_save_recovers_name_without_rewriting_title(self):
         o=screen();state=saved_state();result=classify_dialog(o,state=state)
         self.assertTrue(result['supported'],result)

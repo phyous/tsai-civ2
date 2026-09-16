@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 import zipfile
 from copy import deepcopy
-from .city_controls import CityControlError, city_control_candidates
+from .city_controls import CityControlError, city_control_candidates, city_labor_result
 from .dialogs import classify_dialog
 from .preferences import configure_graphics_preferences
 from .session import Session
@@ -28,6 +28,9 @@ def controller_context(session):
     # Existing live sessions can adopt these transaction fields when paused.
     session.controller.setdefault('city_controls_reviewed', {})
     session.controller.setdefault('pending_city_control', None)
+    session.controller.setdefault('pending_labor_refresh', None)
+    session.controller.setdefault('city_labor_ready', None)
+    session.controller.setdefault('recent_founding_notices', [])
     return session.controller
 
 
@@ -38,7 +41,8 @@ def classification_state(session):
     cities = list(session.state.get('cities', []))
     names = {city['name'].casefold() for city in cities}
     cities += [{'name':name} for name in context['observed_city_names'] if name.casefold() not in names]
-    return {**session.state,'cities':cities}
+    return {**session.state,'cities':cities,
+            'recent_founding_notices':deepcopy(context['recent_founding_notices'])}
 
 
 def observed_city_identity(dialog):
@@ -129,6 +133,100 @@ def city_control_review(session, context, dialog, city):
     return record
 
 
+
+def _labor_city(state, actor):
+    fields=('id','owner','name','x','y')
+    matches=[c for c in state.get('cities',[]) if c.get('id')==actor['id']]
+    if len(matches)!=1 or any(matches[0].get(k)!=actor.get(k) for k in fields):
+        raise CityControlError('Labor refresh cannot bind the same owned city')
+    return {k:matches[0][k] for k in fields}
+
+
+def start_labor_refresh(session,context,city,*,action=None,decision=None):
+    if context['pending_labor_refresh'] is not None:raise CityControlError('A labor refresh is already pending')
+    signature=_labor_city(session.state,city)
+    pending=dict(phase='need_close',purpose='verify_labor' if action else 'prepare_labor_choices',
+        city=signature,year_raw=session.state['year_raw'],action=deepcopy(action),decision=decision,
+        before=deepcopy(session.state),checkpoint_save_sha256=None)
+    context['pending_labor_refresh']=pending;context['city_labor_ready']=None
+    session.journal.append('city_labor_refresh_started',decision=decision,purpose=pending['purpose'],
+        action=deepcopy(action),city=signature,before_save_sha256=session.state['evidence']['save_sha256'])
+
+
+def labor_refresh_step(session,context,observation,dialog,resources):
+    """Mechanical close/save/reopen only; no inferred success or labor selection."""
+    pending=context['pending_labor_refresh']
+    if pending is None:return False,None
+    phase=pending['phase'];kind=dialog['kind'];city=pending['city']
+    if phase=='failed':return True,pending['failure']
+    year=pending['year_raw'];expected_year=f'{abs(year)}'+('BC' if year<0 else 'AD')
+    def failed(message):
+        pending.update(phase='failed',failure=message)
+        session.journal.append('city_labor_refresh_failed',decision=pending['decision'],
+            purpose=pending['purpose'],reason=message)
+        return True,message
+    information=dialog.get('mechanical_action')=='acknowledge_information'
+    if phase in ('need_close','await_reopened'):
+        if kind!='city_screen':
+            return (False,None) if information else failed('Labor refresh requires the same complete city screen')
+        identity=observed_city_identity(dialog)
+        if identity is None or identity[0].casefold()!=city['name'].casefold() or identity[1]!=expected_year:
+            return failed('Labor refresh observed a different city or year')
+        if phase=='await_reopened':
+            if session.state['evidence']['save_sha256']!=pending['checkpoint_save_sha256']:
+                return failed('Labor refresh native save changed before reopening')
+            context['city_labor_ready']={'city':deepcopy(city),'save_sha256':pending['checkpoint_save_sha256']}
+            session.journal.append('city_labor_ready',decision=pending['decision'],purpose=pending['purpose'],
+                city=deepcopy(city),save_sha256=pending['checkpoint_save_sha256'],screen=observation['sha256'])
+            context['pending_labor_refresh']=None
+            return False,None
+        exits=[b for b in dialog['buttons'] if b['text'].casefold()=='exit']
+        if len(exits)!=1:return failed('Labor refresh requires a uniquely observed city Exit')
+        session.game.rpc('resume');inputs=session.ui.key('Escape')
+        session.journal.append('city_labor_refresh_input',decision=pending['decision'],purpose=pending['purpose'],
+            step='close_city',before=observation['sha256'],inputs=inputs)
+        pending['phase']='await_map';time.sleep(.4)
+        return True,None
+    if phase=='await_map':
+        if kind=='city_screen':return failed('Labor refresh Exit did not close the city window')
+        if kind not in ('normal_map','end_turn'):
+            return (False,None) if information else failed('Labor refresh requires the original map before saving')
+        session.checkpoint();pending['phase']='checkpointed'
+        try:
+            _labor_city(session.state,city)
+            if session.state['turn']!=pending['before']['turn'] or session.state['year_raw']!=year:
+                return failed('Labor refresh unexpectedly advanced the original turn')
+            result=city_labor_result(pending['action'],pending['before'],session.state) if pending['action'] else None
+        except (CityControlError,ValueError) as error:return failed(str(error))
+        pending['checkpoint_save_sha256']=session.state['evidence']['save_sha256']
+        session.journal.append('city_labor_checkpoint',decision=pending['decision'],purpose=pending['purpose'],
+            checkpoint=session.checkpoints,save_sha256=pending['checkpoint_save_sha256'],result=result)
+        if result:
+            for record in reversed(session.history):
+                if record.get('decision')==pending['decision']:
+                    record['outcome']='Native labor checkpoint: '+result['status']
+                    record['observed_labor']=deepcopy(result);break
+            if result['status']=='unexpected_change':return failed('Native labor bitmap or specialist result differed from the selected change')
+        # Native saving changes the pixels. Reobserve before any locator input.
+        observation,dialog=observe_ready(session,resources);kind=dialog['kind']
+        session.journal.append('screen_observed',screen=observation['sha256'],classification=kind,
+            supported=dialog['supported'],path=Path(observation['path']).relative_to(session.journal.directory).as_posix())
+        if not dialog['supported']:return True,'Original screen after labor checkpoint requires inspection.'
+        phase='checkpointed'
+    if phase=='checkpointed':
+        if kind not in ('normal_map','end_turn'):
+            return (False,None) if information else failed('Labor refresh requires the original map before reopening')
+        session.game.rpc('resume');inputs=session.game.chord('ShiftLeft','KeyC',hold_ms=120)
+        session.journal.append('city_labor_refresh_input',decision=pending['decision'],purpose=pending['purpose'],
+            step='open_locator',before=observation['sha256'],inputs=inputs)
+        context['pending_city']=deepcopy(city);pending['phase']='await_locator';time.sleep(.4)
+        return True,None
+    if phase=='await_locator':
+        if kind=='city_locator' or information:return False,None
+        return failed('Labor refresh locator input had no observed transition')
+    return failed('Unknown labor refresh phase')
+
+
 def observe_ready(session, resources):
     """Wait only for native painting, including the blinking end-turn cue.
 
@@ -147,8 +245,20 @@ def observe_ready(session, resources):
         observation = session.ui.observe()
         dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
                                  state=classification_state(session))
-    for delay in (.13, .37, .61, .19, .43, .73, .29, .47):
+    delays = (.13, .37, .61, .19, .43, .73, .29, .47)
+    # These failures already passed the original Roman map/menu/pane guards.
+    # A blinking cue or animated city artwork may need a longer paint window.
+    # Merely wait and reobserve: the same strict classifier must still succeed.
+    map_paint_reasons = {
+        'Native moving-unit or end-of-turn status is not uniquely observed',
+        'Unexpected text over the native map playfield; possible unrecognized modal',
+    }
+    extended = (.83, .31, .67, .23, .89, .41, .59, .17, .79, .53, .71, .37)
+    for index, delay in enumerate(delays + extended):
         if dialog['supported']:
+            break
+        if index >= len(delays) and (dialog.get('kind') != 'unknown'
+                or dialog.get('reason') not in map_paint_reasons):
             break
         session.game.rpc('resume')
         time.sleep(delay)
@@ -159,16 +269,38 @@ def observe_ready(session, resources):
     return observation, dialog
 
 
+def _checkpoint_token(session):
+    """A fresh native save can be reused once, only inside this running loop."""
+    state = session.state
+    digest = state.get('evidence', {}).get('save_sha256')
+    checkpoint = getattr(session, 'checkpoints', None)
+    sequence = getattr(session.journal, 'sequence', None)
+    if (not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
+            or type(checkpoint) is not int or checkpoint < 1 or type(sequence) is not int
+            or type(state.get('turn')) is not int or type(state.get('year_raw')) is not int
+            or getattr(session, 'pending_decisions', None) != []):
+        return None
+    return dict(checkpoint=checkpoint, save_sha256=digest, turn=state['turn'],
+                year=state['year_raw'], journal_sequence=sequence)
+
+
 def run_steps(session, *, max_decisions=10000):
     resources = game_text()
     context = controller_context(session)
     housekeeping = 0
-    while session.decisions < max_decisions:
+    verified_endturn_checkpoint = None
+    while session.decisions < max_decisions or context['pending_labor_refresh'] is not None:
         if session.recorder:
             session.recorder.check()
         session.game.rpc('pause')
         session.publish('paused')
+        reuse_checkpoint = (verified_endturn_checkpoint is not None
+                            and _checkpoint_token(session) == verified_endturn_checkpoint)
         observation, dialog = observe_ready(session, resources)
+        # Pointer movement is harmless to strategy but still an ordinary input.
+        # Its observation-recovery event invalidates the strict no-input token.
+        reuse_checkpoint = reuse_checkpoint and _checkpoint_token(session) == verified_endturn_checkpoint
+        source_checkpoint, verified_endturn_checkpoint = verified_endturn_checkpoint, None
         session.journal.append('screen_observed', screen=observation['sha256'],
                                 classification=dialog['kind'],supported=dialog['supported'],
                                 path=Path(observation['path']).relative_to(session.journal.directory).as_posix(),
@@ -178,6 +310,10 @@ def run_steps(session, *, max_decisions=10000):
             return {'status':'paused','reason':'Original screen requires a controller update.',
                     'screen':observation['path'],'classification':dialog}
         kind = dialog['kind']
+        handled,labor_error = labor_refresh_step(session,context,observation,dialog,resources)
+        if labor_error:return {'status':'paused','reason':labor_error,'screen':observation['path']}
+        if handled:continue
+        if session.decisions >= max_decisions and context['pending_labor_refresh'] is None:return {'status':'paused','reason':'Development decision checkpoint reached.'}
         city_error = city_control_transition(session, context, observation, dialog)
         if city_error:
             return {'status':'paused','reason':city_error,'screen':observation['path']}
@@ -188,6 +324,16 @@ def run_steps(session, *, max_decisions=10000):
             continue  # Reobserve after the verified presentation-only setup.
         if dialog.get('observed_city_name'):
             context['observed_city_names'].add(dialog['observed_city_name'])
+        founded = dialog.get('founded_city')
+        if (dialog.get('resource_tag') == 'FOUNDED' and isinstance(founded, dict)
+                and isinstance(founded.get('name'), str) and isinstance(founded.get('year_text'), str)
+                and founded.get('source') == 'Original founding notice text'):
+            notices = context['recent_founding_notices']
+            if not any(item['name'] == founded['name'] and item['year_text'] == founded['year_text']
+                       for item in notices):
+                notices.append({'name':founded['name'], 'year_text':founded['year_text'],
+                                'source_tag':'FOUNDED', 'image_sha256':observation['sha256']})
+                del notices[:-4]
         pending = context['pending_empire']
         expected = {'open_tax':{'tax_rate','luxury_rate'},
                     'open_research':{'science_advisor'},
@@ -197,7 +343,31 @@ def run_steps(session, *, max_decisions=10000):
             context['pending_empire_confirmed'] = True
         if kind in ('victory','game_over'):
             return {'status':'paused','reason':'Original end-game screen awaits outcome verification.',
-                    'screen':observation['path'],'classification':dialog}
+                                'screen':observation['path'],'classification':dialog}
+        if dialog['mechanical_action'] == 'acknowledge_presentation':
+            housekeeping += 1
+            if housekeeping > 20:
+                raise RuntimeError('Repeated presentation screens need inspection')
+            buttons = dialog.get('buttons', [])
+            if len(buttons) != 1:
+                return {'status':'paused','reason':'Native presentation prompt was not uniquely observed.',
+                        'screen':observation['path']}
+            point = dialog.get('acknowledgement_point')
+            if (not isinstance(point, list) or len(point) != 2 or any(type(v) is not int for v in point)
+                    or not 0 <= point[0] <= 627 or not 0 <= point[1] <= 460):
+                return {'status':'paused','reason':'Native presentation narrative point was not observed.',
+                        'screen':observation['path']}
+            session.game.rpc('resume')
+            inputs = session.game.click(*point)
+            after = session.ui.observe()
+            receipt = {'target':buttons[0]['text'], 'point':point, 'before':observation['sha256'],
+                'selected_frame':after['sha256'], 'inputs':inputs,
+                'method':'Original full-screen click-to-continue prompt; clicked observed narrative'}
+            session.journal.append('native_presentation_acknowledged', receipt=receipt,
+                source_hash=observation['sha256'], resource_tag=dialog.get('resource_tag'),
+                acknowledgement_point=point, template_sha256=dialog.get('evidence', {}).get('template_sha256'))
+            time.sleep(1.2)
+            continue
         if dialog['mechanical_action'] == 'close_reference':
             exits = [button for button in dialog['buttons'] if button['text'].casefold() == 'exit']
             if len(exits) != 1:
@@ -243,11 +413,23 @@ def run_steps(session, *, max_decisions=10000):
             except CityControlError as error:
                 return {'status':'paused','reason':str(error),'screen':observation['path']}
             if review is not None:
+                actions=city_control_candidates(session.state,dialog,review,session.rules,labor_ready=True)
+                actor=actions['exit_city']['actor']
+                ready=context['city_labor_ready']=={'city':_labor_city(session.state,actor),
+                    'save_sha256':session.state['evidence']['save_sha256']}
+                if any(a['kind']=='city_labor' for a in actions.values()) and not ready:
+                    start_labor_refresh(session,context,actor)
+                    continue
                 previous_decisions = session.decisions
-                action, _ = session.choose_city_control(dialog, review)
-                context['pending_city_control'] = {'action':action,'city':city,'reviewed':review,
-                    'decision':session.decisions if session.decisions>previous_decisions else None,
-                    'observed_dialog':None,'response_dispatched':False,'response_decision':None}
+                action, _ = session.choose_city_control(dialog, review, labor_ready=True) if ready else session.choose_city_control(dialog,review)
+                decision=session.decisions if session.decisions>previous_decisions else None
+                if action['kind']=='city_labor':
+                    review['labor_reassignments']=review.get('labor_reassignments',0)+1
+                    start_labor_refresh(session,context,action['actor'],action=action,decision=decision)
+                else:
+                    context['city_labor_ready']=None
+                    context['pending_city_control'] = {'action':action,'city':city,'reviewed':review,
+                        'decision':decision,'observed_dialog':None,'response_dispatched':False,'response_decision':None}
                 housekeeping = 0
                 time.sleep(1.2)
                 continue
@@ -268,7 +450,15 @@ def run_steps(session, *, max_decisions=10000):
             time.sleep(1.2)
             continue
         if kind == 'end_turn':
-            session.checkpoint()
+            if reuse_checkpoint:
+                reuse_checkpoint = session.journal.sequence == source_checkpoint['journal_sequence'] + 1
+            if reuse_checkpoint:
+                session.journal.append('checkpoint_reused',
+                    **{key:value for key,value in source_checkpoint.items() if key!='journal_sequence'},
+                    screen=observation['sha256'], ordinary_inputs_since_checkpoint=False,
+                    reason='Immediately preceding end-turn verification saved the advanced native turn; observation only since that save')
+            else:
+                session.checkpoint()
             if context['reviewed']['turn'] != session.state['turn']:
                 context['reviewed'] = {'turn':session.state['turn'],'actions':[]}
                 year = session.state['year_raw']
@@ -281,16 +471,25 @@ def run_steps(session, *, max_decisions=10000):
                     return {'status':'paused','reason':'Requested empire menu did not have an observed successful review.', 'screen':observation['path']}
                 context['reviewed']['actions'].append(context['pending_empire']['id'])
             context['pending_empire'] = None
-            observation, dialog = observe_ready(session, resources)
+            if not reuse_checkpoint:
+                observation, dialog = observe_ready(session, resources)
             if dialog['kind'] != 'end_turn' or not dialog['supported']:
                 return {'status':'paused','reason':'End-turn checkpoint changed the observed screen.', 'screen':observation['path']}
+            previous_turn = session.state['turn']
             action,next_screen = session.choose_empire(dialog,context['reviewed'])
             if action['id'] != 'finish_turn':
                 context['pending_empire'] = action
                 context['pending_empire_confirmed'] = False
                 context['pending_city'] = action['parameters'].get('target_city')
             elif classify_dialog(next_screen,rules=session.rules,game_text=resources,state=classification_state(session))['kind'] == 'end_turn':
-                return {'status':'paused','reason':'End-turn input had no confirmed transition.', 'screen':next_screen['path']}
+                # With every unit fortified, busy or consumed, the next turn
+                # can immediately reach the same indicator. Verify the actual
+                # original save rather than treating an unchanged kind as a
+                # failed turn or blindly sending Enter again.
+                session.checkpoint()
+                if session.state['turn'] <= previous_turn:
+                    return {'status':'paused','reason':'End-turn input had no confirmed transition.', 'screen':next_screen['path']}
+                verified_endturn_checkpoint = _checkpoint_token(session)
             continue
         if kind == 'city_locator' and context['pending_city']:
             matches = [option for option in dialog['options']
@@ -308,6 +507,8 @@ def run_steps(session, *, max_decisions=10000):
                 return {'status':'paused','reason':'Native Zoom To City control is not uniquely observed.', 'screen':selected['path']}
             zoom_receipt = session.ui.select_text(selected,zoom[0]['text'],exact=True)
             session.journal.append('navigate_selected_city',city=context['pending_city'],receipt=receipt,zoom_receipt=zoom_receipt)
+            if context['pending_labor_refresh'] and context['pending_labor_refresh']['phase']=='await_locator':
+                context['pending_labor_refresh']['phase']='await_reopened'
             time.sleep(1.2)
             continue
         if kind == 'normal_map':

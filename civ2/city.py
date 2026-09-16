@@ -2,9 +2,9 @@
 
 Classic byte order: Read.ClassicSav.cs worker-bit decoding zipped with
 MapNavigationFunctions.CityRadius in https://github.com/axx0/Civ2-clone .
-The hex-format notes corroborate inner8/outer8/outer4 plus center. The genuine
-initial Rome [0x20,0,0x10] case confirms center and western worker only; all 21
-positions have not been experimentally toggled in the original executable.
+The hex-format notes corroborate inner8/outer8/outer4 plus center. The initial Rome [0x20,0,0x10] case confirms center and the western worker.
+All 20 non-center slots were subsequently clicked individually and read back
+through native saves in labor-calibration-01; the center remains immutable.
 """
 from __future__ import annotations
 
@@ -132,8 +132,8 @@ def city_labor_projection(state,city_id,rules=None):
         city_totals_as_saved={k:deepcopy(city[k]) for k in OUTPUT_FIELDS if k in city},warnings=warnings,
         yield_note='Original base yields are unmodified RULES.TXT terrain specifications, not actual tile yields. Specials, grassland shields, city-center rules, government, river/trade, improvements and other effects are not calculated. Do not sum these as city income or predict a reassignment gain.',
         knowledge_note='Only the supplied explored map and remembered improvements are joined. Missing or out-of-map squares remain unknown. No seed, hidden rival data, guessed worker destination or screen coordinates are used.',
-        native_actions=[],native_action_status='No labor reassignment actions exposed: native city Resource Map and specialist pixel coordinates have not been verified.',
-        mapping_validation='Classic reference mapping; only center and the west-worker case have been compared with the original game so far.')
+        native_actions=[],native_action_status='This observation projection dispatches no actions. city_controls may offer calibrated worker/entertainer changes only from a fresh observed city screen; scientist/taxman type actions remain unavailable.',
+        mapping_validation='All 20 non-center worker slots matched individual original-game native save readbacks in labor-calibration-01; center was not clicked.')
 
 
 city_labor=city_labor_projection

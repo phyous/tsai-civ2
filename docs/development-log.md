@@ -88,10 +88,12 @@ calibration with 9 gold verified a 2-gold Warrior quote, declined it, and restor
 the previous Settlers production with identical parsed gameplay fields. An
 unaffordable 110-gold quote had only its original acknowledgment button.
 
-A separate labor calibration removed and restored one worker through the native
-Resource Map. The save confirmed worker slot 17 and the entertainer/resource
-changes. The remaining labor coordinates still need native validation before
-full reassignment can be exposed as model actions.
+A separate labor calibration verified all 20 mutable Resource Map positions
+through native clicks and original saves, then restored the baseline gameplay
+state. City reviews now expose worker-to-entertainer and entertainer-to-tile
+choices. Every reassignment is selected by Jev and checked against a fresh
+native save before another city decision. Center-tile labor and specialist-type
+cycling are not exposed. See [the calibration and transaction rules](labor-controls.md).
 
 The automatic Civilopedia page after a discovery exposed slow emulator callbacks
 in the embedded browser. Five-sample measurements in a dedicated local headless
@@ -103,6 +105,16 @@ the improvement. A separate original Graphics Options calibration disabled only
 “Civilopedia for Advances,” leaving all gameplay fields and the other five
 graphics settings unchanged. The runner now applies that presentation setting
 once at a verified map boundary.
+
+The OCR adapter now keeps a private Vision worker process. Complete retained-frame
+observations matched the one-shot adapter exactly; measured reading times fell
+from 584–908 ms to 215–311 ms. No recognized text or image result is cached.
+See [the measurements and fallback behavior](ocr-performance.md).
+
+The council panel uses otherwise spare space for three clearly labeled previous
+model evaluations. Current choices always take priority, and every probability
+comes from a retained Jev response. Planning and command probabilities remain
+separate.
 
 ## Evidence conventions
 

@@ -87,3 +87,45 @@ test('planning probabilities choose an objective without claiming a game command
   assert.equal(dispatched.decision.receipt,'dispatched');
   assert.notEqual(dispatched.decision.receipt,'accepted');
 });
+
+const {historyLayout}=require('./dashboard.js');
+function recorded(id, options={exit:.8,buy:.2},stage='command') {
+  return {id,observed_turn:3,stage,executes_input:stage!=='planning',selected_question:'city_action',
+    answers:{city_action:answer(options),empire_strategy:answer({Cities:.6,Economy:.4})},
+    labels:{city_action:{exit:'Exit city',buy:'Open quote'}}};
+}
+test('recent panels use only actual earlier primary vectors and drop malformed duplicate future records',()=>{
+  const invalid=recorded(3,{a:.8,b:.3});
+  const s=normalize({decision:recorded(6),recent_decisions:[recorded(1),recorded(2),invalid,recorded(4),recorded(4),recorded(6),recorded(8)]});
+  assert.deepEqual(s.recent_decisions.map(d=>d.id),['4','2','1']);
+  assert.ok(s.recent_decisions.every(d=>d.groups.length===1&&d.groups[0].name==='city_action'));
+  assert.equal(s.recent_decisions[0].groups[0].options[0].p,.8);
+  assert.deepEqual(normalize({recent_decisions:[recorded(1)]}).recent_decisions,[]);
+});
+test('spare council space shows three clearly separate historical cards without changing current vectors',()=>{
+  const current=recorded(4);
+  current.answers.empire_strategy=answer({Cities:.5,Economy:.1,Science:.1,Diplomacy:.1,War:.1,Explore:.1});
+  const s=normalize({decision:current,recent_decisions:[recorded(1),recorded(2),recorded(3)]});
+  const layout=vectorLayout(s.decision),before=JSON.stringify(layout),history=historyLayout(layout,s.recent_decisions);
+  assert.equal(history.cards.length,3);assert.equal(JSON.stringify(layout),before);
+  assert.ok(history.y>Math.max(...layout.panels.map(p=>p.y+p.height)));
+  assert.ok(history.cards.every(card=>card.y+card.height<=864));
+});
+test('sixteen current options retain their full original space and displace history',()=>{
+  const options=Object.fromEntries(Array.from({length:16},(_,i)=>['action'+i,1/16]));
+  const current=recorded(4,options);
+  current.answers.empire_strategy=answer({Cities:.5,Economy:.1,Science:.1,Diplomacy:.1,War:.1,Explore:.1});
+  const s=normalize({decision:current,recent_decisions:[recorded(1),recorded(2),recorded(3)]});
+  const layout=vectorLayout(s.decision);assert.equal(layout.panels[0].visible,16);
+  assert.equal(historyLayout(layout,s.recent_decisions).cards.length,0);
+});
+test('historical objectives stay distinct from command decisions and remain immutable sanitized data',()=>{
+  const prior=recorded(1,{survey:.6,hold:.39},'planning');
+  prior.labels.city_action={survey:'Bearer synthetic-not-real',hold:'Hold'};
+  const s=normalize({decision:recorded(2),recent_decisions:[prior]});
+  prior.answers.city_action.probabilities.survey=0;
+  assert.equal(s.recent_decisions[0].stage,'planning');assert.equal(s.recent_decisions[0].receipt,null);
+  assert.equal(s.recent_decisions[0].groups[0].options[0].p,.6);
+  assert.equal(s.recent_decisions[0].groups[0].total,.99);
+  assert.equal(s.recent_decisions[0].groups[0].options[0].label,'[redacted]');
+});

@@ -156,16 +156,40 @@ class LauncherTests(unittest.TestCase):
 
     def test_process_identity_reads_real_owned_child_not_environment(self):
         # A harmless Python sleeper validates the actual ps format on this OS.
-        argv=[sys.executable,'-c','import time; time.sleep(30)']
-        child=subprocess.Popen(argv,start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        code='import time; print("ready",flush=True); time.sleep(30)'
+        argv=[sys.executable,'-c',code]
+        child=subprocess.Popen(argv,start_new_session=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
         try:
+            self.assertEqual(child.stdout.readline().strip(),'ready')
             identity=L.process_identity(child.pid)
             self.assertEqual(identity['pid'],child.pid)
             self.assertEqual(identity['pgid'],child.pid)
-            self.assertEqual(identity['command'],' '.join(argv))
+            self.assertTrue(identity['command'].endswith(' -c '+code))
+            self.assertEqual(identity,L.process_identity(child.pid))
             self.assertEqual(len(identity['process_sha256']),64)
         finally:
-            child.terminate();child.wait(timeout=5)
+            child.terminate();child.wait(timeout=5);child.stdout.close()
+
+    def test_identity_is_captured_after_owned_child_finishes_framework_exec(self):
+        children=[];ready=set();arguments={}
+        def spawn(argv,**kwargs):
+            child=mock.Mock(pid=11001+len(children));child.poll.return_value=None
+            children.append(child);arguments[child.pid]=list(argv);return child
+        def wait(port,processes,**kwargs):ready.add(processes[-1].pid)
+        def identity(pid):
+            self.assertIn(pid,ready)
+            argv=arguments[pid]
+            if pid==11001:argv=['/framework/interpreter',*argv[1:]]
+            return dict(pid=pid,pgid=pid,command=' '.join(argv),process_sha256='a'*64)
+        with mock.patch.object(L,'select_port',return_value=3975), \
+             mock.patch.object(L,'_chrome_path',return_value='/test/chrome'), \
+             mock.patch.object(L.subprocess,'Popen',side_effect=spawn), \
+             mock.patch.object(L,'process_identity',side_effect=identity), \
+             mock.patch.object(L,'_wait_ready',side_effect=wait):
+            result=L.start(identifier='test-framework-exec')
+        self.assertTrue(result['processes']['server']['command'].startswith('/framework/interpreter -m civ2.launcher _serve'))
+        self.assertEqual(result['commands']['server'][0],'/framework/interpreter')
+        self.assertEqual(L._load('test-framework-exec')[1],result)
 
 
 if __name__=='__main__':unittest.main()

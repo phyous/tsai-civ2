@@ -33,19 +33,12 @@ environment; the separate Python controller reads its own private credentials.
 
 ## Prepare and run a campaign
 
-The connected runtime is initially unbooted. The current `civ2.boot` CLI defaults
-to port 3920; use the explicit Python interface for a dedicated port:
+The connected runtime is initially unbooted. Select the same dedicated port for
+setup and the controller:
 
 ```sh
-python3 - <<'PY'
-from civ2.boot import new_game
-from civ2.engine import Game
-from civ2.ui import UI
-
-game = Game(port=3930)
-game.rpc('boot', {'profile': 'campaign-c'})
-new_game(UI(game, '.runtime/campaign-c-setup'))
-PY
+python3 -m civ2.boot --port 3930 --profile campaign-c \
+  --directory .runtime/campaign-c-setup
 
 python3 -m civ2.run --port 3930 \
   --initial-save .runtime/campaign-c-setup/initial.sav \

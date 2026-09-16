@@ -297,6 +297,14 @@ class DialogTests(unittest.TestCase):
         o['lines'][1]['text']='Do you want to abandon TEST Rome?'
         self.assertFalse(classify_dialog(o)['supported'])
 
+    def test_measured_cicy_heading_still_requires_single_founded_body(self):
+        o=observation(row('Foond New Cicy',y=90),row('TEST Veii Founded: 3900 B.C.',y=140),row('OK',y=210,w=25))
+        r=classify_dialog(o)
+        self.assertTrue(r['supported'],r)
+        self.assertEqual(r['observed_city_name'],'TEST Veii')
+        o['lines'].append(row('Abandon this city?',y=165))
+        self.assertFalse(classify_dialog(o)['supported'])
+
     def test_city_window_warning_only_acknowledges_complete_original_notice(self):
         o=observation(row('City Window',x=320,y=203,w=86),
             row('You must close the City Window before the game can',x=299,y=228,w=358),
@@ -444,6 +452,14 @@ class DialogTests(unittest.TestCase):
         gold.update(text='I Gold 4.0.6',center=[320,234],bounds=[286,228,68,12])
         self.assertFalse(classify_dialog(o,state=ROMAN_STATE)['supported'])
 
+    def test_observed_cold_status_alias_never_supplies_treasury(self):
+        o=native_map();gold=next(r for r in o['lines'] if ' Gold ' in r['text'])
+        gold['text']='14 Cold 4.0.6'
+        result=classify_dialog(o,state=ROMAN_STATE)
+        self.assertTrue(result['supported']);self.assertNotIn('treasury',result)
+        gold.update(center=[320,234],bounds=[286,228,68,12])
+        self.assertFalse(classify_dialog(o,state=ROMAN_STATE)['supported'])
+
     def test_optional_actual_turn_two_gold_glyph_map(self):
         from civ2.observe import recognize
         root=Path(__file__).resolve().parents[1];path=root/'runs/attempt-001/screens/ui-0000100.png'
@@ -465,6 +481,57 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map')
         o['lines'].append(row('Please select an option',x=320,y=180,w=190))
         self.assertFalse(classify_dialog(o,state=s)['supported'])
+
+    def test_map_name_can_use_exact_known_same_pixel_reading_but_never_guess(self):
+        o=native_map();label=row('Veu',x=233,y=229,w=35,h=16);o['lines'].append(label)
+        state=copy.deepcopy(ROMAN_STATE);state['cities']=[{'name':'Veii'}]
+        reading={'text':'Veii','confidence':1.,'preprocessing':'native',
+                 'normalized_bounds':[label['bounds'][0]/640,label['bounds'][1]/480,35/640,16/480]}
+        label['provenance']=[reading,{**reading,'text':'Veu','preprocessing':'map_label_11_3x'}]
+        self.assertEqual(classify_dialog(o,state=state)['kind'],'normal_map')
+        label['provenance'][0]={**reading,'normalized_bounds':[.1,.1,.05,.03]}
+        self.assertFalse(classify_dialog(o,state=state)['supported'])
+        label['provenance'][0]=reading;state['cities'].append({'name':'Veu'})
+        self.assertFalse(classify_dialog(o,state=state)['supported'])
+
+    def test_known_city_sprite_low_confidence_glyphs_do_not_become_dialog_text(self):
+        o=native_map();s=copy.deepcopy(ROMAN_STATE);s['cities']=[{'name':'Rome'}]
+        o['lines'] += [row('Rome',x=234,y=293,w=49,h=15),
+                       row('ОБ П',x=242,y=272,w=40,h=20,confidence=.3)]
+        self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map')
+        for change in ({'confidence':.8},{'center':[320,150],'bounds':[300,140,40,20]},
+                       {'text':'Please select'},{'text':'ОК'},{'text':'NO'},
+                       {'text':'ОБ П','bounds':[190,260,104,24]}, {'text':'unknown','confidence':.9},
+                       {'text':'N O'}, {'text':'menu'}):
+            bad=copy.deepcopy(o);bad['lines'][-1].update(change)
+            self.assertFalse(classify_dialog(bad,state=s)['supported'],change)
+        self.assertFalse(classify_dialog(o,state=ROMAN_STATE)['supported'])
+        modal=copy.deepcopy(o);modal['lines'].append(row('Game samed!',y=203,w=82))
+        self.assertFalse(classify_dialog(modal,state=s)['supported'])
+
+    def test_city_sprite_fragments_generalize_to_known_foreign_names_and_size_labels(self):
+        s=copy.deepcopy(ROMAN_STATE);s['known_cities']=[{'name':'TEST Other'}]
+        for text in ('AB2','Wu Fom 1','ШБ','123'):
+            o=native_map();o['lines'] += [row('TEST Other (12)',x=202,y=277,w=110,h=16),
+                row(text,x=196,y=255,w=85,h=35,confidence=.3)]
+            self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map',text)
+            self.assertFalse(classify_dialog(o,state=ROMAN_STATE)['supported'])
+
+    def test_optional_actual006_city_sprite_map(self):
+        from civ2.observe import recognize
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-006/screens/ui-0000034.png'
+        if not p.exists() or not (root/'.runtime/ocr').exists():self.skipTest('private original006sprite frame unavailable')
+        state=copy.deepcopy(ROMAN_STATE);state['cities']=[{'name':'Rome'}]
+        result=classify_dialog(recognize(p),state=state)
+        self.assertEqual(result['kind'],'end_turn',result)
+        self.assertNotIn('population',result)
+
+    def test_optional_actual005_city_and_terrain_sprite_map(self):
+        from civ2.observe import recognize
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0000295.png'
+        if not p.exists() or not (root/'.runtime/ocr').exists():self.skipTest('private original005sprite frame unavailable')
+        state=copy.deepcopy(ROMAN_STATE);state['cities']=[{'name':'Rome'}]
+        self.assertEqual(classify_dialog(recognize(p),state=state)['kind'],'normal_map')
 
     def test_menu_and_government_text_alone_do_not_identify_native_map(self):
         o=observation(row("Sid Meier's Civilization II",y=12),row('Game Kingdom View Orders Advisors World Civilopedia',y=30,w=530),row('4000 B.C. Despotism',x=530,y=90,w=200))
@@ -506,6 +573,66 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(buttons['Buy']['center'],[478,252])
         self.assertEqual(buttons['Exit']['center'],[607,459])
         self.assertTrue(all(x['text'] in o['text'] for x in r['options']))
+        self.assertEqual(r['evidence']['city_resource_map']['resource_map']['center'],[104,255])
+        self.assertEqual(r['evidence']['city_resource_map']['citizens']['center'],[104,112])
+
+    def test_city_resource_anchors_require_unique_exact_observed_rows(self):
+        labels=['Food Storage','City Resources','Units Supported','Units Present','Resource Map','Citizens']
+        o=observation(*[row(t,x=104,y=100+i*30,w=90) for i,t in enumerate(labels)],
+                      *[row(t,x=x,y=400,w=35) for t,x in [('Buy',478),('Change',595),('Exit',607)]])
+        r=classify_dialog(o)
+        self.assertTrue(r['supported']);self.assertEqual(r['kind'],'city_screen')
+        self.assertEqual(set(r['evidence']['city_resource_map']),{'resource_map','citizens'})
+        o['lines'].append(row('Citizens',x=103,y=115,w=60))
+        self.assertNotIn('city_resource_map',classify_dialog(o)['evidence'])
+
+    def test_city_locator_joined_heading_still_requires_actual_owned_options(self):
+        o=observation(row('Where in the heckis.',y=85,w=150),row('TEST Rome',x=190,y=110,w=90),
+                      row('Zoom To City',x=196,y=394,w=90),row('OK',x=320,y=394,w=24),row('Cancel',x=445,y=394,w=50))
+        result=classify_dialog(o,state={'cities':[{'name':'TEST Rome'}]})
+        self.assertTrue(result['supported']);self.assertEqual(result['kind'],'city_locator')
+        self.assertEqual(result['options'][0]['text'],'TEST Rome')
+        self.assertFalse(classify_dialog(o,state={'cities':[{'name':'TEST Veii'}]})['supported'])
+
+    def test_built_notice_radio_choices_are_model_decisions_not_information(self):
+        source='@BUILT\n@title=Domestic Advisor\n%STRING0 %STRING3 %STRING1.\n'
+        o=observation(row('Domestic Advisor',y=174,w=140),row('TEST Rome builds TEST Settlers.',x=280,y=200,w=260),
+                      row('Zoom to City',x=249,y=226,w=90),row('Continue',x=236,y=249,w=60),row('OK',y=304,w=24))
+        state={'cities':[{'name':'TEST Rome'}]};rules={'units':[{'name':'TEST Settlers'}]}
+        result=classify_dialog(o,state=state,rules=rules,game_text=source)
+        self.assertTrue(result['supported']);self.assertEqual(result['kind'],'production_notice')
+        self.assertTrue(result['requires_model']);self.assertIsNone(result['mechanical_action'])
+        self.assertEqual([r['text'] for r in result['options']],['Zoom to City','Continue'])
+        for altered in (source.replace('%STRING0 %STRING3 %STRING1.','Do something dangerous.'),None):
+            self.assertFalse(classify_dialog(o,state=state,rules=rules,game_text=altered)['supported'])
+        self.assertFalse(classify_dialog(o,state={'cities':[{'name':'TEST Veii'}]},rules=rules,game_text=source)['supported'])
+        self.assertFalse(classify_dialog(o,state=state,rules={'units':[]},game_text=source)['supported'])
+        bad=copy.deepcopy(o);bad['lines'].append(row('Something else',x=240,y=276,w=100))
+        self.assertFalse(classify_dialog(bad,state=state,rules=rules,game_text=source)['supported'])
+
+    def test_government_offer_measured_glyphs_require_full_source_and_both_options(self):
+        source='@AUTOMONARCHY\n@title=Civ Rules: Governments\nTo switch governments TEST Rome must endure a brief period of Anarchy.\n\nNot just yet.\nBegin revolution.\n'
+        o=observation(row('Cir Roles: Gopernments',y=116,w=150),
+                      row('Lo switch governments TEST Rome must endure a briel period of Anarchy.',y=180,w=440),
+                      row('• Not just yet.',x=186,y=230,w=90),row('• Begin revolution.',x=203,y=255,w=110),row('OK',y=305,w=25))
+        r=classify_dialog(o,game_text=source)
+        self.assertTrue(r['supported']);self.assertEqual(r['resource_tag'],'AUTOMONARCHY')
+        self.assertTrue(r['requires_model']);self.assertIsNone(r['mechanical_action'])
+        self.assertEqual(r['options'][0]['text'],'• Not just yet.')
+        for text in ('TEST Rome avoids all Anarchy.','To switch governments TEST Rome must endure.'):
+            changed=copy.deepcopy(o);changed['lines'][1]['text']=text
+            self.assertFalse(classify_dialog(changed,game_text=source)['supported'])
+        missing=copy.deepcopy(o);missing['lines'].pop(2)
+        self.assertFalse(classify_dialog(missing,game_text=source)['supported'])
+
+    def test_optional_actual_monarchy_offer_is_a_fresh_model_choice(self):
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        root=Path(__file__).resolve().parents[1];path=root/'runs/attempt-005/screens/ui-0000328.png'
+        if not path.exists() or not (root/'.runtime/ocr').exists():self.skipTest('Private original government offer unavailable')
+        r=classify_dialog(recognize(path),game_text=game_text())
+        self.assertTrue(r['supported']);self.assertEqual(r['kind'],'revolution_offer')
+        self.assertEqual([c['text'] for c in r['options']],['• Not just yet.','• Begin revolution.'])
 
 
 if __name__=='__main__':unittest.main()

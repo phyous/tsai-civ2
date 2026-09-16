@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 
 from .boot import verify_setup
+from .city import WORKED_BITS, city_labor_projection
 from .evidence import canonical
 from .save import parse_save
 from .typesafe import _validate_questions, validate_response
@@ -38,6 +40,10 @@ KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'model_plan', 'plan_status',
                 'forced_city_control', 'city_control_review_completed', 'city_control_closed',
                 'graphics_preferences_configured',
+                'city_labor_refresh_started', 'city_labor_refresh_input',
+                'city_labor_checkpoint', 'city_labor_ready',
+                'city_labor_refresh_failed',
+                'native_presentation_acknowledged', 'checkpoint_reused',
                 *DISPATCHES}
 
 
@@ -52,6 +58,14 @@ def _int(value, minimum=0):
 
 def _sha(value):
     return isinstance(value, str) and SHA.fullmatch(value) is not None
+
+
+def _one_edit(a,b):
+    if a==b:return True
+    if abs(len(a)-len(b))>1:return False
+    if len(a)==len(b):return sum(x!=y for x,y in zip(a,b))==1
+    short,long=(a,b) if len(a)<len(b) else (b,a)
+    return any(long[:i]+long[i+1:]==short for i in range(len(long)))
 
 
 def _pairs(pairs):
@@ -318,7 +332,8 @@ def _action_binding(action, request, question, saves, *, forced=False):
                     'open_buy_quote':('buy','buy_quote'), 'exit_city':('exit','original_map')}
         identifier = action['id']; point = params.get('center')
         expected = controls.get(identifier)
-        _require(expected is not None and action['kind'] == 'city_control'
+        labor = action['kind'] == 'city_labor'
+        _require((labor or expected is not None and action['kind'] == 'city_control')
                  and set(actor) == {'kind','id','owner','name','x','y'} and actor['kind'] == 'city'
                  and all(_int(actor[k]) for k in ('id','owner','x','y')) and isinstance(actor['name'],str)
                  and any(all(actor.get(k)==c.get(k) for k in ('id','owner','name','x','y')) for c in state['cities']),
@@ -332,10 +347,26 @@ def _action_binding(action, request, question, saves, *, forced=False):
                  and identifier not in pre['reviewed_action_ids'], 'City control observation binding is invalid')
         title = pre.get('observed_city_title')
         match = re.match(r'^City of (.+?),\s*(\d{1,5})\s*(B\.?\s*C\.?|A\.?\s*D\.?)\b',title,re.I) if isinstance(title,str) else None
-        _require(match is not None and ' '.join(match[1].casefold().split()) == ' '.join(actor['name'].casefold().split())
+        _require(match is not None
                  and int(match[2])*(-1 if match[3][0].casefold()=='b' else 1) == state['year_raw'],
                  'City control title differs from its native city and year')
-        _require(isinstance(point,list) and len(point)==2 and all(_int(v) for v in point)
+        normalized=lambda value:' '.join(value.casefold().split())
+        if normalized(match[1])!=normalized(actor['name']):
+            proof=pre.get('city_name_recovery',{})
+            matches=[c for c in state['cities'] if _one_edit(normalized(match[1]),normalized(c['name']))]
+            _require(3<=len(normalized(match[1]))<=50 and len(matches)==1 and matches[0]['id']==actor['id']
+                     and pre.get('observed_city_name')==actor['name']
+                     and isinstance(proof,dict)
+                     and set(proof)=={'source','ocr_text','canonical_name','city_id','save_sha256','source_line'}
+                     and proof.get('source')=='Unique one-edit match to owned city in original save'
+                     and proof.get('ocr_text')==match[1] and proof.get('canonical_name')==actor['name']
+                     and type(proof.get('city_id')) is int and proof['city_id']==actor['id']
+                     and proof.get('save_sha256')==digest and _int(proof.get('source_line')),
+                     'Recovered city title lacks unique native-save and original OCR provenance')
+        if labor:
+            _labor_binding(action, state, model)
+        else:
+            _require(isinstance(point,list) and len(point)==2 and all(_int(v) for v in point)
                  and point[0]<640 and point[1]<480 and _int(params.get('button_index')) and params['button_index']<64
                  and isinstance(params.get('observed_text'),str)
                  and params['observed_text'].strip().casefold() == expected[0]
@@ -343,7 +374,7 @@ def _action_binding(action, request, question, saves, *, forced=False):
                  and params.get('only_open_menu') is (identifier!='exit_city')
                  and params.get('purchase_authorized') is False
                  and params.get('confirmation_requires_separate_choice') is (identifier=='open_buy_quote'),
-                 'City control does not match its ordinary button or quote-only semantics')
+                     'City control does not match its ordinary button or quote-only semantics')
         if not forced:
             review = model.get('city_control_review', {})
             _require(review.get('actor') == actor and review.get('observed_title') == title
@@ -397,11 +428,115 @@ def _dispatch(payload, action, question, files):
 def _city_review_binding(action, reviewed, *, completed=False):
     actor,pre = action['actor'],action['preconditions']
     expected = set(pre['reviewed_action_ids']) | ({action['id']} if completed else set())
-    _require(isinstance(reviewed,dict) and set(reviewed)=={'city_id','city_name','year_raw','actions'}
+    _require(isinstance(reviewed,dict) and set(reviewed) in (
+                {'city_id','city_name','year_raw','actions'},
+                {'city_id','city_name','year_raw','actions','labor_reassignments'})
              and reviewed['city_id']==actor['id'] and reviewed['city_name']==actor['name']
              and reviewed['year_raw']==pre['year_raw'] and isinstance(reviewed['actions'],list)
              and len(reviewed['actions'])==len(set(reviewed['actions']))
              and set(reviewed['actions'])==expected, 'City control review belongs to a different city, year or transaction')
+    used=reviewed.get('labor_reassignments',0)
+    _require(_int(used) and used<=40, 'City labor review allowance is invalid')
+    if action['kind']=='city_labor':
+        _require(used==pre['labor_review_used'], 'Labor receipt changes its declared review allowance')
+
+
+def _labor_values(state, actor):
+    """Decode retained native bytes; never trust a claimed bitmap delta."""
+    projection=city_labor_projection(state,actor['id'])
+    city=projection['city']
+    _require(all(city[k]==actor.get(k) for k in ('id','owner','name','x','y')),
+             'Labor save belongs to a different original city')
+    return dict(worked_tiles_bits=projection['worked_tiles_bits'],
+                specialist_count=projection['specialists']['count'],
+                specialists={k:v for k,v in projection['specialists']['stored_type_counts'].items() if v},
+                size=city['size']), projection
+
+
+def _labor_binding(action, state, model):
+    pre,params=action['preconditions'],action['parameters']
+    old,projection=_labor_values(state,action['actor'])
+    slot=params.get('slot');mode=params.get('mode')
+    _require(_int(slot) and slot<len(WORKED_BITS) and slot!=16,
+             'Labor action targets an uncalibrated slot or immutable center')
+    byte,bit,dx,dy=WORKED_BITS[slot]
+    cell=projection['city_radius'][slot]
+    _require(set(params)=={'control','center','slot','position','mode','source_byte','source_bit',
+                         'only_open_menu','purchase_authorized','expected_screen',
+                         'native_checkpoint_required','city_center_immutable'}
+             and params.get('control')=='resource_map'
+             and isinstance(params.get('center'),list) and all(_int(v) for v in params['center'])
+             and params.get('center')==[104+24*dx,192+12*dy]
+             and type(params.get('source_byte')) is int and params['source_byte']==48+byte
+             and type(params.get('source_bit')) is int and params['source_bit']==bit
+             and canonical(params.get('position'))==canonical(cell['position']) and cell['knowledge']=='explored'
+             and params.get('only_open_menu') is False and params.get('purchase_authorized') is False
+             and params.get('expected_screen')=='city_screen'
+             and params.get('native_checkpoint_required') is True and params.get('city_center_immutable') is True,
+             'Labor action differs from its calibrated original Resource Map target')
+    _require(canonical(pre.get('labor_before'))==canonical(old) and not projection['warnings']
+             and not old['specialists'].get('taxman') and not old['specialists'].get('scientist')
+             and pre.get('labor_calibration')=='classic640-labor-grid-20-native-save-v1',
+             'Labor action differs from its complete native worker and specialist preconditions')
+    worked=bool(old['worked_tiles_bits'][byte]&(1<<bit))
+    _require((mode=='remove_worker' and worked
+              or mode=='assign_entertainer' and not worked and old['specialists'].get('entertainer',0)>0)
+             and action['id']==f'labor_{mode}_{slot}',
+             'Labor mode is not supported by the original worker assignment')
+    used,limit=pre.get('labor_review_used'),pre.get('labor_review_limit')
+    review=model.get('city_control_review',{})
+    allowance=review.get('labor_review',{})
+    _require(_int(used) and type(limit) is int and limit==min(40,2*old['size']) and used<limit
+             and review.get('labor_checkpoint_ready') is True
+             and all(_int(allowance.get(k)) for k in ('used','limit','remaining'))
+             and allowance.get('used')==used and allowance.get('limit')==limit
+             and allowance.get('remaining')==limit-used,
+             'Labor action has no remaining declared city review allowance')
+
+
+def _labor_result(action, before, after):
+    old,a=_labor_values(before,action['actor']);new,b=_labor_values(after,action['actor'])
+    _require(before['turn']==after['turn'] and before['year_raw']==after['year_raw']
+             and a['city']==b['city'] and old==action['preconditions']['labor_before'],
+             'Labor follow-up changed its bound city, population or turn')
+    expected=deepcopy(old)
+    byte,bit,_,_=WORKED_BITS[action['parameters']['slot']]
+    delta=1 if action['parameters']['mode']=='remove_worker' else -1
+    expected['worked_tiles_bits'][byte]^=1<<bit
+    expected['specialist_count']+=delta
+    expected['specialists']['entertainer']=expected['specialists'].get('entertainer',0)+delta
+    expected['specialists']={k:v for k,v in expected['specialists'].items() if v}
+    status=('observed_expected_change' if new==expected else
+            'no_observed_change' if new==old else 'unexpected_change')
+    return dict(status=status,before=old,expected=expected,after=new,
+                before_save_sha256=before['evidence']['save_sha256'],
+                after_save_sha256=after['evidence']['save_sha256'],turn=after['turn'],city=b['city'])
+
+
+def _labor_city(state, city):
+    _require(isinstance(city,dict) and set(city)=={'id','owner','name','x','y'}
+             and all(_int(city.get(k)) for k in ('id','owner','x','y'))
+             and isinstance(city.get('name'),str)
+             and city['owner']==state['player']['id']
+             and sum(all(c.get(k)==v for k,v in city.items()) for c in state['cities'])==1,
+             'Labor refresh does not identify one owned native city')
+
+
+def _labor_navigation(payload, city, files):
+    _require(payload.get('city')==city, 'Labor refresh navigated to another city')
+    count=0
+    for key,label in (('receipt',city['name']),('zoom_receipt','Zoom To City')):
+        receipt=payload.get(key)
+        _require(isinstance(receipt,dict) and isinstance(receipt.get('target'),str)
+                 and receipt['target'].casefold()==label.casefold(),
+                 'Labor refresh locator does not select its observed city and Zoom control')
+        _require(not any(row['type']=='key' for row in _inputs(receipt.get('inputs'))),
+                 'Labor refresh locator must use two ordinary clicks without confirmation keys')
+        action={'label':receipt['target'],'preconditions':{'image_sha256':receipt.get('before')},
+                'parameters':{'center':receipt.get('point')}}
+        count+=_dispatch({'action':action,'receipt':receipt,'after':receipt.get('before')},
+                         action,'dialog_action',files)
+    return count
 
 
 def _purchase_quote(quote):
@@ -438,7 +573,10 @@ def _graphics_preferences(receipt, files):
         return
     _require(isinstance(click,dict) and click.get('before')==receipt['opening']
              and isinstance(click.get('target'),str)
-             and re.sub(r'[^a-z0-9]','',click['target'].casefold())=='civilopediaforadvances',
+             # The original checked box is read as a leading M in006. The
+             # recorded target retains that glyph; it is not another option.
+             and re.sub(r'[^a-z0-9]','',click['target'].casefold()) in
+                 ('civilopediaforadvances','mcivilopediaforadvances'),
              'Graphics preference click targets a different option')
     inputs=_inputs(click.get('inputs'))
     buttons=[r for r in inputs if r['type']=='mouse' and r['event']!='mousemove']
@@ -453,6 +591,28 @@ def _graphics_preferences(receipt, files):
     if park['inputs']:
         _require(all(r['type']=='relativeMouse' for r in _inputs(park['inputs'])),
                  'Preference cursor park contains a non-movement input')
+
+
+def _presentation(payload, files, observed_screens):
+    source=payload.get('source_hash');receipt=payload.get('receipt')
+    files.screen(source)
+    observed=observed_screens.get(source,{})
+    _require(payload.get('resource_tag')=='THRONE' and observed.get('classification')=='presentation_notice'
+             and observed.get('supported') is True and isinstance(receipt,dict)
+             and receipt.get('before')==source and isinstance(receipt.get('target'),str)
+             and receipt['target'].strip().casefold()=='(click mouse to continue...)',
+             'Presentation acknowledgment lacks its prior classified original notice and prompt')
+    point=receipt.get('point')
+    _require(isinstance(point,list) and len(point)==2 and all(_int(v) for v in point)
+             and 60<=point[0]<=580 and 90<=point[1]<=310
+             and receipt.get('method')=='Original full-screen click-to-continue prompt; clicked observed narrative'
+             and not any(r['type']=='key' for r in _inputs(receipt.get('inputs'))),
+             'Presentation acknowledgment must click its observed narrative within the original full-screen notice')
+    if 'acknowledgement_point' in payload or 'template_sha256' in payload:
+        _require(payload.get('acknowledgement_point')==point and _sha(payload.get('template_sha256')),
+                 'Presentation receipt differs from the recorded classified narrative point or template')
+    action={'label':receipt['target'],'preconditions':{'image_sha256':source},'parameters':{'center':point}}
+    return _dispatch({'action':action,'receipt':receipt,'after':source},action,'dialog_action',files)
 
 
 def _plan_binding(task, request, saves):
@@ -474,7 +634,7 @@ def _plan_binding(task, request, saves):
     declared = model.get('planning', {}).get('targets', {}).get(task['id'])
     _require(declared == {'task':task['task'],'target':target}, 'Plan target differs from the actual model request')
     name = task['task']
-    _require(name in ('hold','survey','settle','road','irrigate','mine','defend','engage'), 'Unknown planning task')
+    _require(name in ('hold','survey','settle','road','irrigate','mine','defend','engage','approach_city'), 'Unknown planning task')
     if name == 'hold':
         _require(target == {'turn':state['turn']+1}, 'Hold plan has an invalid review turn')
         return
@@ -488,6 +648,10 @@ def _plan_binding(task, request, saves):
     if name == 'defend':
         _require(any(all(target.get(k) == c[k] for k in ('id','x','y')) for c in state['cities']),
                  'Defend plan does not target an owned city')
+    if name == 'approach_city':
+        _require(any((c.get('x'),c.get('y')) == point for c in state['known_cities'])
+                 and any((c.get('x'),c.get('y')) == point for c in model.get('remembered_foreign_cities',[])),
+                 'Approach plan does not target a remembered city shown to the model')
     if name == 'engage':
         _require(any(all(target.get(k) == u[k] for k in ('id','owner','type_id','x','y')) for u in state['visible_units']),
                  'Engage plan does not target a currently visible native unit')
@@ -607,11 +771,23 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     inputs, forced, forced_pending, recording = 0, 0, None, None
     forced_city, forced_city_pending, city_pending = 0, None, None
     city_reviews, city_closures, graphics_reviews = 0, 0, 0
+    labor_refresh, labor_ready = None, None
+    labor_outcomes, labor_usage, checkpoint_sequences = {}, {}, {}
+    labor_failures=[]
+    latest_save_sha256=None
+    observed_screens={}
+    checkpoint_count,checkpoint_reuses,presentation_acknowledgments=0,0,0
+    last_finish,reusable_checkpoint=None,None
     stops, recoveries, unknown = [], [], Counter()
     checks, initial_state = None, None
     for event in events:
         kind, payload = event['kind'], event['payload']
         files.references(payload)
+        observation_only={'screen_observed','batch_observed_effect','plan_status'}
+        if kind not in observation_only|{'checkpoint','checkpoint_reused'}:
+            reusable_checkpoint=None
+        if kind not in observation_only|{'checkpoint'}:
+            last_finish=None
         if kind not in KNOWN_EVENTS:
             unknown[kind] += 1
         if kind in ('begin', 'checkpoint'):
@@ -637,6 +813,25 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             except (ValueError, RuntimeError, KeyError, TypeError):
                 raise VerificationError('Native save or requested initial setup validation failed') from None
             saves[info['sha256']] = state
+            checkpoint_sequences[info['sha256']]=event['sequence']
+            latest_save_sha256=info['sha256']
+            if kind=='checkpoint':
+                checkpoint_count+=1
+                reusable_checkpoint=(dict(checkpoint=checkpoint_count,save_sha256=info['sha256'],
+                                          turn=state['turn'],year=state['year_raw'])
+                                     if last_finish is not None and state['turn']>last_finish['turn'] else None)
+            last_finish=None
+        elif kind=='screen_observed':
+            observed_screens[payload.get('screen')]={'classification':payload.get('classification'),
+                                                     'supported':payload.get('supported')}
+        elif kind=='checkpoint_reused':
+            _require(reusable_checkpoint is not None
+                     and all(canonical(payload.get(k))==canonical(v) for k,v in reusable_checkpoint.items())
+                     and payload.get('save_sha256')==latest_save_sha256
+                     and payload.get('ordinary_inputs_since_checkpoint') is False
+                     and observed_screens.get(payload.get('screen'))=={'classification':'end_turn','supported':True},
+                     'Reused checkpoint is stale, repeated or lacks an immediately verified advanced turn')
+            files.screen(payload['screen']);checkpoint_reuses+=1;reusable_checkpoint=None
         elif kind == 'inference_started':
             identifier = payload.get('decision')
             _require(_int(identifier, 1) and identifier not in started, 'Inference identifier is duplicated or invalid')
@@ -703,6 +898,14 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      and action.get('label') == request['questions'][question]['criteria'][choice],
                      'Selected action does not match the actual model choice and criterion')
             _action_binding(action, request, question, saves)
+            if action['kind']=='city_labor':
+                signature={k:action['actor'][k] for k in ('id','owner','name','x','y')}
+                key=(signature['id'],signature['name'],action['preconditions']['year_raw'])
+                _require(labor_refresh is None and labor_ready is not None
+                         and labor_ready['city']==signature
+                         and labor_ready['save_sha256']==action['preconditions']['save_sha256']==latest_save_sha256
+                         and action['preconditions']['labor_review_used']==labor_usage.get(key,0),
+                         'Labor choice lacks a completed native refresh or reuses its review allowance')
             context = request.get('state', {}).get('persistent_plan')
             if context is not None:
                 plan_id = context.get('planning_decision')
@@ -729,6 +932,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _city_review_binding(action,payload.get('reviewed'))
             forced_city_pending = action
         elif kind in DISPATCHES:
+            _require(labor_refresh is None and not (city_pending is not None
+                     and city_pending['action']['kind']=='city_labor'),
+                     'A strategic dispatch interrupted an unresolved labor verification')
             question = DISPATCHES[kind]
             identifier = payload.get('decision')
             if question == 'city_action':
@@ -748,16 +954,118 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     identifier = matches[0]
                 elif forced_pending == payload.get('action'):
                     inputs += _dispatch(payload, forced_pending, question, files)
+                    last_finish={'turn':forced_pending['preconditions']['turn']}
                     forced += 1; forced_pending = None
                     continue
             _require(identifier in decisions and identifier not in dispatched
                      and decisions[identifier]['question'] == question,
                      'Dispatch has no unique prior selected model decision')
+            selected=decisions[identifier]['action']
+            if selected['kind']=='city_labor':
+                key=(selected['actor']['id'],selected['actor']['name'],selected['preconditions']['year_raw'])
+                _require(labor_ready is not None
+                         and labor_ready['save_sha256']==selected['preconditions']['save_sha256']==latest_save_sha256
+                         and selected['preconditions']['labor_review_used']==labor_usage.get(key,0),
+                         'Labor dispatch lost its current refresh or remaining review allowance')
             inputs += _dispatch(payload, decisions[identifier]['action'], question, files)
+            if question=='empire_action' and selected['id']=='finish_turn':
+                last_finish={'turn':selected['preconditions']['turn']}
             dispatched.add(identifier)
+            labor_ready=None
             if question == 'city_action':
                 city_pending = {'action':decisions[identifier]['action'],'decision':identifier,
                                 'sequence':event['sequence'],'mechanical':[]}
+                if city_pending['action']['kind']=='city_labor':
+                    action=city_pending['action']
+                    key=(action['actor']['id'],action['actor']['name'],action['preconditions']['year_raw'])
+                    labor_usage[key]=labor_usage.get(key,0)+1
+                    labor_outcomes[identifier]={'decision':identifier,'status':'unobserved',
+                                                'action_id':action['id']}
+        elif kind == 'city_labor_refresh_started':
+            purpose=payload.get('purpose');action=payload.get('action');identifier=payload.get('decision')
+            digest=payload.get('before_save_sha256')
+            _require(labor_refresh is None and purpose in ('prepare_labor_choices','verify_labor')
+                     and digest in saves, 'Labor refresh has no unique native starting checkpoint')
+            _labor_city(saves[digest],payload.get('city'))
+            if purpose=='verify_labor':
+                _require(city_pending is not None and city_pending['decision']==identifier
+                         and action==city_pending['action'] and action['kind']=='city_labor'
+                         and action['preconditions']['save_sha256']==digest
+                         and all(action['actor'][k]==v for k,v in payload['city'].items()),
+                         'Labor verification refresh does not follow its exact dispatched choice')
+            else:
+                _require(city_pending is None and action is None and identifier is None,
+                         'Preparation refresh cannot hide an unresolved city transaction')
+            labor_refresh={**payload,'sequence':event['sequence'],'step':'started'}
+            labor_ready=None
+        elif kind == 'city_labor_refresh_input':
+            _require(labor_refresh is not None and payload.get('decision')==labor_refresh['decision']
+                     and payload.get('purpose')==labor_refresh['purpose']
+                     and not labor_refresh.get('failed'),
+                     'Labor refresh input has no matching pending transaction')
+            step=payload.get('step')
+            _require((step=='close_city' and labor_refresh['step']=='started'
+                      or step=='open_locator' and labor_refresh['step']=='checkpoint'),
+                     'Labor refresh input is missing, duplicated or out of order')
+            files.screen(payload.get('before'));ordinary=_inputs(payload.get('inputs'))
+            expected=([('Escape',True),('Escape',False)] if step=='close_city' else
+                      [('ShiftLeft',True),('KeyC',True),('KeyC',False),('ShiftLeft',False)])
+            _require(all(r['type']=='key' for r in ordinary)
+                     and [(r['code'],r['down']) for r in ordinary]==expected,
+                     'Labor refresh contains an unrelated input')
+            inputs+=len(ordinary);labor_refresh['step']=step
+            labor_refresh['input_sequence']=event['sequence']
+        elif kind == 'city_labor_checkpoint':
+            digest=payload.get('save_sha256')
+            _require(labor_refresh is not None and payload.get('decision')==labor_refresh['decision']
+                     and payload.get('purpose')==labor_refresh['purpose']
+                     and labor_refresh['step']=='close_city' and digest in saves
+                     and not labor_refresh.get('failed')
+                     and checkpoint_sequences[digest]>labor_refresh['input_sequence']
+                     and _int(payload.get('checkpoint'),1),
+                     'Labor follow-up lacks a later native save after closing the city')
+            _labor_city(saves[digest],labor_refresh['city'])
+            before=saves[labor_refresh['before_save_sha256']];after=saves[digest]
+            _require(before['turn']==after['turn'] and before['year_raw']==after['year_raw'],
+                     'Labor refresh crossed a native turn or year')
+            if labor_refresh['purpose']=='verify_labor':
+                result=_labor_result(labor_refresh['action'],before,after)
+                claimed=payload.get('result')
+                _require(isinstance(claimed,dict) and set(claimed)==set(result)|{'observation'}
+                         and all(canonical(claimed.get(k))==canonical(v) for k,v in result.items())
+                         and isinstance(claimed.get('observation'),str),
+                         'Claimed labor result differs from the subsequent native save')
+                identifier=labor_refresh['decision']
+                labor_outcomes[identifier].update(result)
+            else:
+                _require(payload.get('result') is None,
+                         'Preparing labor choices cannot claim a labor input result')
+            labor_refresh.update(step='checkpoint',save_sha256=digest)
+        elif kind == 'navigate_selected_city' and labor_refresh is not None:
+            _require(labor_refresh['step']=='open_locator' and not labor_refresh.get('failed'),
+                     'Labor refresh locator navigation is out of order')
+            inputs+=_labor_navigation(payload,labor_refresh['city'],files)
+            labor_refresh['step']='navigated'
+        elif kind == 'city_labor_ready':
+            _require(labor_refresh is not None and labor_refresh['step']=='navigated'
+                     and not labor_refresh.get('failed')
+                     and all(payload.get(k)==labor_refresh[k] for k in ('decision','purpose','city','save_sha256')),
+                     'Labor readiness does not follow its native save and same-city reopening')
+            files.screen(payload.get('screen'))
+            labor_ready=payload
+            if labor_refresh['purpose']=='verify_labor':city_pending=None
+            labor_refresh=None
+        elif kind == 'city_labor_refresh_failed':
+            _require(labor_refresh is not None and not labor_refresh.get('failed')
+                     and payload.get('decision')==labor_refresh['decision']
+                     and payload.get('purpose')==labor_refresh['purpose']
+                     and isinstance(payload.get('reason'),str) and 0<len(payload['reason'])<=1000,
+                     'Labor refresh failure has no matching active transaction')
+            labor_refresh['failed']=True
+            identifier=labor_refresh['decision']
+            if identifier in labor_outcomes:labor_outcomes[identifier]['refresh_failed']=True
+            labor_failures.append(dict(decision=identifier,purpose=labor_refresh['purpose'],
+                status='failed',native_result_status=labor_outcomes.get(identifier,{}).get('status','unobserved')))
         elif kind == 'mechanical_input' and city_pending is not None:
             city_pending['mechanical'].append(payload)
         elif kind == 'city_control_review_completed':
@@ -804,6 +1112,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
         elif kind == 'graphics_preferences_configured':
             _graphics_preferences(payload.get('receipt'),files)
             graphics_reviews += 1
+        elif kind == 'native_presentation_acknowledged':
+            inputs+=_presentation(payload,files,observed_screens)
+            presentation_acknowledgments+=1
         elif kind == 'dialog_keyboard_recovery':
             identifier = payload.get('decision')
             _require(identifier in decisions and identifier not in dispatched and identifier not in recoveries
@@ -853,6 +1164,11 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'forced_city_exit_dispatches':forced_city,
                           'completed_city_reviews':city_reviews, 'closed_city_controls':city_closures,
                           'graphics_preference_reviews':graphics_reviews,
+                          'native_presentation_acknowledgments':presentation_acknowledgments,
+                          'reused_native_checkpoints':checkpoint_reuses,
+                          'city_labor_results':[labor_outcomes[k] for k in sorted(labor_outcomes)],
+                          'city_labor_refresh_failures':labor_failures,
+                          'city_labor_review_note':'Per-city/year dispatched input allowance checked. Omitted options are not claimed illegal; labor outcomes are only the recorded native bitmap/specialist comparison, not yield gains.',
                           'manually_reviewed_keyboard_recoveries': recoveries,
                           'manual_recovery_note': 'These choices required separately logged manual selection review. They are not counted as automatically verified model dispatches or autonomous-run proof.',
                           'models': sorted({r['model'] for r in responses}),
@@ -864,10 +1180,11 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             'completeness': {'finalized_session': len(stops) == 1, 'uninterpreted_event_counts': dict(sorted(unknown.items())),
                              'pending_forced_command': forced_pending is not None,
                              'pending_city_control':city_pending is not None or forced_city_pending is not None,
+                             'pending_labor_refresh':labor_refresh is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] == 'human_reviewed' and len(dispatched) == len(decisions)
                               and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries
-                              and city_pending is None and forced_city_pending is None},
+                              and city_pending is None and forced_city_pending is None and labor_refresh is None},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
                            'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
                            'This verifier performs no OCR, live game calls or automatic victory recognition.',

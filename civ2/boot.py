@@ -103,8 +103,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', default='.runtime/setup')
     parser.add_argument('--profile', default='campaign-01')
+    parser.add_argument('--port',type=int,default=3920)
     args = parser.parse_args()
-    game = Game()
+    game = Game(port=args.port)
     if not game.rpc('status')['started']:
         game.rpc('boot', {'profile': args.profile})
     state = new_game(UI(game, args.directory))

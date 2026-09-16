@@ -56,7 +56,10 @@ python3 -m civ2.run --initial-save .runtime/setup/initial.sav \
 
 Install `ffmpeg` for continuous video capture.
 The dense spectator panel can show 16 command probabilities and separate
-independent Jev vectors in the same live/recording layout.
+independent Jev vectors in the same live/recording layout, plus recent evaluations
+when there is room. [Native city labor](docs/labor-controls.md) includes calibrated
+worker reassignment and a fresh save check after every change. The
+[persistent OCR worker](docs/ocr-performance.md) reduces observation overhead.
 
 ## Optional observed-target planning
 
