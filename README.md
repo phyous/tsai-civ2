@@ -29,6 +29,11 @@ python3 -m civ2.server
 # Open http://127.0.0.1:3920
 ```
 
+For long campaigns, use the [dedicated Chrome launcher](docs/runtime-launcher.md).
+It gives each parallel game its own local server and isolated browser profile,
+with background page throttling disabled. The game remains embedded in the same
+spectator dashboard; `/web/watch.html` provides the read-only browser view.
+
 For the macOS OCR adapter:
 
 ```sh

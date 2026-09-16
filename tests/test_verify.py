@@ -203,7 +203,7 @@ def city_evidence(parent, identifier='open_buy_quote', *, forced=False):
     e.change_artifact('decisions/request.json',request);e.change_artifact('decisions/response.json',response)
     reviewed=dict(city_id=0,city_name='TEST Rome',year_raw=-4000,actions=list(pre['reviewed_action_ids']))
     def change(rows):
-        rows.insert(1,dict(kind='checkpoint',elapsed_ms=0,payload=dict(artifact=descriptor,turn=1,year=-4000)))
+        rows.insert(1,dict(kind='checkpoint',elapsed_ms=rows[0]['elapsed_ms'],payload=dict(artifact=descriptor,turn=1,year=-4000)))
         selected=next(r for r in rows if r['kind']=='model_decision')
         selected['payload'].update(action=action,selected_question='city_action')
         dispatch=next(r for r in rows if r['kind']=='command_dispatched')
@@ -220,6 +220,15 @@ def city_evidence(parent, identifier='open_buy_quote', *, forced=False):
 
 
 class VerifyTests(unittest.TestCase):
+    def test_city_fixture_keeps_time_monotonic_when_initial_artifact_takes_time(self):
+        ticks=iter(range(100))
+        with tempfile.TemporaryDirectory() as d, mock.patch('civ2.evidence.time.monotonic',side_effect=lambda:next(ticks)/1000):
+            e,_,_=city_evidence(d)
+            first=json.loads((e.directory/'events.jsonl').read_text().splitlines()[0])
+            self.assertGreater(first['elapsed_ms'],0)
+            result=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(result['decisions']['model_dispatches'],1)
+
     def test_graphics_preferences_change_only_verified_presentation_checkbox(self):
         for initially_checked in (False,True):
             with self.subTest(checked=initially_checked),tempfile.TemporaryDirectory() as d:
