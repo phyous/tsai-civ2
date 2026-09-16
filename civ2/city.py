@@ -12,6 +12,7 @@ from copy import deepcopy
 import re
 
 from .save import parse_rules
+from .revision import RevisionError, revision, observation_key
 
 
 class CityLaborError(ValueError):
@@ -47,9 +48,11 @@ def city_labor_projection(state,city_id,rules=None):
     city=matches[0]
     if any(type(city.get(k)) is not int or city[k]<0 for k in ('x','y','size')) or city['size']<1:
         raise CityLaborError('Invalid owned city coordinates/population')
-    digest=state.get('evidence',{}).get('save_sha256');turn=state.get('turn')
-    if not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest) or type(turn) is not int or turn<1:
-        raise CityLaborError('Exact save revision and turn are required')
+    try:
+        bound_revision=revision(state)
+    except RevisionError as error:
+        raise CityLaborError(str(error)) from None
+    if bound_revision['turn']<1:raise CityLaborError('Positive observed turn is required')
     bits=city.get('worked_tiles_bits')
     if not isinstance(bits,(list,tuple)) or len(bits)!=3 or any(type(v) is not int or not 0<=v<=255 for v in bits):
         raise CityLaborError('Exactly three original worked-tile bytes are required')
@@ -120,8 +123,10 @@ def city_labor_projection(state,city_id,rules=None):
         warnings.append('Stored specialist type counts do not cover exactly the saved specialist count; individual type assignment is uncertain.')
     if any(c['knowledge']=='outside_map' for c in worked):
         warnings.append('Bitmap marks an out-of-map square as worked; no terrain or action is inferred for it.')
+    if observation_key(state)=='observation_sha256':
+        warnings=[text.replace('saved population','observed population').replace('saved specialist count','observed specialist count') for text in warnings]
     return dict(city={k:deepcopy(city.get(k)) for k in ('id','owner','name','x','y','size')},
-        revision=dict(save_sha256=digest,turn=turn),worked_tiles_bits=list(bits),
+        revision=bound_revision,worked_tiles_bits=list(bits),
         city_radius=radius,worked_positions=deepcopy(worked),
         labor_balance=dict(population=city['size'],non_center_workers=workers,specialists=specialist_count,
                            accounted_citizens=workers+specialist_count,consistent=workers+specialist_count==city['size']),
@@ -129,7 +134,8 @@ def city_labor_projection(state,city_id,rules=None):
                          type_counts_complete=typed_total==specialist_count,
                          untyped_count=max(0,specialist_count-typed_total)),
         happiness={k:deepcopy(city.get(k)) for k in ('happy','unhappy','disorder','celebrating')},
-        city_totals_as_saved={k:deepcopy(city[k]) for k in OUTPUT_FIELDS if k in city},warnings=warnings,
+        **{('city_totals_as_observed' if observation_key(state)=='observation_sha256' else 'city_totals_as_saved'):
+            {k:deepcopy(city[k]) for k in OUTPUT_FIELDS if k in city}},warnings=warnings,
         yield_note='Original base yields are unmodified RULES.TXT terrain specifications, not actual tile yields. Specials, grassland shields, city-center rules, government, river/trade, improvements and other effects are not calculated. Do not sum these as city income or predict a reassignment gain.',
         knowledge_note='Only the supplied explored map and remembered improvements are joined. Missing or out-of-map squares remain unknown. No seed, hidden rival data, guessed worker destination or screen coordinates are used.',
         native_actions=[],native_action_status='This observation projection dispatches no actions. city_controls may offer calibrated worker/entertainer changes only from a fresh observed city screen; scientist/taxman type actions remain unavailable.',

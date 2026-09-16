@@ -106,8 +106,9 @@
   };
   canvas.addEventListener('contextmenu', event => event.preventDefault());
   const api = {
-    async boot({profile = 'default'} = {}) {
+    async boot({profile = 'default', observer = false} = {}) {
       if (!/^[A-Za-z0-9_-]{1,48}$/.test(profile)) throw new Error('Invalid local runtime profile');
+      if (typeof observer !== 'boolean') throw new Error('Observer mode must be boolean');
       if (bootPromise) return bootPromise;
       bootPromise = (async () => {
         if (!window.Emulator || !window.DosBoxLoader) throw new Error('Fetch the runtime assets before booting');
@@ -122,7 +123,8 @@
               (filename === 'dosbox.html.mem' ? 'dosbox-sync.mem' : filename), base).href),
             DosBoxLoader.nativeResolution(640,480),
             DosBoxLoader.fileSystemKey('tsai-civ2-v1-' + profile),
-            DosBoxLoader.mountZip('c', DosBoxLoader.fetchFile('Civilization II and Windows 3.1', new URL('game/civ2-win31.zip', base).href)),
+            DosBoxLoader.mountZip('c', DosBoxLoader.fetchFile('Civilization II and Windows 3.1',
+              new URL(observer ? 'game/civ2-win31-observer.zip' : 'game/civ2-win31.zip', base).href)),
             // DOSBox otherwise gates mouse motion behind browser pointer lock,
             // which synthetic DOM inputs cannot acquire through user activation.
             // This ordinary host setting enables its existing absolute-input path.
@@ -254,8 +256,11 @@
     capture() { requireStarted(); return canvas.toDataURL('image/png'); },
     listSaves() {
       requireStarted();
-      return window.FS.readdir(SAVE_DIR).filter(name => /^[A-Za-z0-9_-]{1,32}\.sav$/i.test(name)).map(name => {
+      return window.FS.readdir(SAVE_DIR).filter(name => /\.sav$/i.test(name)).map(name => {
+        if (typeof name !== 'string' || name.length > 255 || /[\x00-\x1f\\/]/.test(name))
+          throw new Error('Save inventory filename is invalid');
         const stat = window.FS.stat(SAVE_DIR + '/' + name);
+        if (!Number.isSafeInteger(stat.size) || stat.size < 0) throw new Error('Save inventory size is invalid');
         return {name,size:stat.size,modifiedAt:stat.mtime instanceof Date ? stat.mtime.toISOString() : null};
       }).sort((a,b) => a.name.localeCompare(b.name));
     },
@@ -264,6 +269,53 @@
       const path = resolveSave(name), stat = window.FS.stat(path);
       if (!isInt(stat.size,1,MAX_SAVE)) throw new Error('Save size outside supported bounds');
       return new Uint8Array(window.FS.readFile(path));
+    },
+    // Fixed observer mailbox only. Callers cannot select a guest path, address,
+    // memory range, or game command. The Win16 helper reads original state.
+    observerRequest(nonce) {
+      requireStarted();
+      if (arguments.length !== 1 || typeof nonce !== 'string' || !/^[a-f0-9]{32}$/.test(nonce))
+        throw new Error('Observer requires a fixed hexadecimal nonce');
+      const bytes = new Uint8Array(128).fill(32);
+      Array.from('C2OBS2 ' + nonce + '\n', ch => ch.charCodeAt(0)).forEach((byte, i) => { bytes[i] = byte; });
+      const fs = window.FS, path = '/emulator/c/OBSREQ.TXT';
+      const stream = fs.open(path, 'w');
+      try {
+        if (fs.write(stream, bytes, 0, bytes.length, 0) !== bytes.length)
+          throw new Error('Incomplete observer request');
+      } finally { fs.close(stream); }
+      const actual = fs.readFile(path, {encoding:'binary'});
+      if (actual.length !== bytes.length || actual.some((byte, i) => byte !== bytes[i]))
+        throw new Error('Observer request readback differs');
+      return {nonce, bytes:bytes.length, inputSequence:sequence, gameInput:false};
+    },
+    readObserver() {
+      requireStarted();
+      if (arguments.length) throw new Error('Observer reads accept no paths or addresses');
+      const fs = window.FS, path = '/emulator/c/OBSRESP.BIN';
+      if (fs.stat(path).size !== 524288) throw new Error('Observer envelope has an invalid size');
+      const bytes = new Uint8Array(fs.readFile(path, {encoding:'binary'}));
+      if (bytes.length !== 524288) throw new Error('Observer envelope is incomplete');
+      return bytes;
+    },
+    async observerProvenance() {
+      requireStarted();
+      if (arguments.length) throw new Error('Observer provenance accepts no paths');
+      const fs = window.FS;
+      async function digest(directory, name, maximum) {
+        const matches = fs.readdir(directory).filter(entry => entry.toLowerCase() === name.toLowerCase());
+        if (matches.length !== 1) throw new Error('Pinned observer executable is missing or ambiguous');
+        const path = directory + '/' + matches[0];
+        if (!isInt(fs.stat(path).size, 1, maximum)) throw new Error('Observer executable size is invalid');
+        const bytes = new Uint8Array(fs.readFile(path, {encoding:'binary'}));
+        if (!isInt(bytes.length, 1, maximum)) throw new Error('Observer executable read is invalid');
+        const hash = new Uint8Array(await window.crypto.subtle.digest('SHA-256', bytes));
+        return Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('');
+      }
+      return {
+        original_exe_sha256:await digest('/emulator/c/civ2', 'CIV2.EXE', 4 * 1024 * 1024),
+        helper_sha256:await digest('/emulator/c', 'CIV2OBS.EXE', 512 * 1024),
+      };
     },
     // Explicit setup/recovery only. This imports a whole normal save file; it never
     // changes a running game. The game must load it through its ordinary Load menu.

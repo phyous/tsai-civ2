@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
-from civ2.run import classification_state, controller_context, observe_ready, run_steps
+from civ2.run import classification_state, controller_context, observe_ready, observed_city_identity, run_steps, _await_diplomatic_followup
 
 
 def frame(number, kind, title='', **extra):
@@ -26,11 +26,64 @@ def session(observations):
 
 
 class ControllerTests(TestCase):
+    def test_new_city_identity_accepts_complete_same_year_founding_proof_only(self):
+        import copy
+        d=dict(title='City of Comae, 2900 B.C., Population 10,000',observed_city_name='Cumae',
+            city_name_recovery=dict(source='Unique same-year original founding notice label; no native actor binding',
+                ocr_text='Comae',canonical_name='Cumae',year_text='2900 b.c',
+                notice_image_sha256='a'*64,source_line=4))
+        self.assertEqual(observed_city_identity(d),('Cumae','2900BC'))
+        for key,value in (('ocr_text','Rome'),('canonical_name','Veii'),('year_text','2950 b.c'),
+                          ('notice_image_sha256','bad'),('source_line',True),('source','unverified')):
+            invalid=copy.deepcopy(d);invalid['city_name_recovery'][key]=value
+            self.assertIsNone(observed_city_identity(invalid))
+        d['city_name_recovery']=None
+        self.assertIsNone(observed_city_identity(d))
+
     def run_fake(self,s,limit=1):
         with mock.patch('civ2.run.game_text',return_value='TEST'), \
              mock.patch('civ2.run.classify_dialog',side_effect=lambda o,**kwargs:o['classified']), \
              mock.patch('civ2.run.time.sleep'):
             return run_steps(s,max_decisions=limit)
+
+    def test_agreed_audience_waits_through_map_without_checkpoint_or_repeated_choice(self):
+        audience=frame(1,'diplomacy','Neutral TEST Emissary',resource_tag='EMISSARY',requires_model=True,
+                       options=[{'text':'"Yes. I will grant an audience."'},{'text':'"No. Send him away."'}])
+        transient=frame(2,'end_turn')
+        greeting=frame(3,'information','Neutral TEST Emissary',resource_tag='GREETINGS02',
+                       mechanical_action='acknowledge_information',buttons=[{'text':'OK'}])
+        s=session([transient,greeting]);s.checkpoint=mock.Mock();ctx=controller_context(s)
+        ctx['pending_diplomatic_followup']={'decision':4,'source_hash':audience['sha256'],'title':audience['classified']['title']}
+        with mock.patch('civ2.run.classify_dialog',side_effect=lambda o,**kwargs:o['classified']),mock.patch('civ2.run.time.sleep'):
+            observed,classified,error=_await_diplomatic_followup(s,ctx,transient,transient['classified'],'TEST')
+        self.assertIs(observed,greeting);self.assertIsNone(error);self.assertIsNone(ctx['pending_diplomatic_followup'])
+        self.assertEqual(s.game.rpc.call_args_list,[mock.call('resume'),mock.call('pause')]*2)
+        s.checkpoint.assert_not_called();s.choose_dialog.assert_not_called();s.ui.key.assert_not_called()
+
+    def test_audience_wait_timeout_and_unexpected_screen_preserve_pending_across_return(self):
+        for kind,supported in (('end_turn',True),('city_screen',True),('diplomacy',True),('unknown',False)):
+            current=frame(2,kind,supported=supported)
+            s=session([current]*20);s.checkpoint=mock.Mock();ctx=controller_context(s)
+            pending={'decision':4,'source_hash':'a'*64,'title':'Neutral TEST Emissary'}
+            ctx['pending_diplomatic_followup']=pending
+            with mock.patch('civ2.run.classify_dialog',side_effect=lambda o,**kwargs:o['classified']),mock.patch('civ2.run.time.sleep'):
+                observed,classified,error=_await_diplomatic_followup(s,ctx,current,current['classified'],'TEST')
+            self.assertIs(controller_context(s)['pending_diplomatic_followup'],pending)
+            self.assertEqual(error is not None,supported)
+            self.assertEqual(s.game.rpc.call_count,40 if kind=='end_turn' else 0)
+            s.checkpoint.assert_not_called();s.choose_dialog.assert_not_called();s.ui.key.assert_not_called()
+
+    def test_only_source_bound_yes_audience_choice_starts_pending_transaction(self):
+        for tag,index in (('EMISSARY',0),('EMISSARY',1),('TESTOFFER',0)):
+            d=frame(1,'diplomacy','Neutral TEST Emissary',resource_tag=tag,requires_model=True,
+                    options=[{'text':'"Yes. I will grant an audience."'},{'text':'"No. Send him away."'}])
+            s=session([d]);ctx=controller_context(s)
+            def choose(dialog):
+                s.decisions+=1
+                return {'kind':'dialog_choice','parameters':{'option_index':index,'observed_text':dialog['options'][index]['text']}},frame(2,'end_turn')
+            s.choose_dialog=mock.Mock(side_effect=choose)
+            self.run_fake(s)
+            self.assertEqual(ctx['pending_diplomatic_followup'] is not None,tag=='EMISSARY' and index==0)
 
     def test_review_of_one_city_cannot_skip_other_city(self):
         controls=[{'text':'Exit'},{'text':'Change'}]

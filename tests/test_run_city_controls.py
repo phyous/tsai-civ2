@@ -133,10 +133,24 @@ class RunCityControlsTests(unittest.TestCase):
         city=frame(1,title='City of TEST Rome, 3650 B.C.')
         production=frame(2,'production_choice',requires_model=True,options=[{},{}])
         s=session([city,production],[])
+        s.pending_decisions=[1]
+        s.history=[{'decision':1,'action':{'kind':'finish_turn'}}]
         run(s,1);s.choose_city_control.assert_not_called()
         s.ui.select_text.assert_called_once()
         self.assertEqual(s.ui.select_text.call_args.args[1],'Change')
         self.assertIn(('TEST Rome','3650BC'),controller_context(s)['production_reviewed'])
+
+    def test_known_city_bad_date_cannot_force_a_production_review(self):
+        for requested in (False,True):
+            city=frame(1,title='City of TEST Rome, 3000 B.C.')
+            s=session([city],[])
+            if requested:
+                controller_context(s)['pending_empire']={'id':'inspect_city_0'}
+                controller_context(s)['pending_city']={'name':'TEST Rome'}
+            outcome=run(s,1)
+            self.assertIn('year of an owned city differs',outcome['reason'])
+            s.choose_city_control.assert_not_called();s.choose_dialog.assert_not_called()
+            s.ui.select_text.assert_not_called();s.ui.key.assert_not_called()
 
     def test_new_turn_checkpoint_keeps_production_review_done_in_automatic_window(self):
         end=frame(1,'end_turn');s=session([end,end],[]);ctx=controller_context(s)

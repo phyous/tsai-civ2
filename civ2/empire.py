@@ -13,6 +13,7 @@ from .dialogs import classify_dialog
 from .policy import model_state, STRATEGY_QUESTION
 from .rules import eligible_governments
 from .save import parse_rules
+from .revision import RevisionError, revision
 
 
 class EmpireError(ValueError):
@@ -49,10 +50,12 @@ def _reviewed(value,turn):
 
 
 def _context(state,screen,reviewed):
-    if not isinstance(state,dict):raise EmpireError('Observed save state required')
-    turn=state.get('turn');digest=state.get('evidence',{}).get('save_sha256')
-    if type(turn) is not int or turn<1 or not isinstance(digest,str) or not SHA256.fullmatch(digest):
-        raise EmpireError('Exact save SHA and turn are required')
+    try:
+        bound_revision=revision(state)
+    except RevisionError as error:
+        raise EmpireError(str(error)) from None
+    turn=bound_revision['turn']
+    if turn<1:raise EmpireError('Positive observed turn is required')
     if not isinstance(screen,dict):raise EmpireError('Observed End of Turn screen required')
     if 'lines' in screen:screen=classify_dialog(screen,state=state)
     if (screen.get('supported') is not True or screen.get('kind')!='end_turn'
@@ -67,7 +70,7 @@ def _context(state,screen,reviewed):
     player=state.get('player',{}).get('id')
     if type(player) is not int or not 1<=player<=7:raise EmpireError('Observed human player required')
     seen=_reviewed(reviewed,turn)
-    return screen,seen,dict(save_sha256=digest,turn=turn,image_sha256=image_hash,
+    return screen,seen,dict(**bound_revision,image_sha256=image_hash,
         width=screen['width'],height=screen['height'],screen_kind='end_turn',
         end_turn_text=screen['title'],reviewed_action_ids=sorted(seen))
 
@@ -155,6 +158,9 @@ def empire_request_for(state,screen,actions=None,reviewed=None,rules=None,recent
     return dict(state=projection,questions={
         'empire_action':dict(type='choice',instructions=(
             'The original game is at End of Turn. Choose exactly one actual action. '
+            'The supplied current city records already show builds, stored resources, output and happiness; '
+            'opening a city is not needed merely to learn those facts. Production and research progress by advancing turns. '
+            'If an appropriate build is underway, ordinarily let it finish instead of reopening the city and selecting it again. '
             'Review useful unresolved city production, happiness, income, science or diplomatic matters before finishing; '
             'finish when further review is not useful. Menu actions do not themselves choose a new setting or promise an improvement. '
             'Previously reviewed menus are explicitly listed and omitted to prevent repeated interface loops. '

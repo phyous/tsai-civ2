@@ -54,7 +54,15 @@ class UI:
     def wait(self, predicate, *, timeout=8):
         deadline = time.monotonic() + timeout
         while True:
-            observation = self.observe()
+            try:
+                observation = self.observe()
+            except ValueError as error:
+                # A partially painted startup frame can yield an OCR box
+                # outside the image. It supplies no controls; await a new frame.
+                if str(error) != 'Invalid normalized OCR geometry' or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.1)
+                continue
             if predicate(observation):
                 return observation
             if time.monotonic() >= deadline:
@@ -67,7 +75,9 @@ class UI:
     def park_pointer(self):
         from .cursor import move_cursor, CursorError
         try:
-            return move_cursor(self.game,620,410)
+            # The old lower-right point obscured the original herald message.
+            # This observed title-bar corner keeps the complete arrow visible.
+            return move_cursor(self.game,2,1,tolerance=1)
         except CursorError as error:
             return {'issued':False,'error':str(error)}
 

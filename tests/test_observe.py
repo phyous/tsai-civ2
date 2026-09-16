@@ -39,7 +39,7 @@ class ObserveTests(unittest.TestCase):
         self.assertEqual(rows[1]['map_patch_colors']['chromatic_pixels'],0)
         self.assertEqual(rows[0]['map_patch_colors']['source_sha256'],'a'*64)
         self.assertEqual(rows[0]['map_patch_colors']['bounds'],rows[0]['bounds'])
-        self.assertNotIn('map_patch_colors',rows[2])
+        self.assertEqual(rows[2]['map_patch_colors']['chromatic_pixels'],100)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -176,6 +176,23 @@ class ObserveTests(unittest.TestCase):
         self.assertEqual([line['text'] for line in result['lines']], ['Endofhum', 'No orders'])
         self.assertEqual(len(result['ocr']['conflicts']), 1)
 
+    def test_exact_pixel_pair_can_replace_damaged_first_glyph_without_prefix_alias(self):
+        native=broken_status();native[0]['text']='Bnd of Tum';native[1]['text']='(Press ECTER)'
+        result,_=self.recognize(native,[],status_pair())
+        self.assertEqual([r['text'] for r in result['lines']],list(observe.STATUS_PHRASES))
+        self.assertEqual(result['lines'][0]['provenance'][0]['text'],'Bnd of Tum')
+
+    def test_status_pair_native_boxes_may_share_only_a_thin_adjacent_edge(self):
+        native=[row('Bnd of Tum',x=476,y=446,width=64,height=12),
+                row('(Press ECTER)',x=478,y=456,width=78,height=12)]
+        pair=[dict(text='End of Turn',confidence=1,x=10/174,y=5/40,width=62/174,height=11/40),
+              dict(text='(Press ENTER)',confidence=1,x=13/174,y=17/40,width=76/174,height=12/40)]
+        result,_=self.recognize(native,[],pair)
+        self.assertEqual([r['text'] for r in result['lines']],list(observe.STATUS_PHRASES))
+        native[0]['height']=17/480
+        result,_=self.recognize(native,[],pair)
+        self.assertEqual(result['lines'][0]['text'],'Bnd of Tum')
+
     def test_status_avoids_duplicate_displaced_near_rows(self):
         native = broken_status(); native[0]['y'] = 435/480
         # This near row crosses outside the status crop but still overlaps its
@@ -227,6 +244,19 @@ class ObserveTests(unittest.TestCase):
 
 
 class NativeRowCropTests(unittest.TestCase):
+    def test_save_caption_requires_two_actual_reads_and_original_notice_body(self):
+        old=self.prepared('Gaue saved!!',x=278,y=196,width=84,height=12)
+        good=self.prepared('Game samed!',x=279,y=196,width=84,height=12,source='TEST crop')
+        anchors=[self.prepared('Dictator TEST Caesar of the Romans'),self.prepared('OK')]
+        for second,accepted in [(good,True),(self.prepared('Game loaded!'),False)]:
+            rows=anchors+[dict(old)]
+            with patch.object(observe,'_crop_text',side_effect=[[good],[second]]):
+                observe._recover_saved_caption(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[-1]['text'],'Game samed!' if accepted else 'Gaue saved!!')
+        with patch.object(observe,'_crop_text') as crop:
+            observe._recover_saved_caption(Image.new('RGB',(640,480)),[old],None,None,{})
+        crop.assert_not_called()
+
     def test_city_sections_need_complete_layout_and_two_exact_pixel_reads(self):
         original=self.prepared('Units Preseni',x=276,y=278,width=80,height=12)
         good=self.prepared('Units Present',x=275,y=277,width=80,height=12,source='TEST crop')
@@ -261,13 +291,13 @@ class NativeRowCropTests(unittest.TestCase):
         for peer,accept in ((good,True),(self.prepared('What shall me bukd in OTHER?',x=200,y=130,width=280),False),
                             (self.prepared('What shall me bukd in TEST?',x=200,y=200,width=280),False)):
             rows=[dict(original),*buttons]
-            with patch.object(observe,'_crop_text',side_effect=[[good],[peer]]),patch.object(observe,'_production_names',return_value=set()):
+            with patch.object(observe,'_crop_text',side_effect=[[good],[peer],[good],[peer]]),patch.object(observe,'_production_names',return_value=set()):
                 observe._recover_city_and_production_rows(image,rows,None,None,{})
             self.assertEqual(rows[0]['text'],good['text'] if accept else original['text'])
             if accept:self.assertEqual(rows[0]['provenance'][0]['text'],original['text'])
         for text in ('What shall me bukd in OTHER?','What shall we purchase in TEST?'):
             rows=[dict(original),*buttons];bad=self.prepared(text,x=200,y=130,width=280)
-            with patch.object(observe,'_crop_text',side_effect=[[bad],[bad]]),patch.object(observe,'_production_names',return_value=set()):
+            with patch.object(observe,'_crop_text',side_effect=[[bad],[bad],[bad],[bad]]),patch.object(observe,'_production_names',return_value=set()):
                 observe._recover_city_and_production_rows(image,rows,None,None,{})
             self.assertEqual(rows[0]['text'],original['text'])
         with patch.object(observe,'_crop_text') as crop:
@@ -278,7 +308,7 @@ class NativeRowCropTests(unittest.TestCase):
         menu=[self.prepared(s,x=10+i*60,y=22,width=40) for i,s in enumerate(('Game','Kingdom','View','Orders'))]
         original=self.prepared('Veu');fresh=self.prepared('Veii',source='test_crop')
         image=Image.new('RGB',(640,480),'gray')
-        for readings,expected in (([[fresh],[fresh]],'Veii'),([[fresh],[self.prepared('Vei')],[]],'Veu'),([[],[fresh]],'Veu')):
+        for readings,expected in (([[fresh],[fresh]],'Veii'),([[fresh],[self.prepared('Vei')],[],[],[]],'Veu'),([[],[fresh],[],[],[]],'Veu')):
             rows=menu+[dict(original)]
             with patch.object(observe,'_crop_text',side_effect=readings):
                 observe._recover_map_labels(image,rows,None,None,{})
@@ -323,7 +353,7 @@ class NativeRowCropTests(unittest.TestCase):
         good=self.prepared('Moving Units',x=514,y=254,width=73,height=11,source='TEST crop')
         for fresh,expected in (([good],'Moving Units'),([],'Morng Thits')):
             rows=[dict(old)]
-            with patch.object(observe,'_crop_text',side_effect=[[good],fresh]):
+            with patch.object(observe,'_crop_text',side_effect=[[good],fresh,[good],fresh]):
                 observe._recover_moving_status(image,rows,None,None,{})
             self.assertEqual(rows[0]['text'],expected)
         rows=[self.prepared('Morng Thits',x=200,y=251,width=72,height=15)]
@@ -362,6 +392,15 @@ class NativeRowCropTests(unittest.TestCase):
 
 
 class PrivateCalibrationTests(unittest.TestCase):
+    def test_optional_original_saved_heading_and_damaged_footer_prefix(self):
+        root=Path(__file__).resolve().parents[1]
+        saved=root/'runs/attempt-005/screens/ui-0000819.png';footer=root/'runs/attempt-004/screens/ui-0000573.png'
+        if not all(p.exists() for p in (saved,footer,root/'.runtime/ocr')):self.skipTest('Private original saved/footer frames unavailable')
+        from civ2.ui import saved_notice
+        self.assertTrue(saved_notice(observe.recognize(saved)))
+        o=observe.recognize(footer)
+        for phrase in observe.STATUS_PHRASES:self.assertIn(phrase,[r['text'] for r in o['lines']])
+
     def test_optional_original005_city_section_crop_reads_exact_headings(self):
         root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0000741.png'
         if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original city frame unavailable')

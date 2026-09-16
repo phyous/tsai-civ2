@@ -7,16 +7,28 @@ from pathlib import Path
 import time
 import zipfile
 from copy import deepcopy
+from functools import lru_cache
 from .city_controls import CityControlError, city_control_candidates, city_labor_result
 from .dialogs import classify_dialog
 from .preferences import configure_graphics_preferences, configure_throne_presentation
 from .session import Session
+from .revision import (observation_digest, observation_key, prefixed_revision,
+                       revision_digest, RevisionError)
 
 
 def game_text():
     bundle = Path(__file__).resolve().parents[1]/'engine/game/civ2-win31.zip'
     with zipfile.ZipFile(bundle) as source:
         return source.read('civ2/GAME.TXT').decode('cp1252')
+
+
+@lru_cache(maxsize=1)
+def labels_text():
+    """Optional original labels catalog; absent private assets fail closed."""
+    bundle=Path(__file__).resolve().parents[1]/'engine/game/civ2-win31.zip'
+    if not bundle.is_file():return None
+    with zipfile.ZipFile(bundle) as source:
+        return source.read('civ2/LABELS.TXT').decode('cp1252')
 
 
 def controller_context(session):
@@ -32,6 +44,8 @@ def controller_context(session):
     session.controller.setdefault('city_labor_ready', None)
     session.controller.setdefault('recent_founding_notices', [])
     session.controller.setdefault('throne_presentation_disabled', False)
+    session.controller.setdefault('pending_diplomatic_followup', None)
+    session.controller.setdefault('pending_trade', None)
     return session.controller
 
 
@@ -43,7 +57,8 @@ def classification_state(session):
     names = {city['name'].casefold() for city in cities}
     cities += [{'name':name} for name in context['observed_city_names'] if name.casefold() not in names]
     return {**session.state,'cities':cities,
-            'recent_founding_notices':deepcopy(context['recent_founding_notices'])}
+            'recent_founding_notices':deepcopy(context['recent_founding_notices']),
+            'pending_trade':deepcopy(context['pending_trade'])}
 
 
 def observed_city_identity(dialog):
@@ -57,8 +72,16 @@ def observed_city_identity(dialog):
         return None
     if name.casefold() != match[1].casefold():
         proof = dialog.get('city_name_recovery', {})
-        if (proof.get('ocr_text') != match[1] or proof.get('canonical_name') != name
-                or proof.get('source') != 'Unique one-edit match to owned city in original save'):
+        if not isinstance(proof,dict) or proof.get('ocr_text') != match[1] or proof.get('canonical_name') != name:
+            return None
+        if proof.get('source') == 'Unique same-year original founding notice label; no native actor binding':
+            year=lambda value:re.sub(r'[^0-9A-Z]','',value.upper())
+            if (not isinstance(proof.get('year_text'),str) or year(proof['year_text'])!=year(match[2])
+                    or not re.fullmatch(r'[a-f0-9]{64}',str(proof.get('notice_image_sha256','')))
+                    or type(proof.get('source_line')) is not int or proof['source_line']<0):
+                return None
+        elif proof.get('source') not in ('Unique one-edit match to owned city in original save',
+                                         'Unique one-edit match to owned city in live memory observation'):
             return None
     return name,re.sub(r'[^0-9A-Z]','',match[2].upper())
 
@@ -117,9 +140,17 @@ def city_control_review(session, context, dialog, city):
     year = session.state.get('year_raw')
     saved_year = f'{abs(year)}'+('BC' if year<0 else 'AD') if type(year) is int else None
     if city[1] != saved_year:
-        # Automatic production windows can precede the next turn's native
-        # checkpoint. Keep their observed-option workflow until data is fresh.
-        return None
+        # An actual turn advance can open an automatic production window before
+        # the next checkpoint. A requested inspection cannot: treating a bad
+        # OCR date as a new city would silently force its production menu open.
+        pending_ids=set(getattr(session,'pending_decisions',()))
+        pending_orders=[item.get('action',{}) for item in getattr(session,'history',())
+                        if item.get('decision') in pending_ids]
+        if (not context.get('pending_empire') and pending_orders
+                and any(a.get('kind')=='finish_turn' for a in pending_orders)
+                and all(a.get('kind') in ('finish_turn','dialog_choice') for a in pending_orders)):
+            return None
+        raise CityControlError('Displayed year of an owned city differs from its current observation; no production menu was authorized')
     saved = matches[0]
     key = (saved['id'],saved['name'],session.state.get('year_raw'))
     record = context['city_controls_reviewed'].get(key)
@@ -143,19 +174,29 @@ def _labor_city(state, actor):
     return {k:matches[0][k] for k in fields}
 
 
-def start_labor_refresh(session,context,city,*,action=None,decision=None):
+def start_labor_refresh(session,context,city,*,action=None,decision=None,preparation_action=None):
     if context['pending_labor_refresh'] is not None:raise CityControlError('A labor refresh is already pending')
     signature=_labor_city(session.state,city)
-    pending=dict(phase='need_close',purpose='verify_labor' if action else 'prepare_labor_choices',
+    if preparation_action is not None:
+        if (action is not None or type(decision) is not int or decision<1
+                or preparation_action.get('kind')!='city_control'
+                or preparation_action.get('id')!='review_labor'
+                or preparation_action.get('parameters',{}).get('observed_text','').casefold()!='exit'
+                or preparation_action.get('parameters',{}).get('expected_screen')!='fresh_city_labor'
+                or any(preparation_action.get('actor',{}).get(k)!=v for k,v in signature.items())
+                or revision_digest(preparation_action.get('preconditions',{}))!=observation_digest(session.state)):
+            raise CityControlError('Labor preparation requires the selected, bound native Exit action')
+    pending=dict(phase='await_map' if preparation_action else 'need_close',purpose='verify_labor' if action else 'prepare_labor_choices',
         city=signature,year_raw=session.state['year_raw'],action=deepcopy(action),decision=decision,
-        before=deepcopy(session.state),checkpoint_save_sha256=None)
+        before=deepcopy(session.state),**{'checkpoint_'+observation_key(session.state):None})
     context['pending_labor_refresh']=pending;context['city_labor_ready']=None
+    preparation={'preparation_action':deepcopy(preparation_action)} if preparation_action else {}
     session.journal.append('city_labor_refresh_started',decision=decision,purpose=pending['purpose'],
-        action=deepcopy(action),city=signature,before_save_sha256=session.state['evidence']['save_sha256'])
+        action=deepcopy(action),city=signature,**prefixed_revision(session.state,'before_'),**preparation)
 
 
 def labor_refresh_step(session,context,observation,dialog,resources):
-    """Mechanical close/save/reopen only; no inferred success or labor selection."""
+    """Mechanical close/observe/reopen only; no inferred success or labor selection."""
     pending=context['pending_labor_refresh']
     if pending is None:return False,None
     phase=pending['phase'];kind=dialog['kind'];city=pending['city']
@@ -174,11 +215,11 @@ def labor_refresh_step(session,context,observation,dialog,resources):
         if identity is None or identity[0].casefold()!=city['name'].casefold() or identity[1]!=expected_year:
             return failed('Labor refresh observed a different city or year')
         if phase=='await_reopened':
-            if session.state['evidence']['save_sha256']!=pending['checkpoint_save_sha256']:
-                return failed('Labor refresh native save changed before reopening')
-            context['city_labor_ready']={'city':deepcopy(city),'save_sha256':pending['checkpoint_save_sha256']}
+            if observation_digest(session.state)!=revision_digest(pending,'checkpoint_'):
+                return failed('Labor refresh observation changed before reopening')
+            context['city_labor_ready']={'city':deepcopy(city),**prefixed_revision(session.state)}
             session.journal.append('city_labor_ready',decision=pending['decision'],purpose=pending['purpose'],
-                city=deepcopy(city),save_sha256=pending['checkpoint_save_sha256'],screen=observation['sha256'])
+                city=deepcopy(city),**prefixed_revision(session.state),screen=observation['sha256'])
             context['pending_labor_refresh']=None
             return False,None
         exits=[b for b in dialog['buttons'] if b['text'].casefold()=='exit']
@@ -191,7 +232,7 @@ def labor_refresh_step(session,context,observation,dialog,resources):
     if phase=='await_map':
         if kind=='city_screen':return failed('Labor refresh Exit did not close the city window')
         if kind not in ('normal_map','end_turn'):
-            return (False,None) if information else failed('Labor refresh requires the original map before saving')
+            return (False,None) if information else failed('Labor refresh requires the original map before observing state')
         session.checkpoint();pending['phase']='checkpointed'
         try:
             _labor_city(session.state,city)
@@ -199,16 +240,16 @@ def labor_refresh_step(session,context,observation,dialog,resources):
                 return failed('Labor refresh unexpectedly advanced the original turn')
             result=city_labor_result(pending['action'],pending['before'],session.state) if pending['action'] else None
         except (CityControlError,ValueError) as error:return failed(str(error))
-        pending['checkpoint_save_sha256']=session.state['evidence']['save_sha256']
+        pending.update(prefixed_revision(session.state,'checkpoint_'))
         session.journal.append('city_labor_checkpoint',decision=pending['decision'],purpose=pending['purpose'],
-            checkpoint=session.checkpoints,save_sha256=pending['checkpoint_save_sha256'],result=result)
+            checkpoint=session.checkpoints,**prefixed_revision(session.state),result=result)
         if result:
             for record in reversed(session.history):
                 if record.get('decision')==pending['decision']:
                     record['outcome']='Native labor checkpoint: '+result['status']
                     record['observed_labor']=deepcopy(result);break
             if result['status']=='unexpected_change':return failed('Native labor bitmap or specialist result differed from the selected change')
-        # Native saving changes the pixels. Reobserve before any locator input.
+        # Reobserve the original pixels before any locator input.
         observation,dialog=observe_ready(session,resources);kind=dialog['kind']
         session.journal.append('screen_observed',screen=observation['sha256'],classification=kind,
             supported=dialog['supported'],path=Path(observation['path']).relative_to(session.journal.directory).as_posix())
@@ -232,19 +273,19 @@ def observe_ready(session, resources):
     """Wait only for native painting, including the blinking end-turn cue.
 
     Uneven waits avoid repeatedly sampling the same low-contrast blink phase.
-    This issues no keys or mouse input and never repairs an unknown label.
+    It may park the pointer off the playfield, without clicks or keys.
     """
     observation = session.ui.observe()
-    dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
+    dialog = classify_dialog(observation, rules=session.rules, game_text=resources, labels_text=labels_text(),
                              state=classification_state(session))
     cursor = observation.get('cursor_hotspot')
-    if not dialog['supported'] and cursor and max(abs(cursor[0]-620),abs(cursor[1]-410)) > 3:
+    if not dialog['supported'] and cursor and max(abs(cursor[0]-2),abs(cursor[1]-1)) > 1:
         session.game.rpc('resume')
         receipt = session.ui.park_pointer()
         session.game.rpc('pause')
         session.journal.append('pointer_park_for_observation',before=observation['sha256'],receipt=receipt)
         observation = session.ui.observe()
-        dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
+        dialog = classify_dialog(observation, rules=session.rules, game_text=resources, labels_text=labels_text(),
                                  state=classification_state(session))
     delays = (.13, .37, .61, .19, .43, .73, .29, .47)
     # These failures already passed the original Roman map/menu/pane guards.
@@ -265,15 +306,48 @@ def observe_ready(session, resources):
         time.sleep(delay)
         session.game.rpc('pause')
         observation = session.ui.observe()
-        dialog = classify_dialog(observation, rules=session.rules, game_text=resources,
+        dialog = classify_dialog(observation, rules=session.rules, game_text=resources, labels_text=labels_text(),
                                  state=classification_state(session))
     return observation, dialog
 
 
+def _await_diplomatic_followup(session, context, observation, dialog, resources):
+    """An agreed audience can briefly expose the map while its herald loads.
+
+    No input or checkpoint is permitted in that gap. Only a separately observed
+    supported emissary follow-up completes this pending transaction.
+    """
+    pending=context['pending_diplomatic_followup']
+    if pending is None:return observation,dialog,None
+    for attempt in range(21):
+        if (dialog.get('supported') and isinstance(dialog.get('resource_tag'),str)
+                and dialog['resource_tag'] and dialog['resource_tag']!='EMISSARY'
+                and re.search(r'\bemissary$',dialog.get('title',''),re.I)):
+            session.journal.append('diplomatic_followup_observed',decision=pending['decision'],
+                source_hash=pending['source_hash'],screen=observation['sha256'],
+                resource_tag=dialog.get('resource_tag'),title=dialog.get('title'))
+            context['pending_diplomatic_followup']=None
+            return observation,dialog,None
+        if dialog.get('kind') not in ('normal_map','end_turn') or not dialog.get('supported'):
+            error='Agreed diplomatic audience follow-up is not yet identified; no further input issued.' if dialog.get('supported') else None
+            return observation,dialog,error
+        if attempt==20:
+            return observation,dialog,'Agreed diplomatic audience has no observed follow-up yet; no map input issued.'
+        session.game.rpc('resume')
+        try:time.sleep(.5)
+        finally:session.game.rpc('pause')
+        observation=session.ui.observe()
+        dialog=classify_dialog(observation,rules=session.rules,game_text=resources, labels_text=labels_text(),state=classification_state(session))
+    raise AssertionError('Bounded diplomatic wait exhausted')
+
+
 def _checkpoint_token(session):
-    """A fresh native save can be reused once, only inside this running loop."""
+    """A fresh observation can be reused once, only inside this running loop."""
     state = session.state
-    digest = state.get('evidence', {}).get('save_sha256')
+    try:
+        digest = observation_digest(state)
+    except RevisionError:
+        return None
     checkpoint = getattr(session, 'checkpoints', None)
     sequence = getattr(session.journal, 'sequence', None)
     if (not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
@@ -281,7 +355,7 @@ def _checkpoint_token(session):
             or type(state.get('turn')) is not int or type(state.get('year_raw')) is not int
             or getattr(session, 'pending_decisions', None) != []):
         return None
-    return dict(checkpoint=checkpoint, save_sha256=digest, turn=state['turn'],
+    return dict(checkpoint=checkpoint, **prefixed_revision(state), turn=state['turn'],
                 year=state['year_raw'], journal_sequence=sequence)
 
 
@@ -298,6 +372,7 @@ def run_steps(session, *, max_decisions=10000):
         reuse_checkpoint = (verified_endturn_checkpoint is not None
                             and _checkpoint_token(session) == verified_endturn_checkpoint)
         observation, dialog = observe_ready(session, resources)
+        observation,dialog,audience_wait_error=_await_diplomatic_followup(session,context,observation,dialog,resources)
         # Pointer movement is harmless to strategy but still an ordinary input.
         # Its observation-recovery event invalidates the strict no-input token.
         reuse_checkpoint = reuse_checkpoint and _checkpoint_token(session) == verified_endturn_checkpoint
@@ -307,6 +382,8 @@ def run_steps(session, *, max_decisions=10000):
                                 path=Path(observation['path']).relative_to(session.journal.directory).as_posix(),
                                 **({'native_rejection':dialog['native_rejection']} if dialog.get('native_rejection') else {}),
                                 **({'quote':dialog['quote'],'resource_tag':dialog.get('resource_tag')} if dialog.get('quote') else {}))
+        if audience_wait_error:
+            return {'status':'paused','reason':audience_wait_error,'screen':observation['path']}
         if not dialog['supported']:
             return {'status':'paused','reason':'Original screen requires a controller update.',
                     'screen':observation['path'],'classification':dialog}
@@ -341,7 +418,7 @@ def run_steps(session, *, max_decisions=10000):
                                 'source_tag':'FOUNDED', 'image_sha256':observation['sha256']})
                 del notices[:-4]
         pending = context['pending_empire']
-        expected = {'open_tax':{'tax_rate','luxury_rate'},
+        expected = {'open_tax':{'tax_rate','luxury_rate','tax_allocation'},
                     'open_research':{'science_advisor'},
                     'open_diplomacy':{'foreign_minister'},
                     'open_revolution':{'revolution_choice','revolution_offer'}}
@@ -350,6 +427,24 @@ def run_steps(session, *, max_decisions=10000):
         if kind in ('victory','game_over'):
             return {'status':'paused','reason':'Original end-game screen awaits outcome verification.',
                                 'screen':observation['path'],'classification':dialog}
+        if dialog['mechanical_action']=='accept_single_trade_advance':
+            pending=context['pending_trade']
+            if (pending is None or pending!=dialog.get('prior_trade')
+                    or session.decisions!=pending['decision']):
+                return {'status':'paused','reason':'Trade continuation has no current accepted model exchange.'}
+            current=session.ui.observe()
+            if current['sha256']!=observation['sha256']:
+                return {'status':'paused','reason':'Trade continuation changed before confirmation.'}
+            # Consume first: an uncertain input must never authorize a retry.
+            context['pending_trade']=None
+            session.game.rpc('resume')
+            inputs=session.ui.key('Enter',settle=.15)
+            after=session.ui.observe()
+            session.journal.append('trade_advance_dispatched',prior_trade=pending,
+                advance=dialog['advance'],before=observation['sha256'],after=after['sha256'],
+                resource_tag='TAKECIV',evidence=dialog['evidence'],inputs=inputs,
+                scope='Confirm sole already-selected advance in the immediately preceding Jev-accepted trade; no new model choice')
+            continue
         if dialog['mechanical_action'] == 'acknowledge_presentation':
             housekeeping += 1
             if housekeeping > 20:
@@ -420,17 +515,16 @@ def run_steps(session, *, max_decisions=10000):
             except CityControlError as error:
                 return {'status':'paused','reason':str(error),'screen':observation['path']}
             if review is not None:
-                actions=city_control_candidates(session.state,dialog,review,session.rules,labor_ready=True)
+                actions=city_control_candidates(session.state,dialog,review,session.rules)
                 actor=actions['exit_city']['actor']
                 ready=context['city_labor_ready']=={'city':_labor_city(session.state,actor),
-                    'save_sha256':session.state['evidence']['save_sha256']}
-                if any(a['kind']=='city_labor' for a in actions.values()) and not ready:
-                    start_labor_refresh(session,context,actor)
-                    continue
+                    **prefixed_revision(session.state)}
                 previous_decisions = session.decisions
                 action, _ = session.choose_city_control(dialog, review, labor_ready=True) if ready else session.choose_city_control(dialog,review)
                 decision=session.decisions if session.decisions>previous_decisions else None
-                if action['kind']=='city_labor':
+                if action['id']=='review_labor':
+                    start_labor_refresh(session,context,action['actor'],decision=decision,preparation_action=action)
+                elif action['kind']=='city_labor':
                     review['labor_reassignments']=review.get('labor_reassignments',0)+1
                     start_labor_refresh(session,context,action['actor'],action=action,decision=decision)
                 else:
@@ -488,7 +582,7 @@ def run_steps(session, *, max_decisions=10000):
                 context['pending_empire'] = action
                 context['pending_empire_confirmed'] = False
                 context['pending_city'] = action['parameters'].get('target_city')
-            elif classify_dialog(next_screen,rules=session.rules,game_text=resources,state=classification_state(session))['kind'] == 'end_turn':
+            elif classify_dialog(next_screen,rules=session.rules,game_text=resources, labels_text=labels_text(),state=classification_state(session))['kind'] == 'end_turn':
                 # With every unit fortified, busy or consumed, the next turn
                 # can immediately reach the same indicator. Verify the actual
                 # original save rather than treating an unchanged kind as a
@@ -506,7 +600,7 @@ def run_steps(session, *, max_decisions=10000):
             session.game.rpc('resume')
             receipt = session.ui.select_text(observation,matches[0]['text'],exact=True)
             selected = session.ui.observe()
-            selected_dialog = classify_dialog(selected,rules=session.rules,game_text=resources,state=classification_state(session))
+            selected_dialog = classify_dialog(selected,rules=session.rules,game_text=resources, labels_text=labels_text(),state=classification_state(session))
             if selected_dialog['kind'] != 'city_locator' or not selected_dialog['supported']:
                 return {'status':'paused','reason':'Native city locator changed during selection.', 'screen':selected['path']}
             zoom = [button for button in selected_dialog['buttons'] if button['text'].casefold() == 'zoom to city']
@@ -527,7 +621,19 @@ def run_steps(session, *, max_decisions=10000):
         if dialog['requires_model']:
             if len(dialog['options']) == 1:
                 return {'status':'paused','reason':'A forced choice needs a verified mechanical handler.', 'screen':observation['path']}
-            session.choose_dialog(dialog)
+            choice=session.choose_dialog(dialog)
+            if isinstance(choice,tuple) and len(choice)==2:
+                from .exchange_picker import accepted_trade_context
+                context['pending_trade']=accepted_trade_context(dialog,choice[0],session.decisions,session.rules)
+                if context['pending_trade'] is not None:
+                    session.journal.append('trade_followup_pending',prior_trade=context['pending_trade'])
+            if dialog.get('resource_tag')=='EMISSARY' and isinstance(choice,tuple) and len(choice)==2:
+                action=choice[0]
+                if (action.get('kind')=='dialog_choice' and action.get('parameters',{}).get('option_index')==0
+                        and action['parameters'].get('observed_text')==dialog['options'][0]['text']):
+                    context['pending_diplomatic_followup']={'decision':session.decisions,
+                        'source_hash':observation['sha256'],'title':dialog['title']}
+                    session.journal.append('diplomatic_followup_pending',**context['pending_diplomatic_followup'])
             pending_control = context['pending_city_control']
             if pending_control and pending_control['observed_dialog'] and kind==pending_control['observed_dialog']['kind']:
                 pending_control['response_dispatched'] = True
@@ -543,7 +649,10 @@ def run_steps(session, *, max_decisions=10000):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--initial-save', required=True)
+    backend=parser.add_mutually_exclusive_group(required=True)
+    backend.add_argument('--initial-save')
+    backend.add_argument('--no-saves',action='store_true',help='Observe live original memory; never create native game saves')
+    parser.add_argument('--setup-directory',help='Retained fresh no-save setup evidence (required with --no-saves)')
     parser.add_argument('--directory', required=True)
     parser.add_argument('--env-file')
     parser.add_argument('--max-decisions', type=int, default=10000)
@@ -552,10 +661,20 @@ def main():
     parser.add_argument('--port',type=int,default=3920)
     parser.add_argument('--planning',action='store_true',help='Ask Jev for persistent unit objectives before independent action choices')
     args = parser.parse_args()
+    if args.no_saves and not args.setup_directory:
+        parser.error('--no-saves requires --setup-directory')
+    if not args.no_saves and args.setup_directory:
+        parser.error('--setup-directory is only used with --no-saves')
     from .engine import Game
+    game=Game(port=args.port)
+    observer=None
+    if args.no_saves:
+        from .memory import LiveMemoryObserver
+        import uuid
+        observer=LiveMemoryObserver(game,Path('.runtime/observers')/uuid.uuid4().hex)
     session = Session(args.directory,args.initial_save,env_file=args.env_file,
                       max_requests=args.max_requests,fps=args.fps,
-                      game=Game(port=args.port),planning=args.planning)
+                      game=game,planning=args.planning,observer=observer,setup_directory=args.setup_directory)
     outcome = None
     try:
         outcome = run_steps(session,max_decisions=args.max_decisions)

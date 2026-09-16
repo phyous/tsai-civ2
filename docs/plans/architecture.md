@@ -29,8 +29,9 @@ Runtime URLs, hashes, notices and version findings are recorded separately.
 1. A local web server serves the dashboard and an isolated game iframe. The
    original emulator receives ordinary key and mouse events. The runtime bridge
    exposes bounded boot, pause, resume, input, capture and save-file operations.
-2. Observation combines original pixels and original save files. A versioned
-   decoder validates the save layout and projects only the Roman player's own
+2. Observation combines original pixels with read-only Win16 ToolHelp snapshots
+   for recorded play, or native save files for debugging. A versioned
+   decoder validates the original layout and projects only the Roman player's own
    information, discovered map and visible or legitimately remembered facts.
    Other civilizations' hidden maps, city internals and plans cannot enter the
    model prompt. Decoder uncertainty stops dependent actions.
@@ -43,8 +44,12 @@ Runtime URLs, hashes, notices and version findings are recorded separately.
    the relevant vector without pretending independent marginals are a joint
    distribution. End Turn is explicit and guarded against duplication.
 5. Inputs execute through the original UI, with before/after evidence and
-   command receipts. Checkpoints permit technical recovery, documented in the
-   run. Gameplay does not edit saves, memory, RNG, difficulty or game rules.
+   command receipts. Live observations retain actual native bytes, source hashes,
+   window topology and unchanged input sequence. Original animation may change
+   the three captured frames; this is declared, not called pixel stability.
+   Paired native state and topology must agree. Debug saves permit documented
+   technical recovery; recorded play never saves between turns. Gameplay does
+   not edit saves, memory, RNG, difficulty or game rules.
 6. The web display shows original game pixels, empire facts, actual Jev
    probabilities, execution receipts, turn history, latency and usage. Missing
    information is shown as unavailable. Waiting displays retain the evaluated
@@ -58,7 +63,8 @@ Runtime URLs, hashes, notices and version findings are recorded separately.
 
 - `engine/runtime.html`, `engine/bridge.js`: original emulator adapter.
 - `civ2/server.py`, `civ2/engine.py`: loopback server and constrained Python client.
-- `civ2/save.py`: original-format validation and visibility projection.
+- `civ2/save.py`, `memory.py`, `revision.py`: original-format validation,
+  read-only native observer and honest source-specific observation hashes.
 - `civ2/observe.py`, `actions.py`, `policy.py`, `run.py`: observation and decisions.
 - `civ2/typesafe.py`: hardened TypeSafe client reused from tsai-sc.
 - `web/`: Roman-themed live display and replay surface.
@@ -71,11 +77,12 @@ for credentials and proprietary runtime files before pushing.
 ## Alternatives and risks
 
 An external iframe alone would prevent reliable state and recording access.
-Freeciv would change the game, and BottleShip cannot run this binary. Save-based
-observation is preferable to speculative segmented-memory decoding, but must
-be tested against this early executable version. UI automation is vulnerable to
+Freeciv would change the game, and BottleShip cannot run this binary. Native
+saves supplied the calibration reference for the read-only memory reader.
+The recorded campaign now uses pinned executable layouts and paired native
+snapshots; it fails rather than falling back to a save. UI automation is vulnerable to
 unexpected dialogs and exhausted movement; bounded retries, original pixels,
-save validation and per-command receipts prevent silent drift. Model quality
+observation validation and per-command receipts prevent silent drift. Model quality
 on a full campaign is unproven: analyze actual losses and improve the harness
 without presenting technical restarts as successful games.
 
@@ -88,7 +95,8 @@ review strategy failures, and iterate to a full win. Review the visual design
 at recording resolution, check live/video legibility, and publish source plus
 the full successful game and its evidence only after verification.
 
-Remaining implementation questions: validated save offsets for this version,
-reliable fresh snapshots during dialogs, emulator save persistence, and the
-original end-game result representation. Resolve these from actual runtime
+Remaining implementation questions include reliable fresh snapshots during
+dialogs and the original end-game result representation. The current memory
+reader requires the original map topology, so it deliberately rejects city
+windows and modal dialogs. Resolve additional support from actual runtime
 evidence rather than assuming compatibility with later Civ II editions.

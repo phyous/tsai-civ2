@@ -15,6 +15,8 @@ import re
 
 from .city import CityLaborError, WORKED_BITS, city_labor_projection
 from .dialogs import classify_dialog
+from .revision import (RevisionError, observation_key, observation_digest, revision_key,
+                       revision_digest, prefixed_revision)
 from .policy import PolicyError, STRATEGY_QUESTION, _revision, model_state
 
 
@@ -29,6 +31,7 @@ class ForcedCityControl(CityControlError):
 CONTROLS = {
     'change_production': ('change', 'Change production: open the native choices', 'production_choice'),
     'open_buy_quote': ('buy', 'Buy: open the native quote only; no purchase authorized', 'buy_quote'),
+    'review_labor': ('exit', 'Review labor allocation: refresh state and reopen this city; no reassignment yet', 'fresh_city_labor'),
     'exit_city': ('exit', 'Exit this city window', 'original_map'),
 }
 REVIEWABLE = {'change_production', 'open_buy_quote'}
@@ -76,8 +79,11 @@ def _context(state, screen, reviewed, rules):
     if _name(name) != _name(match[1]):
         if (not isinstance(recovery, dict) or recovery.get('ocr_text') != match[1]
                 or recovery.get('canonical_name') != name
-                or recovery.get('save_sha256') != revision['save_sha256']
-                or recovery.get('source') != 'Unique one-edit match to owned city in original save'
+                or set(recovery).intersection({'save_sha256','observation_sha256'}) != {observation_key(state)}
+                or recovery.get(observation_key(state)) != observation_digest(state)
+                or recovery.get('source') != ('Unique one-edit match to owned city in live memory observation'
+                    if observation_key(state)=='observation_sha256' else
+                    'Unique one-edit match to owned city in original save')
                 or type(recovery.get('source_line')) is not int or recovery['source_line'] < 0):
             raise CityControlError('Recovered city name lacks original OCR/save provenance')
     matches = [city for city in cities if isinstance(city, dict)
@@ -191,11 +197,16 @@ def city_labor_result(action,before,after):
     """Compare native labor facts after one issued click; never assume success."""
     if not isinstance(action,dict) or action.get('kind')!='city_labor':raise CityControlError('A bound labor action is required')
     actor=action['actor'];a=city_labor_projection(before,actor['id']);b=city_labor_projection(after,actor['id'])
+    try:
+        bound=(revision_key(action.get('preconditions'))==observation_key(before)
+               and revision_digest(action['preconditions'])==observation_digest(before))
+    except RevisionError:
+        bound=False
     signature=('id','owner','name','x','y','size')
     if (any(a['city'][k]!=b['city'][k] for k in signature)
             or any(a['city'][k]!=actor[k] for k in ('id','owner','name','x','y'))
             or before['turn']!=after['turn'] or before['year_raw']!=after['year_raw']
-            or action['preconditions']['save_sha256']!=before['evidence']['save_sha256']):
+            or not bound):
         raise CityControlError('Labor checkpoint changed city identity or turn')
     def values(p):return {'worked_tiles_bits':p['worked_tiles_bits'],
         'specialist_count':p['specialists']['count'],
@@ -215,9 +226,11 @@ def city_labor_result(action,before,after):
     expected['specialists']={k:v for k,v in expected['specialists'].items() if v}
     status='observed_expected_change' if new==expected else 'no_observed_change' if new==old else 'unexpected_change'
     return dict(status=status,before=old,expected=expected,after=new,
-        before_save_sha256=before['evidence']['save_sha256'],after_save_sha256=after['evidence']['save_sha256'],
+        **prefixed_revision(before,'before_'),**prefixed_revision(after,'after_'),
         turn=after['turn'],city=deepcopy(b['city']),
-        observation='Actual native save comparison after the labor input; city yields and wider pending decisions are not attributed to this click.')
+        observation=('Actual bound observation comparison after the labor input; city yields and wider pending decisions are not attributed to this click.'
+            if observation_key(before)=='observation_sha256' or observation_key(after)=='observation_sha256' else
+            'Actual native save comparison after the labor input; city yields and wider pending decisions are not attributed to this click.'))
 
 
 def city_control_candidates(state, screen, reviewed=None, rules=None, *, labor_ready=False):
@@ -241,7 +254,10 @@ def city_control_candidates(state, screen, reviewed=None, rules=None, *, labor_r
         observed[label] = (index, button, confidence)
         centers.add(tuple(center))
     actions = {}
+    labor_actions = _labor_candidates(state,screen,actor,binding,reviewed,rules)
     for identifier, (native, label, next_screen) in CONTROLS.items():
+        if identifier=='review_labor' and (labor_ready or not labor_actions):
+            continue
         if identifier in seen or native not in observed:
             continue
         index, button, confidence = observed[native]
@@ -254,7 +270,7 @@ def city_control_candidates(state, screen, reviewed=None, rules=None, *, labor_r
                 expected_screen=next_screen, purchase_authorized=False,
                 confirmation_requires_separate_choice=identifier=='open_buy_quote'))
     if labor_ready:
-        actions.update(_labor_candidates(state,screen,actor,binding,reviewed,rules))
+        actions.update(labor_actions)
     if 'exit_city' not in actions:
         raise CityControlError('A unique observed Exit must remain available')
     return actions
@@ -276,10 +292,13 @@ def city_control_request_for(state, screen, actions=None, reviewed=None, rules=N
         labor_review=labor_allowance(state,actions['exit_city']['actor']['id'],reviewed),
         labor_checkpoint_ready=labor_ready,
         controls={identifier:action['label'] for identifier,action in actions.items()},
-        scope='City statistics come from the bound native save; buttons come from this current original city image. Change only opens production choices. Buy only opens a native quote. Its actual price and purchase confirmation require a new observation and a separate Jev choice. No purchase or price is inferred. Labor choices use the calibrated native Resource Map: remove one worker into an entertainer or assign one entertainer to an observed unworked tile. The city center cannot be changed. Each click requires a new native save comparison before another labor choice; no yield gain is assumed.',
+        scope='City statistics come from the bound native save; buttons come from this current original city image. Change only opens production choices. Buy only opens a native quote. Its actual price and purchase confirmation require a new observation and a separate Jev choice. No purchase or price is inferred. Review labor uses the observed Exit to refresh state and reopen this city; it does not select or execute a labor reassignment. After that review, a separate Jev choice can remove one worker into an entertainer or assign one entertainer to an observed unworked tile using the calibrated native Resource Map. The city center cannot be changed. Each labor click requires a new native save comparison before another labor choice; no yield gain is assumed.',
         review_policy='Omit a control only after its native review finishes for this same city/year. Exit remains available; useful review does not require visiting every control.')
+    if observation_key(state)=='observation_sha256':
+        review=projection['city_control_review']
+        review['scope']=review['scope'].replace('bound native save','bound live memory observation').replace('new native save comparison','new bound live memory comparison')
     return dict(state=projection, questions={
-        'city_action':dict(type='choice', instructions='Choose one actual native control for this owned city. Consider current production, growth, happiness, available treasury and the wider empire. Review production when useful, request a purchase quote only when worth examining, or exit when finished. Consider food, shields, trade and happiness before a labor reassignment; original base tile yields are not actual forecasts. Avoid undoing recent labor choices without a reason. Labor review has an explicit per-city/year input budget; budget omission does not mean the native action is illegal. This answer authorizes only the selected control, never a purchase. empire_strategy is independent advice, not a previous answer or another executable command.',
+        'city_action':dict(type='choice', instructions='Choose one actual native control for this owned city. Consider current production, growth, happiness, available treasury and the wider empire. Review production when useful, request a purchase quote only when worth examining, or exit when finished. Choose Review labor only when considering a useful labor change; it refreshes and reopens the city before a separate choice of the exact reassignment. Consider food, shields, trade and happiness before a labor reassignment; original base tile yields are not actual forecasts. Avoid undoing recent labor choices without a reason. Labor review has an explicit per-city/year input budget; budget omission does not mean the native action is illegal. This answer authorizes only the selected control, never a purchase. empire_strategy is independent advice, not a previous answer or another executable command.',
                            criteria={identifier:action['label'] for identifier,action in actions.items()}),
         'empire_strategy':deepcopy(STRATEGY_QUESTION)})
 

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const test = require('node:test');
 const vm = require('node:vm');
+const {webcrypto,createHash} = require('node:crypto');
 const source = readFileSync(__dirname + '/bridge.js', 'utf8');
 
 async function runtime(extra = {}) {
@@ -14,14 +15,14 @@ async function runtime(extra = {}) {
   function Loader(...args) {this.options=args;}
   for (const name of ['emulatorJS','locateAdditionalEmulatorJS','nativeResolution','fileSystemKey','mountZip','fetchFile','mountFile','extraArgs','startExe'])
     Loader[name] = (...args) => ({[name]:args});
-  const context = {URL,Uint8Array,Date,Promise,setTimeout,clearTimeout,KeyboardEvent:class {
+  const context = {URL,Uint8Array,Date,Promise,setTimeout,clearTimeout,crypto:webcrypto,KeyboardEvent:class {
     constructor(type,props) {this.type=type;Object.assign(this,props);}
   },MouseEvent:class {constructor(type,props) {this.type=type;Object.assign(this,props);}},
     document:{currentScript:{src:'http://127.0.0.1:3920/engine/bridge.js'},querySelector:()=>canvas},
     Module:{pauseMainLoop(){calls.push('pause');},resumeMainLoop(){calls.push('resume');}},
     FS:{readdir(){return [...files.keys()];},stat(path){return {size:files.get(path.split('/').at(-1)).length,mtime:new Date(0)};},
       readFile(path){return files.get(path.split('/').at(-1));},
-      open(path,flags){const name=path.split('/').at(-1);assert.equal(flags,'wx');assert.equal(files.has(name),false);files.set(name,new Uint8Array());return {name};},
+      open(path,flags){const name=path.split('/').at(-1);if(flags==='w')assert.equal(path,'/emulator/c/OBSREQ.TXT');else {assert.equal(flags,'wx');assert.equal(files.has(name),false);}files.set(name,new Uint8Array());return {name};},
       write(stream,bytes,offset,length,position){assert.equal(position,0);files.set(stream.name,new Uint8Array(bytes.subarray(offset,offset+length)));return length;},
       close(stream){calls.push(['close',stream.name]);},unlink(path){files.delete(path.split('/').at(-1));}},
     DosBoxLoader:Loader,
@@ -47,6 +48,45 @@ test('boots once, uses real main-loop functions and captures original canvas', a
   assert.equal(api.capture(),'data:image/png;base64,original');
   canvas.getContext('webgl',{alpha:false});assert.equal(calls.at(-1)[2].preserveDrawingBuffer,true);
   assert.equal(calls.at(-1)[2].alpha,false);
+});
+test('observer mailbox accepts only a fixed nonce and never sends game input',async()=>{
+  const {api,files,events}=await runtime();
+  for(const value of ['../SAVE', 'a'.repeat(31), 'A'.repeat(32), 12, 'a'.repeat(32)+'\n'])
+    assert.throws(()=>api.observerRequest(value),/nonce/);
+  assert.throws(()=>api.observerRequest('a'.repeat(32),'/arbitrary'),/nonce/);
+  const before=api.status().inputSequence;
+  const result=api.observerRequest('a'.repeat(32));
+  assert.equal(result.gameInput,false);assert.equal(result.inputSequence,before);
+  assert.equal(files.get('OBSREQ.TXT').length,128);
+  assert.equal(Buffer.from(files.get('OBSREQ.TXT')).toString(),'C2OBS2 '+'a'.repeat(32)+'\n'+' '.repeat(88));
+  api.observerRequest('b'.repeat(32));
+  assert.equal(files.get('OBSREQ.TXT').length,128);
+  assert.equal(events.length,0);assert.equal(api.status().inputSequence,before);
+  assert.deepEqual([...files.get('TUTORIAL.SAV')],[1,2,3]);
+  files.set('Caesar of Rome 1550 BC.SAV',new Uint8Array([4]));
+  assert.ok(api.listSaves().some(item=>item.name==='Caesar of Rome 1550 BC.SAV'));
+});
+test('observer response must be the complete fixed envelope',async()=>{
+  const {api,files}=await runtime();
+  assert.throws(()=>api.readObserver('/arbitrary'),/paths/);
+  for(const size of [0,524287,524289]) {
+    files.set('OBSRESP.BIN',new Uint8Array(size));
+    assert.throws(()=>api.readObserver(),/size/);
+  }
+  const bytes=Uint8Array.from({length:524288},(_,i)=>i%251);
+  files.set('OBSRESP.BIN',bytes);
+  assert.deepEqual(api.readObserver(),bytes);
+});
+test('observer provenance hashes only the two fixed guest executables',async()=>{
+  const {api,files}=await runtime();
+  files.set('civ2.exe',new Uint8Array([77,90,3]));
+  files.set('CIV2OBS.EXE',new Uint8Array([77,90,4]));
+  const hashes=await api.observerProvenance();
+  assert.equal(hashes.original_exe_sha256,createHash('sha256').update(new Uint8Array([77,90,3])).digest('hex'));
+  assert.equal(hashes.helper_sha256,createHash('sha256').update(new Uint8Array([77,90,4])).digest('hex'));
+  await assert.rejects(api.observerProvenance('/arbitrary'),/paths/);
+  files.set('CIV2.EXE',new Uint8Array([1]));
+  await assert.rejects(api.observerProvenance(),/ambiguous/);
 });
 test('Emterpreter pause survives yield-resume callbacks and drains exactly once',async()=>{
   const timers=[],browser={allowAsyncCallbacks:true,queuedAsyncCallbacks:[],mainLoop:{func:null}};

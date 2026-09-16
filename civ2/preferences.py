@@ -38,32 +38,53 @@ def checkbox_state(observation, label):
     return candidates[0][0]
 
 
+GAME_LABELS = ('Sound Effects','Music','Always wait at end of turn','Autosave each turn',
+               'Show enemy moves','No pause after enemy moves','Fast piece slide',
+               'Instant advice','Tutorial help','Move units w/ mouse (cursor arrows)',
+               'ENTER key closes City Screen')
+
+
 def configure_preferences(ui):
-    """Ordinary display/turn-wait options; no difficulty or game-rule edits."""
+    """Verify turn-wait, advice and autosave preferences through the native UI.
+
+    Autosave is ON in the bundled original default profile. Disabling it here
+    prevents game-created between-turn save files as well as harness saves in a
+    separately configured no-save run. Every other checkbox is read and retained.
+    """
+    key=lambda text:re.sub(r'[^a-z0-9]','',text.casefold())
+    def complete(o):
+        labels=[key(row['text']) for row in o['lines']]
+        return (all(sum(key(name) in text for text in labels)==1 for name in GAME_LABELS)
+                and labels.count('ok')==1 and labels.count('cancel')==1)
     ui.game.rpc('resume')
     before=ui.observe()
     inputs=ui.game.chord('ControlLeft','KeyO',hold_ms=120)
-    observation=ui.wait(lambda o:'always wait at end of turn' in o['text'].casefold()
-                        and 'instant advice' in o['text'].casefold())
+    observation=ui.wait(complete)
     opening=observation['sha256'];changes=[]
-    for label,wanted in (('Always wait at end of turn',True),('Instant advice',False)):
-        prior=checkbox_state(observation,label)
+    prior={label:checkbox_state(observation,label) for label in GAME_LABELS}
+    wanted_states={'Always wait at end of turn':True,'Instant advice':False,'Autosave each turn':False}
+    for label,wanted in wanted_states.items():
         receipt=None
-        if prior!=wanted:
-            # Keep the checkbox visible while clicking its observed label, then
-            # park the arrow before both text and checkmark readback.
-            key=lambda text:re.sub(r'[^a-z0-9]','',text.casefold())
+        if prior[label]!=wanted:
             actual=next(row['text'] for row in observation['lines'] if key(label) in key(row['text']))
             receipt=ui.select_text(observation,actual,exact=True)
-            receipt['pointer_park']=move_cursor(ui.game,620,410)
             observation=ui.observe()
             if checkbox_state(observation,label)!=wanted:
                 raise RuntimeError('Native preference did not reach its requested state')
-        changes.append(dict(label=label,before=prior,after=wanted,receipt=receipt,
+        changes.append(dict(label=label,before=prior[label],after=wanted,receipt=receipt,
                             verified_image=observation['sha256']))
+    if not complete(observation):
+        raise RuntimeError('Native game-options dialog changed during readback')
+    after={label:checkbox_state(observation,label) for label in GAME_LABELS}
+    if any(after[label]!=wanted_states.get(label,prior[label]) for label in GAME_LABELS):
+        raise RuntimeError('Native game preference changed unexpectedly')
+    verified_image=observation['sha256']
     inputs+=ui.key('Enter',settle=1.2)
-    after=ui.observe()
-    return dict(before=before['sha256'],opening=opening,changes=changes,inputs=inputs,after=after['sha256'])
+    closed=ui.observe()
+    return dict(before=before['sha256'],opening=opening,changes=changes,inputs=inputs,after=closed['sha256'],
+        checkbox_before=prior,checkbox_after=after,other_checkboxes_unchanged=True,
+        autosave_disabled=True,verified_image=verified_image,
+        source='Original MENU.TXT Ctrl+O / GAME.TXT @GAMEOPTIONS')
 
 
 GRAPHICS_LABELS = ('Throne Room','Diplomacy Screen','Animated Heralds',

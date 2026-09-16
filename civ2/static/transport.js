@@ -1,7 +1,7 @@
 /* Local-only, fixed-command transport. Model credentials never enter the page. */
 (() => {
   'use strict';
-  const allowed = new Set(['boot','status','pause','resume','key','chord','keyDown','keyUp','mouse','click','releaseInputs','capture','captureDashboard','listSaves','readSave','inputDiagnostics','moveRelative','importSave']);
+  const allowed = new Set(['boot','status','pause','resume','key','chord','keyDown','keyUp','mouse','click','releaseInputs','capture','captureDashboard','listSaves','readSave','inputDiagnostics','moveRelative','importSave','observerRequest','readObserver','observerProvenance']);
   function encode(value) {
     if (value instanceof Uint8Array) {
       let text = '';

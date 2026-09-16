@@ -101,6 +101,9 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         ws = await self.socket()
         for payload in ({'command':'eval','args':['window.secret']},
                         {'command':'importSave','args':['X.SAV',[1]]},
+                        {'command':'observerRequest','args':['../CIV2.EXE']},
+                        {'command':'observerRequest','args':['a'*32,'/path']},
+                        {'command':'readObserver','args':['/path']},
                         {'command':'status','args':{}}, [], {'args':[]}):
             async with self.session.post(self.url('/bridge/rpc'), json=payload) as response:
                 self.assertEqual(response.status, 400)

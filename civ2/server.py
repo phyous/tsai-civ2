@@ -12,7 +12,8 @@ from aiohttp import web
 ROOT = Path(__file__).resolve().parents[1]
 COMMANDS = frozenset(('boot', 'status', 'pause', 'resume', 'key', 'chord', 'keyDown',
     'keyUp', 'mouse', 'click', 'releaseInputs', 'capture', 'captureDashboard',
-    'listSaves', 'readSave', 'inputDiagnostics', 'moveRelative', 'importSave'))
+    'listSaves', 'readSave', 'inputDiagnostics', 'moveRelative', 'importSave',
+    'observerRequest', 'readObserver', 'observerProvenance'))
 
 
 class Runtime:
@@ -29,6 +30,11 @@ class Runtime:
             raise ValueError('Unsupported runtime request')
         if command == 'moveRelative' and (len(args) != 2 or any(type(v) is not int or not -32 <= v <= 32 for v in args) or args == [0,0]):
             raise ValueError('Bounded relative mouse deltas required')
+        if command == 'observerRequest' and (len(args) != 1 or not isinstance(args[0],str)
+                or not re.fullmatch(r'[a-f0-9]{32}',args[0])):
+            raise ValueError('A fixed observer nonce is required')
+        if command in ('readObserver','observerProvenance') and args:
+            raise ValueError('Observer reads accept no paths or addresses')
         if command == 'importSave':
             if (len(args) != 2 or not isinstance(args[0],str) or not re.fullmatch(r'[A-Za-z0-9_]{1,8}\.sav',args[0],re.I)
                 or not isinstance(args[1],dict) or args[1].get('encoding') != 'base64'

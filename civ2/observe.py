@@ -9,6 +9,9 @@ import subprocess
 import tempfile
 from PIL import Image
 from .ocr_worker import run_ocr
+from .map_badges import annotate_badges
+from .tax_controls import annotate_tax_controls
+from .notice_icons import annotate_notice_icons
 
 ROOT = Path(__file__).resolve().parents[1]
 SHORT_CONTROLS = {text.casefold(): text for text in
@@ -130,8 +133,10 @@ def _status_recovery_needed(rows, width, height):
 def _status_near_match(text, phrase):
     compact = re.sub(r'[^a-z]', '', text.casefold())
     expected = re.sub(r'[^a-z]', '', phrase.casefold())
-    prefix, limit = ('end', 3) if phrase == STATUS_PHRASES[0] else ('press', 4)
-    return compact.startswith(prefix) and _near_text(compact, expected, limit)
+    limit = 3 if phrase == STATUS_PHRASES[0] else 4
+    # The separately read pair is exact; this only identifies the overlapping
+    # old row. A damaged first glyph (e.g. Bnd) must not discard actual pixels.
+    return _near_text(compact, expected, limit)
 
 
 def _recover_status(rows, raw, conflicts):
@@ -157,7 +162,16 @@ def _recover_status(rows, raw, conflicts):
         return
     replacements = []
     for candidate, phrase in zip(candidates, STATUS_PHRASES):
-        overlaps = [index for index, row in enumerate(rows) if _overlap(row, candidate)]
+        other_phrase=STATUS_PHRASES[1] if phrase==STATUS_PHRASES[0] else STATUS_PHRASES[0]
+        def neighboring_line_edge(row):
+            _,y,_,h=row['bounds'];_,cy,_,ch=candidate['bounds']
+            return (_in_status_crop(row) and _status_near_match(row['text'],other_phrase)
+                    and min(y+h,cy+ch)-max(y,cy)<=2
+                    and abs(row['center'][1]-candidate['center'][1])>=8)
+        # Native12px text boxes can overlap their adjacent line by one pixel.
+        # Exclude only that bounded edge of the separately corroborated pair.
+        overlaps = [index for index, row in enumerate(rows)
+                    if _overlap(row, candidate) and not neighboring_line_edge(row)]
         nearby = [index for index, row in enumerate(rows) if _in_status_crop(row) and _status_near_match(row['text'], phrase)]
         if not overlaps and not nearby:
             replacements.append((None, candidate))
@@ -177,12 +191,13 @@ def _recover_status(rows, raw, conflicts):
             rows[index] = candidate
 
 
-def _crop_text(image, row, name, executable, directory, evidence, *, white=False, padding=(6,3), grayscale=False, white_threshold=None):
+def _crop_text(image, row, name, executable, directory, evidence, *, white=False, padding=(6,3), grayscale=False, white_threshold=None, scale=None):
     """Read actual row pixels again; preserve source coordinates and provenance."""
     x,y,w,h=row['bounds']
     px,py=padding
     box=(max(0,x-px),max(0,y-py),min(image.width,x+w+px),min(image.height,y+h+py))
-    crop=image.crop(box);scale=4 if white else 3
+    crop=image.crop(box);scale=(4 if white else 3) if scale is None else scale
+    if type(scale) is not int or scale not in (2,3,4):raise ValueError('Unsupported bounded OCR scale')
     if white:crop=crop.point(lambda v:0 if v>=230 else 255).convert('L')
     elif white_threshold is not None:
         rgb=crop.convert('RGB');crop=Image.new('L',rgb.size)
@@ -265,6 +280,294 @@ def _recover_city_section_labels(image,rows,executable,directory,evidence):
                 rows[index]['provenance']+=second[0]['provenance']
 
 
+def _recover_governance_labels(image,rows,executable,directory,evidence):
+    """Read damaged government headings/council prose from the same pixels."""
+    if image.size!=(640,480):return
+    if not any(r['text'].strip().casefold()=='ok' for r in rows):return
+    for index,row in enumerate(rows):
+        text=row['text'].strip()
+        government=(80<=row['center'][1]<=350 and row['confidence']>=.8
+                    and _near_text(text.casefold(),'select type of government',5))
+        council=(row['confidence']>=.8 and text.startswith('The High Council of ')
+                 and len(text)<120 and row['bounds'][2]<400)
+        if not government and not council:continue
+        if government and text=='Select Type of Government':continue
+        if council and ' is meeting in' in text:continue
+        first=_crop_text(image,row,f'governance_{index}_3x',executable,directory,evidence,padding=(6,6))
+        second=_crop_text(image,row,f'governance_{index}_gray_3x',executable,directory,evidence,padding=(6,6),grayscale=True)
+        if (len(first)!=1 or len(second)!=1 or first[0]['text']!=second[0]['text']
+                or second[0]['confidence']<.8 or not _same_location(row,second[0])):continue
+        new=first[0]['text']
+        valid=(new=='Select Type of Government' if government else
+               new.startswith('The High Council of ') and ' is meeting in' in new and _near_text(text,new,2))
+        if valid and _replace_crop_row(rows,index,first,lambda old,new:True):
+            rows[index]['provenance']+=second[0]['provenance']
+
+
+def _recover_tax_context(image,rows,executable,directory,evidence):
+    if image.size!=(640,480):return
+    # Vision can split a single row at the colon (original 50% tax display).
+    # Join only the two actual, adjacent high-confidence readings; retain both
+    # original row provenances and never manufacture a numeric value.
+    for label in list(rows):
+        if (label['text'] not in ('Taxes:','Science:','Luxuries:') or label['confidence']<.8
+                or not 220<=label['bounds'][0]<=300 or not 220<=label['center'][1]<=330):continue
+        x,y,w,h=label['bounds']
+        values=[r for r in rows if r is not label and r['confidence']>=.8
+                and re.fullmatch(r'(?:100|[0-9]{1,2})%',r['text'])
+                and -3<=r['bounds'][0]-(x+w)<=12 and abs(r['center'][1]-label['center'][1])<=3]
+        if len(values)!=1:continue
+        value=values[0];vx,vy,vw,vh=value['bounds'];top=min(y,vy);bottom=max(y+h,vy+vh)
+        if bottom-top>22:continue
+        joined=dict(label,text=label['text']+' '+value['text'],bounds=[x,top,vx+vw-x,bottom-top],
+                    center=[round((x+vx+vw)/2),round((top+bottom)/2)],
+                    confidence=min(label['confidence'],value['confidence']),
+                    provenance=label['provenance']+value['provenance'],
+                    tax_label_parts=[{'text':r['text'],'bounds':r['bounds']} for r in (label,value)])
+        rows[rows.index(label)]=joined;rows.remove(value)
+    if not all(any(re.fullmatch(name+r':\s*\d{1,3}%',r['text']) for r in rows)
+               for name in ('Taxes','Science','Luxuries')):return
+    for index,row in enumerate(rows):
+        text=row['text']
+        if not (110<=row['center'][1]<=165 and row['confidence']>=.8
+                and 'Maximum Rate:' in text and '%' in text):continue
+        first=_crop_text(image,row,'tax_government_3x',executable,directory,evidence,padding=(6,6))
+        second=_crop_text(image,row,'tax_government_gray_3x',executable,directory,evidence,padding=(6,6),grayscale=True)
+        if (len(first)!=1 or len(second)!=1 or first[0]['text']!=second[0]['text']
+                or second[0]['confidence']<.8 or not _same_location(row,second[0])):continue
+        if not re.fullmatch(r'Government: (?:Anarchy|Despotism|Monarchy|Communism|Fundamentalism|Republic|Democracy) Maximum Rate: \d{1,3}%',first[0]['text']):continue
+        if _replace_crop_row(rows,index,first,lambda old,new:_near_text(old,new,3)):
+            rows[index]['provenance']+=second[0]['provenance']
+
+
+def _recover_locator_names(image,rows,executable,directory,evidence):
+    if image.size!=(640,480):return
+    if not any(re.match(r'Where in the (?:heck|beck) is',r['text']) for r in rows):return
+    controls={r['text'].casefold() for r in rows if r['center'][1]>370}
+    if not {'zoom to city','ok','cancel'}<=controls:return
+    for index,row in enumerate(rows):
+        if (not 135<=row['bounds'][0]<=160 or not 100<=row['bounds'][1]<=350
+                or row['confidence']<.8 or not re.fullmatch('[A-Za-z ]{3,40}',row['text'])):continue
+        first=_crop_text(image,row,f'locator_name_{index}_3x',executable,directory,evidence,padding=(3,3))
+        second=_crop_text(image,row,f'locator_name_{index}_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
+        if (len(first)!=1 or len(second)!=1 or first[0]['text']!=second[0]['text']
+                or second[0]['confidence']<.8 or not _same_location(row,second[0])
+                or not re.fullmatch('[A-Za-z ]{3,40}',first[0]['text'])):continue
+        if first[0]['text']!=row['text'] and _replace_crop_row(rows,index,first,lambda old,new:_near_text(old,new,1)):
+            rows[index]['provenance']+=second[0]['provenance']
+
+
+def _recover_domestic_title(image,rows,executable,directory,evidence):
+    if image.size!=(640,480):return
+    if not any(r['text'].casefold()=='ok' for r in rows):return
+    for index,row in enumerate(rows):
+        if (not 100<=row['center'][1]<=320 or not 260<=row['center'][0]<=380
+                or row['confidence']<.8 or row['text']=='Domestic Advisor'
+                or not _near_text(row['text'].casefold(),'domestic advisor',2)):continue
+        first=_crop_text(image,row,'domestic_title_3x',executable,directory,evidence,padding=(3,3))
+        second=_crop_text(image,row,'domestic_title_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
+        if (len(first)!=1 or len(second)!=1 or first[0]['text']!=second[0]['text']
+                or second[0]['confidence']<.8 or not _same_location(row,second[0])):continue
+        if first[0]['text']=='Domestic Advisor' and _replace_crop_row(rows,index,first,lambda old,new:True):
+            rows[index]['provenance']+=second[0]['provenance']
+
+
+def _recover_saved_caption(image,rows,executable,directory,evidence):
+    """Read the original save acknowledgement's heading; never acknowledge it."""
+    if image.size!=(640,480):return
+    if (not any('of the romans' in r['text'].casefold() for r in rows)
+            or len([r for r in rows if r['text'].strip().casefold()=='ok'])!=1):return
+    for index,row in enumerate(rows):
+        old=row['text'].casefold().strip(' .!')
+        if (not 170<=row['center'][1]<=240 or not 260<=row['center'][0]<=380
+                or not _near_text(old,'game saved',2) or old.startswith('game sa')):continue
+        first=_crop_text(image,row,'saved_caption_3x',executable,directory,evidence,padding=(3,3))
+        second=_crop_text(image,row,'saved_caption_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
+        if len(first)!=1 or len(second)!=1 or first[0]['text']!=second[0]['text']:continue
+        fresh=first[0]['text'].casefold().strip(' .!')
+        if (fresh.startswith('game sa') and _near_text(fresh,'game saved',2)
+                and second[0]['confidence']>=.8 and _same_location(row,second[0])):
+            if _replace_crop_row(rows,index,first,lambda old,new:True):
+                rows[index]['provenance']+=second[0]['provenance']
+
+
+def _recover_revolution_title(image,rows,executable,directory,evidence):
+    """Read the original title from two crops after its complete form is seen."""
+    if image.size!=(640,480):return
+    first=[r for r in rows if r['text'].strip().casefold()=='do we want a revolution to']
+    second=[r for r in rows if re.fullmatch(r'overthrow the [a-z ]+\?',r['text'].strip(),re.I)]
+    yesno=[r for r in rows if re.fullmatch(r'(?:[O0•○●]\s+)?(?:Yes|No)',r['text'].strip(),re.I)]
+    okay=[r for r in rows if r['text'].strip()=='OK']
+    if len(first)!=1 or len(second)!=1 or len(yesno)!=2 or len(okay)!=1:return
+    if {re.sub(r'^[O0•○●]\s+','',r['text'].strip()).casefold() for r in yesno}!={'yes','no'}:return
+    a,b=first[0],second[0];ok=okay[0]
+    if (not 12<=b['center'][1]-a['center'][1]<=28
+            or any(r['confidence']<.8 or not b['center'][1]<r['center'][1]<ok['center'][1] for r in yesno)
+            or any(r['confidence']<.8 for r in (a,b,ok))):return
+    headings=[(i,r) for i,r in enumerate(rows) if re.fullmatch('[A-Za-z]{5,16}',r['text'])
+              and 16<=a['center'][1]-r['center'][1]<=40
+              and abs(r['center'][0]-ok['center'][0])<=8]
+    if len(headings)!=1 or headings[0][1]['text']=='Revolution':return
+    index,title=headings[0]
+    rgb=_crop_text(image,title,'revolution_title_3x',executable,directory,evidence)
+    gray=_crop_text(image,title,'revolution_title_gray_3x',executable,directory,evidence,grayscale=True)
+    if (len(rgb)!=1 or len(gray)!=1 or rgb[0]['text']!=gray[0]['text']
+            or not _near_text(rgb[0]['text'].casefold(),'revolution',2)
+            or gray[0]['confidence']<.8 or not _same_location(title,gray[0])):return
+    if _replace_crop_row(rows,index,rgb,lambda old,new:True):
+        rows[index]['provenance']+=gray[0]['provenance']
+
+
+def _recover_exchange_body(image,rows,executable,directory,evidence):
+    """Two independent pixel reads of an observed herald trade's prose.
+
+    Options are not synthesized or changed here. The source classifier must
+    subsequently match the complete GAME body and each visible alternative.
+    """
+    if image.size!=(640,480):return
+    titles=[r for r in rows if 200<=r['bounds'][1]<=350 and 457<=r['center'][0]<=481
+            and r['confidence']>=.8 and r['text'].casefold().endswith(' emissary')]
+    options=[r for r in rows if 330<=r['bounds'][0]<=350
+             and r['text'].casefold().startswith(('"no. we do not need','"okay, let','"will you accept'))]
+    if len(titles)!=1 or len(options) not in (2,3):return
+    title=titles[0];first_option=min(r['bounds'][1] for r in options)
+    body=[r for r in rows if r['bounds'][0]>=300 and title['center'][1]<r['center'][1]
+          and r['bounds'][1]+r['bounds'][3]<=first_option]
+    body.sort(key=lambda r:r['center'][1])
+    if (not 3<=len(body)<=6 or not body[0]['text'].casefold().startswith('"we note that your primitive civilization')
+            or not body[-1]['text'].casefold().endswith('exchange knowledge with us?"')):return
+    box=(max(0,min(r['bounds'][0] for r in body)-6),max(0,body[0]['bounds'][1]-4),
+         min(640,max(r['bounds'][0]+r['bounds'][2] for r in body)+8),
+         min(first_option,body[-1]['bounds'][1]+body[-1]['bounds'][3]+6))
+    readings=[]
+    for gray in (False,True):
+        name='exchange_body_gray_3x' if gray else 'exchange_body_3x'
+        crop=image.crop(box)
+        if gray:crop=crop.convert('L')
+        target=Path(directory)/(name+'.png')
+        crop.resize((crop.width*3,crop.height*3),Image.Resampling.BICUBIC).save(target)
+        evidence['passes'].append(name)
+        raw=_prepare_rows(_run_ocr(executable,target),crop.width,crop.height,name)
+        mapped=[]
+        for local in raw:
+            x,y,w,h=local['provenance'][0]['normalized_bounds']
+            row=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
+                x=(box[0]+x*crop.width)/640,y=(box[1]+y*crop.height)/480,
+                width=w*crop.width/640,height=h*crop.height/480)],640,480,name)[0]
+            row['provenance'][0].update(crop=list(box),scale=3,normalized_crop_bounds=[x,y,w,h],
+                transform=('grayscale; ' if gray else '')+'bicubic enlargement')
+            mapped.append(row)
+        readings.append(sorted(mapped,key=lambda r:r['center'][1]))
+    first,second=readings
+    if len(first)!=len(second) or len(first)!=len(body):return
+    if any(a['text']!=b['text'] or min(a['confidence'],b['confidence'])<.8
+           or not _same_location(a,b) or not _same_location(old,a)
+           for old,a,b in zip(body,first,second)):return
+    for old,a,b in zip(body,first,second):
+        a['provenance']=old['provenance']+a['provenance']+b['provenance']
+        rows[rows.index(old)]=a
+
+
+def _recover_government_offer(image,rows,executable,directory,evidence):
+    """Recover the actual AUTOREV prose and two radio choices, not answers."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if r['confidence']>=.8 and 100<=r['center'][1]<=220
+            and _near_text(r['text'].casefold(),'civ rules: governments',4)]
+    choices=[r for r in rows if r['confidence']>=.8 and 180<=r['bounds'][0]<=230
+             and 240<=r['center'][1]<=350
+             and (re.match(r'^[•○●o)]*\s*No,',r['text']) or 'Begin revolution.' in r['text'])]
+    if len(titles)!=1 or len(choices)!=2:return
+    body=[r for r in rows if 170<=r['bounds'][0]<300 and titles[0]['center'][1]<r['center'][1]<min(c['bounds'][1] for c in choices)]
+    body.sort(key=lambda r:r['center'][1]);choices.sort(key=lambda r:r['center'][1])
+    if not 3<=len(body)<=7 or not body[0]['text'].startswith('You have just acquired knowledge'):return
+    left=sorted(r['bounds'][0] for r in body)[len(body)//2]-2
+    right=max(r['bounds'][0]+r['bounds'][2] for r in body)+6
+    groups=[(body,(left,body[0]['bounds'][1]-4,right,min(c['bounds'][1] for c in choices)-4),'body'),
+            (choices,(min(c['bounds'][0] for c in choices)-6,choices[0]['bounds'][1]-5,right+1,
+                      choices[-1]['bounds'][1]+choices[-1]['bounds'][3]+5),'choices')]
+    for old_rows,box,part in groups:
+        readings=[]
+        for gray in (False,True):
+            name=f'government_offer_{part}'+('_gray_3x' if gray else '_3x')
+            crop=image.crop(box)
+            if gray:crop=crop.convert('L')
+            target=Path(directory)/(name+'.png');crop.resize((crop.width*3,crop.height*3),Image.Resampling.BICUBIC).save(target)
+            evidence['passes'].append(name)
+            raw=_prepare_rows(_run_ocr(executable,target),crop.width,crop.height,name);mapped=[]
+            for local in raw:
+                x,y,w,h=local['provenance'][0]['normalized_bounds']
+                r=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
+                    x=(box[0]+x*crop.width)/640,y=(box[1]+y*crop.height)/480,
+                    width=w*crop.width/640,height=h*crop.height/480)],640,480,name)[0]
+                r['provenance'][0].update(crop=list(box),scale=3,normalized_crop_bounds=[x,y,w,h],
+                    transform=('grayscale; ' if gray else '')+'bicubic enlargement')
+                mapped.append(r)
+            readings.append(sorted(mapped,key=lambda r:r['center'][1]))
+        first,second=readings
+        if len(first)!=len(second) or len(first)!=len(old_rows):continue
+        if any(a['text']!=b['text'] or min(a['confidence'],b['confidence'])<.8 or not _same_location(a,b)
+               or abs(old['center'][1]-a['center'][1])>4 or a['bounds'][0]<old['bounds'][0]-4
+               or a['bounds'][0]+a['bounds'][2]>old['bounds'][0]+old['bounds'][2]+6
+               for old,a,b in zip(old_rows,first,second)):continue
+        for old,a,b in zip(old_rows,first,second):
+            a['provenance']=old['provenance']+a['provenance']+b['provenance'];rows[rows.index(old)]=a
+
+
+def _recover_herald_panel(image,rows,executable,directory,evidence):
+    """Read the original fullscreen herald panel; never authorize its dismissal.
+
+    Two panel reads must agree. Its button additionally needs two ASCII OK
+    reads from observed pixel bounds. The classifier still verifies GAME.TXT.
+    """
+    if image.size!=(640,480):return
+    headings=[r for r in rows if 350<=r['bounds'][1]<=420 and 457<=r['center'][0]<=481
+              and r['confidence']>=.5 and r['text'].split()
+              and _near_text(r['text'].split()[-1].casefold(),'emissary',2)]
+    if len(headings)!=1:return
+    box=(298,max(0,headings[0]['bounds'][1]-8),640,480)
+    if box[3]-box[1]>140:return
+    readings=[]
+    for gray in (False,True):
+        name='herald_panel_gray_3x' if gray else 'herald_panel_3x'
+        crop=image.crop(box)
+        if gray:crop=crop.convert('L')
+        target=Path(directory)/(name+'.png')
+        crop.resize((crop.width*3,crop.height*3),Image.Resampling.BICUBIC).save(target)
+        evidence['passes'].append(name)
+        raw=_prepare_rows(_run_ocr(executable,target),crop.width,crop.height,name)
+        mapped=[]
+        for local in raw:
+            x,y,w,h=local['provenance'][0]['normalized_bounds']
+            row=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
+                x=(box[0]+x*crop.width)/640,y=(box[1]+y*crop.height)/480,
+                width=w*crop.width/640,height=h*crop.height/480)],640,480,name)[0]
+            row['provenance'][0].update(crop=list(box),scale=3,normalized_crop_bounds=[x,y,w,h],
+                transform=('grayscale; ' if gray else '')+'bicubic enlargement')
+            mapped.append(row)
+        readings.append(sorted(mapped,key=lambda r:r['center'][1]))
+    first,second=readings
+    if not 3<=len(first)==len(second)<=8:return
+    if any(a['text']!=b['text'] or not _same_location(a,b) for a,b in zip(first,second)):return
+    if not first[0]['text'].casefold().endswith(' emissary'):return
+    if any(r['confidence']<.8 for group in readings for r in group[:-1]):return
+    if not all(_ok_lookalike(group[-1]['text']) and group[-1]['center'][1]>440 for group in readings):return
+    buttons=[]
+    for gray in (False,True):
+        name='herald_ok_gray_3x' if gray else 'herald_ok_3x'
+        candidates=_crop_text(image,first[-1],name,executable,directory,evidence,padding=(2,5),grayscale=gray)
+        if (len(candidates)!=1 or candidates[0]['text']!='OK' or candidates[0]['confidence']<.8
+                or not _same_location(first[-1],candidates[0])):return
+        buttons.append(candidates[0])
+    replacements=[]
+    for a,b in zip(first[:-1],second[:-1]):
+        prior=[r for r in rows if _same_location(r,a)]
+        a['provenance']=[p for r in prior for p in r['provenance']]+a['provenance']+b['provenance']
+        replacements.append(a)
+    button=buttons[0];button['provenance']=first[-1]['provenance']+second[-1]['provenance']+button['provenance']+buttons[1]['provenance']
+    replacements.append(button)
+    rows[:]=[r for r in rows if not (r['bounds'][0]>=box[0] and r['bounds'][1]>=box[1])]+replacements
+
+
 def _recover_city_and_production_rows(image, rows, executable, directory, evidence):
     """Narrow native city/list layouts; no rules names or dates are invented."""
     if image.size!=(640,480):return
@@ -277,7 +580,24 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
                 return bool(fresh and new.casefold().startswith('city of ') and previous[1].casefold()==fresh[1].casefold()
                     and _near_text(previous[2],fresh[2],1)
                     and re.sub(r'[^a-z]','',previous[3].casefold())==re.sub(r'[^a-z]','',fresh[3].casefold()))
-            _replace_crop_row(rows,index,_crop_text(image,row,'city_caption_3x',executable,directory,evidence),same_caption)
+            readings=[]
+            for scale,padding in ((2,(3,3)),(3,(6,6)),(4,(6,6))):
+                first=_crop_text(image,row,f'city_caption_{scale}x',executable,directory,evidence,padding=padding,scale=scale)
+                second=_crop_text(image,row,f'city_caption_gray_{scale}x',executable,directory,evidence,padding=padding,scale=scale,grayscale=True)
+                if len(first)!=1 or len(second)!=1:continue
+                a,b=first[0],second[0];ma,mb=re.match(caption,a['text'],re.I),re.match(caption,b['text'],re.I)
+                identity=lambda m:(m[1].casefold(),m[2],re.sub('[^a-z]','',m[3].casefold()))
+                if (not ma or not mb or identity(ma)!=identity(mb) or min(a['confidence'],b['confidence'])<.8
+                        or not _same_location(row,a) or not _same_location(row,b)
+                        or not same_caption(row['text'],a['text']) or not same_caption(row['text'],b['text'])):continue
+                readings.append((identity(ma),a,b))
+                agrees=[v for v in readings if v[0]==identity(ma)]
+                if len(agrees)>=2:
+                    selected=agrees[0][1]
+                    selected['provenance']=[p for _,aa,bb in readings for r in (aa,bb) for p in r['provenance']]
+                    if _replace_crop_row(rows,index,[selected],same_caption):
+                        rows[index]['caption_identity_consensus']={'independent_scales':len(agrees),'year_text':ma[2]}
+                    break
     titles=[r for r in rows if re.match(r'^what shall (?:we|me) [a-z]{3,7} in .+',r['text'],re.I)
             and r['confidence']>=.8 and 70<r['center'][1]<350]
     if len(titles)!=1:return
@@ -293,16 +613,17 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
     heading=lambda text:re.fullmatch(r'what shall (?:we|me) ([a-z]{3,7}) in (.{1,60})',text.strip().rstrip('?'),re.I)
     old_heading=heading(title['text'])
     if old_heading and not _near_text(old_heading[1].casefold(),'build',2):
-        first=_crop_text(image,title,'production_title_3x',executable,directory,evidence,padding=(6,6))
-        second=_crop_text(image,title,'production_title_gray_3x',executable,directory,evidence,padding=(6,6),grayscale=True)
-        if len(first)==len(second)==1 and first[0]['text']==second[0]['text']:
-            fresh=heading(first[0]['text'])
-            if (fresh and fresh[2].casefold()==old_heading[2].casefold()
-                    and _near_text(fresh[1].casefold(),'build',2)
-                    and second[0]['confidence']>=.8 and _same_location(title,second[0])):
-                index=rows.index(title)
-                if _replace_crop_row(rows,index,first,lambda old,new:True):
-                    rows[index]['provenance']+=second[0]['provenance'];title=rows[index]
+        for scale,padding in ((3,(6,6)),(2,(6,6))):
+            first=_crop_text(image,title,f'production_title_{scale}x',executable,directory,evidence,padding=padding,scale=scale)
+            second=_crop_text(image,title,f'production_title_gray_{scale}x',executable,directory,evidence,padding=padding,grayscale=True,scale=scale)
+            if len(first)==len(second)==1 and first[0]['text']==second[0]['text']:
+                fresh=heading(first[0]['text'])
+                if (fresh and fresh[2].casefold()==old_heading[2].casefold()
+                        and _near_text(fresh[1].casefold(),'build',2)
+                        and second[0]['confidence']>=.8 and _same_location(title,second[0])):
+                    index=rows.index(title)
+                    if _replace_crop_row(rows,index,first,lambda old,new:True):
+                        rows[index]['provenance']+=second[0]['provenance'];title=rows[index];break
     vocabulary=_production_names()
     for index,row in enumerate(rows):
         if not (title['center'][1]+8<row['center'][1]<bottom-8
@@ -318,8 +639,15 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
             pixels=list(crop.getdata())
             if not pixels or sum(min(p)>=230 for p in pixels)/len(pixels)<.08:continue
             candidates=_crop_text(image,row,f'production_name_{index}_white_4x',executable,directory,evidence,white=True)
-            _replace_crop_row(rows,index,candidates,lambda old,new:new.casefold() in vocabulary
+            accepted=_replace_crop_row(rows,index,candidates,lambda old,new:new.casefold() in vocabulary
                               and _near_text(old.casefold(),new.casefold(),2))
+            if not accepted:
+                first=_crop_text(image,row,f'production_name_{index}_2x',executable,directory,evidence,padding=(3,3),scale=2)
+                second=_crop_text(image,row,f'production_name_{index}_gray_2x',executable,directory,evidence,padding=(3,3),grayscale=True,scale=2)
+                if (len(first)==len(second)==1 and first[0]['text']==second[0]['text']
+                        and second[0]['confidence']>=.8 and _same_location(row,second[0])
+                        and _replace_crop_row(rows,index,first,lambda old,new:new.casefold() in vocabulary and _near_text(old.casefold(),new.casefold(),2))):
+                    rows[index]['provenance']+=second[0]['provenance']
         elif row['center'][0]>title['center'][0] and re.match(r'^\(?\d',text):
             if _stat_reading(text)==text:continue
             for padding in ((3,3),(6,6)):
@@ -337,34 +665,56 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
 
 
 def _recover_map_labels(image,rows,executable,directory,evidence):
-    """Two pixel reads must agree; owned-city validation stays in the classifier."""
+    """Agreeing reads of one pixel region; city identity stays in the classifier.
+
+    White-letter masks suppress colored map art. A second threshold or wider
+    crop must independently agree before that reading replaces native OCR.
+    """
     if image.size!=(640,480):return
     menu={r['text'].casefold() for r in rows if r['bounds'][1]<35 and r['confidence']>=.8}
     if not {'game','kingdom','view','orders'}<=menu:return
     if any(r['text'].strip().casefold() in ('ok','cancel','yes','no','help') and r['center'][1]>40 for r in rows):return
     for index,row in enumerate(rows):
         x,y,w,h=row['bounds']
-        if not (8<=x and x+w<=456 and 70<=y and y+h<=440 and 10<=h<=20 and 16<=w<=160
-                and row['confidence']>=.8 and re.fullmatch(r'[A-Za-z]{3,25}',row['text'])):continue
-        first=_crop_text(image,row,f'map_label_{index}_3x',executable,directory,evidence,padding=(3,3))
-        second=_crop_text(image,row,f'map_label_{index}_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
-        for reading in first+second:
-            if (reading['confidence']>=.8 and _same_location(row,reading)
-                    and re.fullmatch(r'[A-Za-z]{3,25}',reading['text'])
-                    and _near_text(row['text'].casefold(),reading['text'].casefold(),2)):
-                row['provenance']+=reading['provenance']
-        if len(first)!=1 or len(second)!=1:continue
-        a,b=first[0],second[0]
-        if a['text']!=b['text']:
-            masked=_crop_text(image,row,f'map_label_{index}_white_3x',executable,directory,evidence,padding=(3,3),white_threshold=190)
-            if len(masked)!=1:continue
-            b=masked[0]
-            if (b['confidence']>=.8 and _same_location(row,b) and re.fullmatch(r'[A-Za-z]{3,25}',b['text'])
-                    and _near_text(row['text'].casefold(),b['text'].casefold(),2)):row['provenance']+=b['provenance']
-        if a['text']!=b['text'] or b['confidence']<.8 or not _same_location(row,b):continue
-        if _replace_crop_row(rows,index,first,lambda old,new:bool(re.fullmatch(r'[A-Za-z]{3,25}',new))
-                             and _near_text(old.casefold(),new.casefold(),2)):
-            rows[index]['provenance']+=b['provenance']
+        # At most two trailing non-letter picture glyphs may share the native
+        # box. They are not stripped or interpreted; new text needs pixel proof.
+        if not (8<=x and x+w<=456 and 70<=y and y+h<=440 and 10<=h<=24 and 16<=w<=160
+                and row['confidence']>=.5 and re.fullmatch(r'[A-Za-z]{3,25}[^\w\s]{0,2}',row['text'])):continue
+        def credible(candidate):
+            return (candidate['confidence']>=.8 and _same_location(row,candidate)
+                    and re.fullmatch(r'[A-Za-z]{3,25}',candidate['text'])
+                    and _near_text(row['text'].casefold(),candidate['text'].casefold(),2))
+        def read(suffix,**kwargs):
+            try:
+                result=_crop_text(image,row,f'map_label_{index}{suffix}_3x',executable,directory,evidence,**kwargs)
+            except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
+                evidence.setdefault('fallback_errors',[]).append(dict(pass_name=f'map_label_{index}{suffix}_3x',
+                                                                      error=type(error).__name__))
+                return None
+            for candidate in result:
+                if credible(candidate):row['provenance']+=candidate['provenance']
+            return result[0] if len(result)==1 and credible(result[0]) else None
+        def agree(first,second):
+            return first is not None and second is not None and first['text']==second['text']
+        a=read('',padding=(3,3));b=read('_gray',padding=(3,3),grayscale=True)
+        pair=(a,b) if agree(a,b) else None
+        if pair is None and row['confidence']<.8:
+            peer=read('_wide_gray',padding=(6,6),grayscale=True)
+            if agree(a,peer):pair=(a,peer)
+        if pair is None:
+            whites=[]
+            for suffix,padding,threshold in (('_white',(3,3),190),('_white_low',(3,3),160),('_white_wide',(6,6),190)):
+                candidate=read(suffix,padding=padding,white_threshold=threshold)
+                if candidate is None:continue
+                peers=[old for old in [a,b,*whites] if agree(old,candidate)]
+                if peers:
+                    pair=(peers[0],candidate);break
+                whites.append(candidate)
+        if pair is not None:
+            first,second=pair
+            if _replace_crop_row(rows,index,[first],lambda old,new:bool(re.fullmatch(r'[A-Za-z]{3,25}',new))
+                                 and _near_text(old.casefold(),new.casefold(),2)):
+                rows[index]['provenance']+=second['provenance']
 
 
 def _recover_moving_status(image,rows,executable,directory,evidence):
@@ -378,10 +728,13 @@ def _recover_moving_status(image,rows,executable,directory,evidence):
     if row['text'].casefold()=='moving units':return
     first=_crop_text(image,row,'moving_status_3x',executable,directory,evidence,padding=(3,3))
     second=_crop_text(image,row,'moving_status_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
-    if len(first)!=1 or len(second)!=1:return
-    a,b=first[0],second[0]
-    if a['text']!='Moving Units' or b['text']!='Moving Units' or b['confidence']<.8 or not _same_location(row,b):return
-    if _replace_crop_row(rows,index,first,lambda old,new:True):rows[index]['provenance']+=b['provenance']
+    valid=lambda a,b:(len(a)==len(b)==1 and a[0]['text']==b[0]['text']=='Moving Units'
+                      and b[0]['confidence']>=.8 and _same_location(row,b[0]))
+    if not valid(first,second):
+        first=_crop_text(image,row,'moving_status_white190_3x',executable,directory,evidence,padding=(3,3),white_threshold=190)
+        second=_crop_text(image,row,'moving_status_white230_3x',executable,directory,evidence,padding=(3,3),white_threshold=230)
+    if valid(first,second) and _replace_crop_row(rows,index,first,lambda old,new:True):
+        rows[index]['provenance']+=second[0]['provenance']
 
 
 def _recover_completion_zoom(image,rows,executable,directory,evidence):
@@ -404,7 +757,7 @@ def _recover_completion_zoom(image,rows,executable,directory,evidence):
 
 
 def _map_patch_colors(image, rows, source_hash):
-    """Retain original-pixel evidence for tiny, uncertain city-art OCR.
+    """Retain original-pixel evidence for tiny city-art OCR, at any confidence.
 
     Color cannot identify a city or authorize an input. The classifier still
     requires a known city label, exact map layout, geometry and no controls.
@@ -413,7 +766,7 @@ def _map_patch_colors(image, rows, source_hash):
     if image.size!=(640,480):return
     for row in rows:
         x,y,w,h=row['bounds']
-        if not (row['confidence']<.5 and 8<=x and x+w<=456 and 70<=y and y+h<=440
+        if not (8<=x and x+w<=456 and 70<=y and y+h<=440
                 and 1<=w<=96 and 1<=h<=40):continue
         pixels=list(image.crop((x,y,x+w,y+h)).convert('RGB').getdata())
         row['map_patch_colors']={'source_sha256':source_hash,'bounds':list(row['bounds']),
@@ -473,13 +826,16 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_city_and_production_rows,_recover_city_section_labels,
-                            _recover_map_labels,_recover_moving_status,_recover_completion_zoom):
+            for recover in (_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolution_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+                            _recover_saved_caption,_recover_herald_panel,_recover_exchange_body,_recover_government_offer,_recover_map_labels,_recover_moving_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=recover.__name__,error=type(error).__name__))
         _map_patch_colors(image,rows,original_hash)
+        annotate_badges(image,rows,original_hash)
+        annotate_tax_controls(image,rows,original_hash)
+        annotate_notice_icons(image,rows,original_hash)
     return {'width': width, 'height': height, 'sha256': original_hash,
             'lines': rows, 'text': '\n'.join(row['text'] for row in rows), 'ocr': evidence}
 

@@ -44,7 +44,10 @@ class Recorder:
             '-n', '-f', 'image2pipe', '-framerate', str(self.fps), '-vcodec', 'png',
             '-i', 'pipe:0', '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
             '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(output)],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self.errors)
+            # A controller debugging interrupt must not also signal the encoder.
+            # The recorder owns orderly EOF/finalization independently of the REPL.
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self.errors,
+            start_new_session=True)
         self.started = time.monotonic()
         self.thread = threading.Thread(target=self._run, name='original-game-recorder', daemon=True)
         self.thread.start()

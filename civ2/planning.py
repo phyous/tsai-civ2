@@ -6,6 +6,8 @@ ordinary unit choices, never an instruction for the harness to execute a path.
 from collections import Counter, defaultdict
 from copy import deepcopy
 
+from .revision import RevisionError, prefixed_revision, revision_key, revision_digest
+
 from .policy import (DIRECTIONS, PolicyError, _destination, _grid_distance, _map,
                      _revision, _rules, _specification, _technologies, _unit,
                      _water_access, model_state, validate_action)
@@ -136,7 +138,7 @@ def make_plan(candidate, state, rules=None, limit=64, max_turns=8):
     if not isinstance(candidate,dict) or candidates.get(candidate.get('id')) != candidate:
         raise PlanningError('Plan differs from a current canonical candidate')
     return dict(candidate=deepcopy(candidate), actor=deepcopy(candidate['actor']),
-        current_save_sha256=_revision(state)['save_sha256'], created_turn=state['turn'],
+        **prefixed_revision(state,'current_'), created_turn=state['turn'],
         expires_turn=state['turn']+max_turns, observations=0, status='active', reason='Jev-selected task; no input executed')
 
 
@@ -152,7 +154,13 @@ def advance_plan(plan, before, after, action=None, rules=None):
     if result.get('status') != 'active': return result
     def stop(status, reason):
         result.update(status=status, reason=reason); return result
-    if old['save_sha256'] != result.get('current_save_sha256') or after['turn'] < before['turn']:
+    try:
+        prior_key=revision_key(result,'current_')
+        same_revision=(prior_key=='current_'+revision_key(old)
+                       and revision_digest(result,'current_')==revision_digest(old))
+    except RevisionError:
+        same_revision=False
+    if not same_revision or after['turn'] < before['turn']:
         return stop('invalidated', 'Checkpoint continuity is unavailable')
     actor = result['actor']; candidate = result['candidate']; task = candidate['task']; target = candidate['target']
     units = {u['id']:u for u in before['units']}; fresh = {u['id']:u for u in after['units']}
@@ -160,7 +168,9 @@ def advance_plan(plan, before, after, action=None, rules=None):
         return stop('invalidated', 'Previous actor fingerprint changed')
     if action is not None:
         validate_action(action, before, rules)
-    result['observations'] += 1; result['current_save_sha256'] = new['save_sha256']
+    result['observations'] += 1
+    result.pop('current_save_sha256',None);result.pop('current_observation_sha256',None)
+    result.update(prefixed_revision(after,'current_'))
     point = (target.get('x'),target.get('y'))
     old_cities = {(c['x'],c['y']) for c in before['cities']}
     new_cities = {(c['x'],c['y']) for c in after['cities']}

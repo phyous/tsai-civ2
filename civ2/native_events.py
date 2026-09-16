@@ -12,6 +12,7 @@ import json
 import math
 import re
 import unicodedata
+from .notice_icons import proven_notice_icon
 
 
 EVENT_TITLES = {
@@ -75,7 +76,7 @@ def _rows(observation):
         if row['text'].strip():
             result.append(dict(text=row['text'].strip(), normal=_normal(row['text']),
                                bounds=list(bounds), center=list(center), confidence=confidence,
-                               source_line=index))
+                               source_line=index,notice_icon_bounds=proven_notice_icon(row,observation['sha256'])))
     return result
 
 
@@ -202,6 +203,16 @@ def classify_information(observation, resources, *, placeholder_values=None):
         body_rows = [row for row in rows if row not in (heading, ok)
                      and top <= row['center'][1] <= bottom
                      and abs(row['center'][0] - heading['center'][0]) <= half]
+        artwork=[]
+        if tag=='CIVADVANCE':
+            for row in body_rows:
+                box=row.get('notice_icon_bounds')
+                prose=[r for r in body_rows if r is not row]
+                if (box and prose and top<=box[1] and box[1]+box[3]<=bottom
+                        and box[0]+box[2]<min(r['bounds'][0] for r in prose)):
+                    artwork.append(row)
+            if len(artwork)>1:continue
+            body_rows=[r for r in body_rows if r not in artwork]
         if not body_rows or any(row['confidence'] < .8 or row['bounds'][1] < top - 2
                                 or row['bounds'][1] + row['bounds'][3] > bottom + 2
                                 for row in body_rows):
@@ -213,10 +224,10 @@ def classify_information(observation, resources, *, placeholder_values=None):
         # A second visible advisor/event heading indicates ambiguous layers.
         if any(row is not heading and row['normal'] in OBSERVED_EVENT_TITLES for row in rows):
             continue
-        matches.append((resource, heading, body_rows))
+        matches.append((resource, heading, body_rows,artwork))
     if len(matches) != 1:
         return result
-    resource, heading, body_rows = matches[0]
+    resource, heading, body_rows,artwork = matches[0]
     option = {key: ok[key] for key in ('text', 'center', 'source_line', 'confidence')}
     option.update(control='button', enabled=None)
     observed_body = '\n'.join(row['text'] for row in body_rows)
@@ -231,6 +242,9 @@ def classify_information(observation, resources, *, placeholder_values=None):
                                 body_source_lines=[row['source_line'] for row in body_rows],
                                 button_source_line=ok['source_line'],
                                 match='complete visible title and body; sole observed OK'))
+    if artwork:result['evidence']['decorative_icon']={'source':'Original 72x40 gold-framed icon; 832 exact border pixels',
+        'source_image_sha256':observation['sha256'],'bounds':artwork[0]['notice_icon_bounds'],
+        'ignored_raw_ocr':artwork[0]['text'],'source_line':artwork[0]['source_line']}
     if resource['tag'] in RULE_REJECTIONS:
         result['native_rejection'] = dict(tag=resource['tag'], body=observed_body,
             title=heading['text'], source='original GAME.TXT',

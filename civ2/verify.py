@@ -21,6 +21,8 @@ from .boot import verify_setup
 from .city import WORKED_BITS, city_labor_projection
 from .evidence import canonical
 from .save import parse_save
+from .revision import (observation_digest, observation_key, prefixed_revision,
+                       revision, revision_digest, revision_key, RevisionError)
 from .typesafe import _validate_questions, validate_response
 
 
@@ -49,6 +51,9 @@ KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'native_cosmetic_section_clicked',
                 'native_cosmetic_display_click_attempted',
                 'observed_public_notice',
+                'diplomatic_followup_pending', 'diplomatic_followup_observed',
+                'pointer_park_for_observation',
+                'trade_followup_pending', 'trade_advance_dispatched',
                 *DISPATCHES}
 
 # Hash metadata for the pinned original GAME.TXT, not copies of game text.
@@ -61,6 +66,14 @@ PUBLIC_NOTICE_NOTE = (
     'Only the most recent bounded notices are retained; absence is not evidence that an event did not occur.'
 )
 PUBLIC_NOTICE_RESOURCES = {'ADJACENTCITY': 'd7a2b9c34bc0aeba6a1debda44e8a02691579cc0d56bed16d1784addbedab834',
+ 'GREETINGS00':'950585acaf81ab9ce622ac94efd3915f89db60c2919745118cfd9ed08e57a682',
+ 'GREETINGS01':'6e1950c896d141797f7ed9923065a16350a1bcd3d8793e01c1f464890ee60ec0',
+ 'GREETINGS02':'ba01eb38f7f93cf856846ed33e7aed322488fd2cc5445c4285a5ef468a574ba7',
+ 'GREETINGS03':'8bbba02ad91b19004b568fcd7c7ce74c0b1018304b0636df041525afe6708cd4',
+ 'GREETINGS10':'b80a94b72dd021a771374ace2e4c79574756e3920119890fee84f64b07921880',
+ 'GREETINGS11':'0e6a15561a260c101ee6a752958c70c6db556b67e8e4325a2d4b1a7fb9b2b7ff',
+ 'GREETINGS12':'980f01f5ff5ecbac9d564b638ad6e046dcc888d173b57c07b174300d1afe1b32',
+ 'GREETINGS13':'54b14f170eab38c3759d1c189b79dddcb2db8c7405d004bb309bbab353525455',
  'BUILT': '8b82db5395a444a6765528af3c51424bda5b748c6bdeed0ae516c92a756fdd25',
  'BUILT3': '9355871cdde2a4a16bef681bff1f9113c26074e6c2b0f82a4456544ecc837e58',
  'CHERNOBYL': '917322e04bcd1308376aad6ac6e92ba0ded44d27d0045dd852d2ac4f9ed87a48',
@@ -96,6 +109,13 @@ def _require(condition, message):
         raise VerificationError(message)
 
 
+def _revision_digest(mapping, prefix=''):
+    try:
+        return revision_digest(mapping, prefix)
+    except RevisionError:
+        raise VerificationError('Missing, ambiguous or malformed observation revision') from None
+
+
 def _int(value, minimum=0):
     return type(value) is int and value >= minimum
 
@@ -110,6 +130,97 @@ def _one_edit(a,b):
     if len(a)==len(b):return sum(x!=y for x,y in zip(a,b))==1
     short,long=(a,b) if len(a)<len(b) else (b,a)
     return any(long[:i]+long[i+1:]==short for i in range(len(long)))
+
+
+TRADE_SCOPE = ('Confirm sole already-selected advance in the immediately preceding Jev-accepted trade; no new model choice')
+TAKECIV_RESOURCE_SHA256 = 'a905b4ed82fd6698710898291dde57cf8c97a318b56bde4324efc768818aa56d'
+
+
+def _trade_pending(payload, decision, request, files, observed_screens):
+    """Rebuild the continuation from the immutable model offer and action.
+
+    This verifies retained source text and original frame integrity, not OCR.
+    The loop separately requires that this was the last actual dispatch.
+    """
+    from .exchange_picker import ACCEPT, accepted_trade_context
+    prior=payload.get('prior_trade')
+    _require(set(payload)=={'prior_trade'} and isinstance(prior,dict),
+             'Trade continuation context is missing or malformed')
+    action=decision['action'];dialog=request.get('state',{}).get('mandatory_dialog',{})
+    options=dialog.get('options');text=dialog.get('observed_text');advance=prior.get('offered_advance')
+    _require(decision['question']=='dialog_action' and isinstance(options,list)
+             and len(options) in (2,3) and all(isinstance(x,str) for x in options)
+             and isinstance(text,str) and len(text)<=4096 and isinstance(advance,dict)
+             and set(advance)=={'id','name'} and _int(advance.get('id')) and advance['id']<93
+             and isinstance(advance.get('name'),str) and re.fullmatch(r"[A-Za-z][A-Za-z '()-]{0,79}",advance['name'])
+             and options[0]==f'"No. We do not need {advance["name"]}."'
+             and options[1]==ACCEPT and action.get('actor',{}).get('title')==dialog.get('title')
+             and isinstance(dialog.get('title'),str) and re.fullmatch(r'.{1,100} Emissary',dialog['title']),
+             'Trade continuation differs from the recorded original offer')
+    tag=prior.get('resource_tag');name=re.escape(advance['name'])
+    if tag=='EXCHANGE0':
+        body=(r'"We note that your primitive civilization has not even discovered '+name+
+              r'\. We desire the secret of [A-Za-z][A-Za-z \'()-]{0,79}\. Do you care to exchange knowledge with us\?"')
+    elif tag=='EXCHANGE1':
+        body=(r'"We are fascinated by your [A-Za-z][A-Za-z \'()-]{0,79} concept, '
+              r'(?P<wanted>[A-Za-z][A-Za-z \'()-]{0,79})\. Will you tell us of (?P=wanted) '
+              r'in exchange, perhaps, for '+name+r'\?"')
+    else:raise VerificationError('Trade continuation has no supported original exchange source')
+    _require(len(options)==2 or tag=='EXCHANGE0' and re.fullmatch(
+        r'"Will you accept [A-Za-z][A-Za-z \'()-]{0,79} instead\?"',options[2]),
+        'Trade continuation has an unsupported additional choice')
+    expected=re.escape(dialog['title'])+r' '+body+' '+re.escape(' '.join(options))+r' OK'
+    _require(re.fullmatch(expected,' '.join(text.split())) is not None,
+             'Trade continuation body does not match the complete original exchange template')
+    source=action.get('preconditions',{}).get('image_sha256');files.screen(source)
+    _require(observed_screens.get(source)=={'classification':'diplomacy','supported':True},
+             'Trade continuation source was not an observed supported diplomatic offer')
+    source_dialog={'id':action['actor']['id'],'kind':'diplomacy','title':dialog['title'],
+        'supported':True,'requires_model':True,'resource_tag':tag,'sha256':source,
+        'options':[{'text':label,'center':action['parameters'].get('center') if i==1 else None}
+                   for i,label in enumerate(options)]}
+    rebuilt=accepted_trade_context(source_dialog,action,prior.get('decision'),{'advances':[advance]})
+    _require(rebuilt is not None and canonical(rebuilt)==canonical(prior),
+             'Trade continuation fingerprint or accepted action binding differs')
+    return deepcopy(prior)
+
+
+def _trade_dispatch(payload, pending, files, observed_screens):
+    from PIL import Image
+    from .exchange_picker import EMPTY_RECT, SELECTED_RECT, _solid
+    _require(pending is not None and set(payload)=={
+        'prior_trade','advance','before','after','resource_tag','evidence','inputs','scope'}
+        and payload.get('prior_trade')==pending and payload.get('advance')==pending['offered_advance']
+        and payload.get('resource_tag')=='TAKECIV' and payload.get('scope')==TRADE_SCOPE,
+        'Trade confirmation lacks its unique immediately preceding accepted exchange')
+    before=payload.get('before');path=files.path(files.screen(before));files.screen(payload.get('after'))
+    _require(observed_screens.get(before)=={'classification':'exchange_picker','supported':True},
+             'Trade confirmation lacks its original supported singleton picker')
+    evidence=payload.get('evidence');proof=evidence.get('exchange_picker') if isinstance(evidence,dict) else None
+    _require(isinstance(proof,dict) and set(proof)=={
+        'source','resource_sha256','image_sha256','empty_list_bounds','empty_list_rgb',
+        'selected_row_bounds','selected_row_rgb','complete_visible_singleton',
+        'prior_accepted_trade_required','raw_title'}
+        and proof.get('source')=='Original GAME.TXT TAKECIV and calibrated original list pixels'
+        and proof.get('resource_sha256')==TAKECIV_RESOURCE_SHA256 and proof.get('image_sha256')==before
+        and proof.get('empty_list_bounds')==list(EMPTY_RECT) and proof.get('empty_list_rgb')==[207]*3
+        and proof.get('selected_row_bounds')==list(SELECTED_RECT) and proof.get('selected_row_rgb')==[105]*3
+        and proof.get('complete_visible_singleton') is True and proof.get('prior_accepted_trade_required') is True
+        and isinstance(proof.get('raw_title'),str)
+        and re.fullmatch(r'Select [A-Za-z]{9,14} Advance',proof['raw_title']),
+        'Trade confirmation source or complete-list evidence differs')
+    with Image.open(path) as original:
+        _require(original.format=='PNG' and original.size==(640,480),
+                 'Trade confirmation does not retain an original-size PNG')
+        image=original.convert('RGB')
+    _require(_solid(image,EMPTY_RECT,(207,207,207)) and _solid(image,SELECTED_RECT,(105,105,105))
+             and _solid(image,(309,170,310,440),(65,65,65)) and _solid(image,(628,170,629,440),(65,65,65)),
+             'Trade confirmation pixels do not prove an empty remainder and selected first row')
+    rows=_inputs(payload.get('inputs'))
+    _require(len(rows)==2 and all(row['type']=='key' for row in rows)
+             and [(row['code'],row['down']) for row in rows]==[('Enter',True),('Enter',False)],
+             'Trade confirmation must contain exactly one ordinary Enter press and release')
+    return len(rows)
 
 
 def _public_notice(payload,files,observed_screens,state,checkpoint_index,event_elapsed):
@@ -132,7 +243,7 @@ def _public_notice(payload,files,observed_screens,state,checkpoint_index,event_e
                                'resource_sha256':PUBLIC_NOTICE_RESOURCES[tag]},
              'Public notice source differs from the pinned original template hashes')
     expected={'index':checkpoint_index,'turn':state['turn'],'year_raw':state['year_raw'],
-              'save_sha256':state['evidence']['save_sha256']}
+              **prefixed_revision(state)}
     _require(isinstance(notice['last_checkpoint'],dict)
              and canonical(notice['last_checkpoint'])==canonical(expected),
              'Public notice checkpoint differs from the latest original save')
@@ -338,15 +449,17 @@ def _action_binding(action, request, question, saves, *, forced=False):
              {'id', 'kind', 'label', 'actor', 'preconditions', 'parameters'}, 'Selected action schema is invalid')
     pre, actor, params = action['preconditions'], action['actor'], action['parameters']
     _require(all(isinstance(v, dict) for v in (pre, actor, params)), 'Selected action binding is malformed')
-    digest = pre.get('save_sha256')
+    digest = _revision_digest(pre)
     _require(digest in saves, 'Selected action does not reference an earlier native save')
     state = saves[digest]
+    _require(revision_key(pre)==observation_key(state),
+             'Action hash kind differs from its recorded observation source')
     model = request.get('state')
     _require(isinstance(model, dict) and model.get('turn') == pre.get('turn') == state['turn'],
              'Selected action and request do not share the native save turn')
     labor_revision = model.get('city_labor', {}).get('revision')
     if labor_revision is not None:
-        _require(labor_revision == {'turn': state['turn'], 'save_sha256': digest},
+        _require(labor_revision == revision(state),
                  'Model observation revision differs from the bound native save')
     if question == 'unit_action':
         fields = ('id', 'type_id', 'owner', 'x', 'y')
@@ -416,7 +529,8 @@ def _action_binding(action, request, question, saves, *, forced=False):
                  'Empire action is outside the observed End of Turn command mapping')
     elif question == 'city_action':
         controls = {'change_production':('change','production_choice'),
-                    'open_buy_quote':('buy','buy_quote'), 'exit_city':('exit','original_map')}
+                    'open_buy_quote':('buy','buy_quote'), 'exit_city':('exit','original_map'),
+                    'review_labor':('exit','fresh_city_labor')}
         identifier = action['id']; point = params.get('center')
         expected = controls.get(identifier)
         labor = action['kind'] == 'city_labor'
@@ -444,11 +558,12 @@ def _action_binding(action, request, question, saves, *, forced=False):
             _require(3<=len(normalized(match[1]))<=50 and len(matches)==1 and matches[0]['id']==actor['id']
                      and pre.get('observed_city_name')==actor['name']
                      and isinstance(proof,dict)
-                     and set(proof)=={'source','ocr_text','canonical_name','city_id','save_sha256','source_line'}
-                     and proof.get('source')=='Unique one-edit match to owned city in original save'
+                     and set(proof)=={'source','ocr_text','canonical_name','city_id',observation_key(state),'source_line'}
+                     and proof.get('source')=='Unique one-edit match to owned city in '+(
+                         'live memory observation' if state['evidence'].get('kind')=='live_memory' else 'original save')
                      and proof.get('ocr_text')==match[1] and proof.get('canonical_name')==actor['name']
                      and type(proof.get('city_id')) is int and proof['city_id']==actor['id']
-                     and proof.get('save_sha256')==digest and _int(proof.get('source_line')),
+                     and proof.get(observation_key(state))==digest and _int(proof.get('source_line')),
                      'Recovered city title lacks unique native-save and original OCR provenance')
         if labor:
             _labor_binding(action, state, model)
@@ -469,6 +584,9 @@ def _action_binding(action, request, question, saves, *, forced=False):
                      and review.get('reviewed_action_ids') == pre['reviewed_action_ids']
                      and review.get('controls') == request['questions']['city_action']['criteria'],
                      'City control differs from the actual observed model request')
+            if identifier=='review_labor':
+                _require(review.get('labor_checkpoint_ready') is False,
+                         'Labor preparation must be an explicit choice before fresh tile choices')
     else:
         raise VerificationError('Unsupported model dispatch question')
 
@@ -596,8 +714,8 @@ def _labor_result(action, before, after):
     status=('observed_expected_change' if new==expected else
             'no_observed_change' if new==old else 'unexpected_change')
     return dict(status=status,before=old,expected=expected,after=new,
-                before_save_sha256=before['evidence']['save_sha256'],
-                after_save_sha256=after['evidence']['save_sha256'],turn=after['turn'],city=b['city'])
+                **prefixed_revision(before,'before_'),
+                **prefixed_revision(after,'after_'),turn=after['turn'],city=b['city'])
 
 
 def _labor_city(state, city):
@@ -676,7 +794,7 @@ def _graphics_preferences(receipt, files):
     _require(not any(r['type']=='key' for r in inputs) and [r['event'] for r in buttons]==['mousedown','mouseup']
              and all(r['button']==0 for r in buttons), 'Graphics preference needs one ordinary checkbox click')
     park=click.get('pointer_park')
-    _require(isinstance(park,dict) and park.get('issued') is False and park.get('target')==[620,410]
+    _require(isinstance(park,dict) and park.get('issued') is False and park.get('target') in ([620,410],[2,1])
              and isinstance(park.get('observed_cursor'),list) and len(park['observed_cursor'])==2
              and all(_int(v) for v in park['observed_cursor']) and _int(park.get('tolerance'))
              and park['tolerance']<=4 and max(abs(a-b) for a,b in zip(park['observed_cursor'],park['target']))<=park['tolerance']
@@ -803,8 +921,10 @@ def _plan_binding(task, request, saves):
              {'id','task','label','actor','preconditions','target'}, 'Planning candidate schema is invalid')
     pre, actor, target = task['preconditions'], task['actor'], task['target']
     _require(all(isinstance(v, dict) for v in (pre, actor, target)), 'Planning candidate binding is malformed')
-    _require(pre.get('save_sha256') in saves, 'Plan does not reference an earlier native save')
-    state = saves[pre['save_sha256']]
+    _require(_revision_digest(pre) in saves, 'Plan does not reference an earlier native save')
+    state = saves[_revision_digest(pre)]
+    _require(revision_key(pre)==observation_key(state),
+             'Planning hash kind differs from its recorded observation source')
     model = request.get('state', {})
     _require(model.get('turn') == pre.get('turn') == state['turn'], 'Planning request and native save turns differ')
     units = [u for u in state['units'] if u['id'] == actor.get('id')]
@@ -965,11 +1085,18 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     observed_screens={}
     checkpoint_count,checkpoint_reuses,presentation_acknowledgments=0,0,0
     last_finish,reusable_checkpoint=None,None
+    diplomatic_followup=None
+    trade_pending=None;trade_eligible=None;trade_seen=set();trade_confirmations=0
     stops, recoveries, unknown = [], [], Counter()
     checks, initial_state = None, None
+    initial_memory_inventory=None
+    initial_campaign_start=None
     for event in events:
         kind, payload = event['kind'], event['payload']
         files.references(payload)
+        if kind not in {'screen_observed','pointer_park_for_observation',
+                        'trade_followup_pending','trade_advance_dispatched'}:
+            trade_pending=None;trade_eligible=None
         if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted'}:
             cosmetic_section_sequence=None
         observation_only={'screen_observed','batch_observed_effect','plan_status'}
@@ -980,10 +1107,58 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
         if kind not in KNOWN_EVENTS:
             unknown[kind] += 1
         if kind in ('begin', 'checkpoint'):
-            descriptor = payload['initial_save' if kind == 'begin' else 'artifact']
+            live = payload.get('observation_kind') == 'live_memory'
+            _require(payload.get('observation_kind') in (None,'live_memory'),
+                     'Unknown checkpoint observation source')
+            if kind == 'begin':
+                _require(('initial_save' in payload) != ('initial_observation' in payload)
+                         and ('initial_observation' in payload)==live,
+                         'Evidence structure: initial observation has ambiguous provenance')
+                if live:
+                    _require(payload.get('save_policy')=='no_saves_during_playthrough',
+                             'Live campaign must declare its no-save policy')
+            else:
+                _require(live == (initial_state['evidence'].get('kind')=='live_memory'),
+                         'Campaign changes its observation backend')
+            descriptor = payload[('initial_observation' if live else 'initial_save') if kind == 'begin' else 'artifact']
             info = files.descriptor(descriptor)
             try:
-                state = parse_save(files.path(info['path']).read_bytes())
+                data = files.path(info['path']).read_bytes()
+                if live:
+                    from .memory import parse_memory
+                    state = parse_memory(data)
+                    capsule=_loads(data)
+                    proof=capsule['proof'];receipt=payload.get('receipt')
+                    _require(state['evidence'].get('kind')=='live_memory'
+                             and observation_digest(state)==info['sha256'],
+                             'Live snapshot provenance differs from the recorded capsule')
+                    _require(isinstance(receipt,dict) and receipt.get('kind')=='live_memory'
+                             and receipt.get('proof')==proof
+                             and receipt.get('observation_sha256')==info['sha256']
+                             and isinstance(receipt.get('images'),list) and len(receipt['images'])==3
+                             and receipt.get('source_images')==[item.get('path') for item in receipt['images']],
+                             'Live snapshot receipt differs from its validated capsule')
+                    for image,digest in zip(receipt['images'],proof['image_sha256']):
+                        _require(files.descriptor(image)['sha256']==digest,
+                                 'Live observation frame differs from its capsule')
+                    if kind=='begin':
+                        from .boot import load_setup_report
+                        setup_info=files.descriptor(payload.get('setup_report'))
+                        _require(setup_info['path']=='setup/setup.json','Live setup report is not retained at its fixed path')
+                        setup_report=load_setup_report(files.root/'setup',require_no_saves=True)
+                        setup_data=(files.root/'setup'/setup_report['initial_observation']['path']).read_bytes()
+                        setup_state=parse_memory(setup_data)
+                        _require({k:v for k,v in setup_state.items() if k!='evidence'}==
+                                 {k:v for k,v in state.items() if k!='evidence'},
+                                 'Original initial game differs from its no-save setup')
+                        initial_campaign_start=setup_report['campaign_start']
+                        initial_memory_inventory=_loads(setup_data)['proof']['save_inventory_initial']
+                    _require(proof.get('campaign_start')==initial_campaign_start,
+                             'Live campaign changes its verified autosave-off boundary')
+                    _require(proof['save_inventory_initial']==initial_memory_inventory,
+                             'Live campaign resets its native save inventory baseline')
+                else:
+                    state = parse_save(data)
                 if kind == 'begin':
                     checks = verify_setup(state)
                     initial_state = state
@@ -1006,17 +1181,56 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             latest_save_sha256=info['sha256']
             if kind=='checkpoint':
                 checkpoint_count+=1
-                reusable_checkpoint=(dict(checkpoint=checkpoint_count,save_sha256=info['sha256'],
+                reusable_checkpoint=(dict(checkpoint=checkpoint_count,**prefixed_revision(state),
                                           turn=state['turn'],year=state['year_raw'])
                                      if last_finish is not None and state['turn']>last_finish['turn'] else None)
             last_finish=None
         elif kind=='screen_observed':
             observed_screens[payload.get('screen')]={'classification':payload.get('classification'),
                                                      'supported':payload.get('supported')}
+        elif kind=='trade_followup_pending':
+            prior=payload.get('prior_trade',{});identifier=prior.get('decision') if isinstance(prior,dict) else None
+            _require(identifier is not None and identifier==trade_eligible and identifier in dispatched
+                     and identifier not in trade_seen and identifier==max(started,default=None),
+                     'Trade context has no unique latest dispatched model exchange')
+            trade_pending=_trade_pending(payload,decisions[identifier],started[identifier],files,observed_screens)
+            trade_seen.add(identifier)
+        elif kind=='trade_advance_dispatched':
+            inputs+=_trade_dispatch(payload,trade_pending,files,observed_screens)
+            trade_pending=None;trade_eligible=None;trade_confirmations+=1
+        elif kind=='diplomatic_followup_pending':
+            identifier=payload.get('decision')
+            _require(diplomatic_followup is None and identifier in dispatched
+                     and identifier in decisions and decisions[identifier]['question']=='dialog_action',
+                     'Diplomatic audience has no unique dispatched model decision')
+            action=decisions[identifier]['action']
+            _require(action['parameters'].get('option_index')==0
+                     and action['preconditions'].get('image_sha256')==payload.get('source_hash')
+                     and action['actor'].get('title')==payload.get('title'),
+                     'Diplomatic audience differs from its observed model selection')
+            files.screen(payload['source_hash']);diplomatic_followup=payload
+        elif kind=='diplomatic_followup_observed':
+            _require(diplomatic_followup is not None
+                     and all(payload.get(k)==diplomatic_followup[k] for k in ('decision','source_hash'))
+                     and isinstance(payload.get('resource_tag'),str) and payload['resource_tag']!='EMISSARY'
+                     and isinstance(payload.get('title'),str) and re.search(r'\bemissary$',payload['title'],re.I),
+                     'Diplomatic follow-up lacks its pending original audience')
+            files.screen(payload.get('screen'));diplomatic_followup=None
+        elif kind=='pointer_park_for_observation':
+            files.screen(payload.get('before'));receipt=payload.get('receipt')
+            _require(isinstance(receipt,dict) and receipt.get('issued') is False
+                     and receipt.get('target') in ([620,410],[2,1])
+                     and isinstance(receipt.get('inputs'),list),
+                     'Observation pointer park lacks a bounded non-click receipt')
+            if receipt['inputs']:
+                moves=_inputs(receipt['inputs'])
+                _require(all(item['type']=='relativeMouse' for item in moves),
+                         'Observation pointer park contains a gameplay input')
+                inputs+=len(moves)
         elif kind=='observed_public_notice':
             _require(latest_save_sha256 in saves, 'Public notice precedes its original checkpoint')
             notice=_public_notice(payload,files,observed_screens,saves[latest_save_sha256],checkpoint_count,event['elapsed_ms'])
-            key=lambda n:(n['kind'],n['resource_tag'],n['observed_text'],n['last_checkpoint']['save_sha256'])
+            key=lambda n:(n['kind'],n['resource_tag'],n['observed_text'],_revision_digest(n['last_checkpoint']))
             _require(all(key(n)!=key(notice) for n in public_notices), 'Public notice duplicates retained history')
             public_notices.append(notice);public_notices=public_notices[-16:]
             while sum(len(n['observed_text']) for n in public_notices)>16384:public_notices.pop(0)
@@ -1024,7 +1238,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
         elif kind=='checkpoint_reused':
             _require(reusable_checkpoint is not None
                      and all(canonical(payload.get(k))==canonical(v) for k,v in reusable_checkpoint.items())
-                     and payload.get('save_sha256')==latest_save_sha256
+                     and _revision_digest(payload)==latest_save_sha256
                      and payload.get('ordinary_inputs_since_checkpoint') is False
                      and observed_screens.get(payload.get('screen'))=={'classification':'end_turn','supported':True},
                      'Reused checkpoint is stale, repeated or lacks an immediately verified advanced turn')
@@ -1035,8 +1249,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             request = files.json(payload['request']['path'])
             model_state=request.get('state',{})
             if 'recent_observed_events' in model_state or public_notices:
+                notice_note=(PUBLIC_NOTICE_NOTE.replace('prior native save','prior live memory observation')
+                             if initial_state['evidence'].get('kind')=='live_memory' else PUBLIC_NOTICE_NOTE)
                 _require(canonical(model_state.get('recent_observed_events'))==canonical(public_notices)
-                         and model_state.get('recent_observed_events_note')==PUBLIC_NOTICE_NOTE,
+                         and model_state.get('recent_observed_events_note')==notice_note,
                          'Model public-notice context differs from the preceding bounded observed history')
             try:
                 _validate_questions(request['questions'])
@@ -1075,10 +1291,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _require(identifier in plans and isinstance(plan,dict)
                      and plan.get('decision_id') == identifier and plan.get('candidate') == plans[identifier]['task']
                      and plan.get('status') in ('active','complete','invalidated','expired')
-                     and plan.get('current_save_sha256') in saves,
+                     and _revision_digest(plan,'current_') in saves,
                      'Plan status does not reference its actual prior task and native checkpoint')
             if plan['status'] == 'active':
-                state = saves[plan['current_save_sha256']]
+                state = saves[_revision_digest(plan,'current_')]
                 _require(isinstance(plan.get('actor'),dict)
                          and set(plan['actor']) == set(plan['candidate']['actor'])
                          and any(all(u.get(k)==v for k,v in plan['actor'].items()) for u in state['units']),
@@ -1105,7 +1321,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                 key=(signature['id'],signature['name'],action['preconditions']['year_raw'])
                 _require(labor_refresh is None and labor_ready is not None
                          and labor_ready['city']==signature
-                         and labor_ready['save_sha256']==action['preconditions']['save_sha256']==latest_save_sha256
+                         and _revision_digest(labor_ready)==_revision_digest(action['preconditions'])==latest_save_sha256
                          and action['preconditions']['labor_review_used']==labor_usage.get(key,0),
                          'Labor choice lacks a completed native refresh or reuses its review allowance')
             context = request.get('state', {}).get('persistent_plan')
@@ -1117,7 +1333,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                 _require(plan['status'] == context.get('status') == 'active'
                          and all(context.get(k) == plan['candidate'][k] for k in ('task','target','label'))
                          and context.get('actor') == plan['actor']
-                         and plan['current_save_sha256'] == action['preconditions']['save_sha256'],
+                         and _revision_digest(plan,'current_') == _revision_digest(action['preconditions']),
                          'Command planning context differs from the current observed model plan')
             decisions[identifier] = {'action': action, 'question': question, 'response': response}
         elif kind == 'forced_empire_command':
@@ -1135,7 +1351,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             forced_city_pending = action
         elif kind in DISPATCHES:
             _require(labor_refresh is None and not (city_pending is not None
-                     and city_pending['action']['kind']=='city_labor'),
+                     and (city_pending['action']['kind']=='city_labor'
+                          or city_pending['action']['id']=='review_labor')),
                      'A strategic dispatch interrupted an unresolved labor verification')
             question = DISPATCHES[kind]
             identifier = payload.get('decision')
@@ -1166,13 +1383,14 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             if selected['kind']=='city_labor':
                 key=(selected['actor']['id'],selected['actor']['name'],selected['preconditions']['year_raw'])
                 _require(labor_ready is not None
-                         and labor_ready['save_sha256']==selected['preconditions']['save_sha256']==latest_save_sha256
+                         and _revision_digest(labor_ready)==_revision_digest(selected['preconditions'])==latest_save_sha256
                          and selected['preconditions']['labor_review_used']==labor_usage.get(key,0),
                          'Labor dispatch lost its current refresh or remaining review allowance')
             inputs += _dispatch(payload, decisions[identifier]['action'], question, files)
             if question=='empire_action' and selected['id']=='finish_turn':
                 last_finish={'turn':selected['preconditions']['turn']}
             dispatched.add(identifier)
+            trade_eligible=identifier if question=='dialog_action' else None
             labor_ready=None
             if question == 'city_action':
                 city_pending = {'action':decisions[identifier]['action'],'decision':identifier,
@@ -1185,20 +1403,34 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                                                 'action_id':action['id']}
         elif kind == 'city_labor_refresh_started':
             purpose=payload.get('purpose');action=payload.get('action');identifier=payload.get('decision')
-            digest=payload.get('before_save_sha256')
+            preparation=payload.get('preparation_action')
+            digest=_revision_digest(payload,'before_')
             _require(labor_refresh is None and purpose in ('prepare_labor_choices','verify_labor')
                      and digest in saves, 'Labor refresh has no unique native starting checkpoint')
             _labor_city(saves[digest],payload.get('city'))
             if purpose=='verify_labor':
                 _require(city_pending is not None and city_pending['decision']==identifier
+                         and preparation is None
                          and action==city_pending['action'] and action['kind']=='city_labor'
-                         and action['preconditions']['save_sha256']==digest
+                         and _revision_digest(action['preconditions'])==digest
                          and all(action['actor'][k]==v for k,v in payload['city'].items()),
                          'Labor verification refresh does not follow its exact dispatched choice')
+            elif preparation is not None:
+                _require(city_pending is not None and city_pending['decision']==identifier
+                         and _int(identifier,1) and identifier in dispatched and action is None
+                         and preparation==city_pending['action'] and preparation.get('id')=='review_labor'
+                         and preparation.get('kind')=='city_control'
+                         and _revision_digest(preparation['preconditions'])==digest
+                         and all(preparation['actor'][k]==v for k,v in payload['city'].items()),
+                         'Labor preparation does not follow its exact model-selected native Exit')
             else:
                 _require(city_pending is None and action is None and identifier is None,
                          'Preparation refresh cannot hide an unresolved city transaction')
             labor_refresh={**payload,'sequence':event['sequence'],'step':'started'}
+            if preparation is not None:
+                # The prior dispatched, image-bound Exit click is the close
+                # input. Do not invent a second Escape or count the click twice.
+                labor_refresh.update(step='close_city',input_sequence=city_pending['sequence'])
             labor_ready=None
         elif kind == 'city_labor_refresh_input':
             _require(labor_refresh is not None and payload.get('decision')==labor_refresh['decision']
@@ -1218,7 +1450,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             inputs+=len(ordinary);labor_refresh['step']=step
             labor_refresh['input_sequence']=event['sequence']
         elif kind == 'city_labor_checkpoint':
-            digest=payload.get('save_sha256')
+            digest=_revision_digest(payload)
             _require(labor_refresh is not None and payload.get('decision')==labor_refresh['decision']
                      and payload.get('purpose')==labor_refresh['purpose']
                      and labor_refresh['step']=='close_city' and digest in saves
@@ -1227,7 +1459,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      and _int(payload.get('checkpoint'),1),
                      'Labor follow-up lacks a later native save after closing the city')
             _labor_city(saves[digest],labor_refresh['city'])
-            before=saves[labor_refresh['before_save_sha256']];after=saves[digest]
+            before=saves[_revision_digest(labor_refresh,'before_')];after=saves[digest]
             _require(before['turn']==after['turn'] and before['year_raw']==after['year_raw'],
                      'Labor refresh crossed a native turn or year')
             if labor_refresh['purpose']=='verify_labor':
@@ -1242,7 +1474,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             else:
                 _require(payload.get('result') is None,
                          'Preparing labor choices cannot claim a labor input result')
-            labor_refresh.update(step='checkpoint',save_sha256=digest)
+            labor_refresh.update(step='checkpoint',**prefixed_revision(after))
         elif kind == 'navigate_selected_city' and labor_refresh is not None:
             _require(labor_refresh['step']=='open_locator' and not labor_refresh.get('failed'),
                      'Labor refresh locator navigation is out of order')
@@ -1251,11 +1483,14 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
         elif kind == 'city_labor_ready':
             _require(labor_refresh is not None and labor_refresh['step']=='navigated'
                      and not labor_refresh.get('failed')
-                     and all(payload.get(k)==labor_refresh[k] for k in ('decision','purpose','city','save_sha256')),
+                     and all(payload.get(k)==labor_refresh[k] for k in ('decision','purpose','city'))
+                     and revision_key(payload)==revision_key(labor_refresh)
+                     and _revision_digest(payload)==_revision_digest(labor_refresh),
                      'Labor readiness does not follow its native save and same-city reopening')
             files.screen(payload.get('screen'))
             labor_ready=payload
-            if labor_refresh['purpose']=='verify_labor':city_pending=None
+            if labor_refresh['purpose']=='verify_labor' or labor_refresh.get('preparation_action') is not None:
+                city_pending=None
             labor_refresh=None
         elif kind == 'city_labor_refresh_failed':
             _require(labor_refresh is not None and not labor_refresh.get('failed')
@@ -1366,7 +1601,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _require(_int(value), 'Response usage metadata is invalid')
             totals[key] += value
     return {'schema_version': 1, 'integrity': 'passed', 'journal': chain,
-            'initial_setup': {'checks': checks, 'save_sha256': events[0]['payload']['initial_save']['sha256']},
+            'initial_setup': {'checks': checks, **prefixed_revision(initial_state)},
             'artifacts': {'verified_count': len(files.checked), 'files': sorted(files.checked.values(), key=lambda x: x['path'])},
             'decisions': {'inferences_started': len(started), 'validated_responses': len(decisions)+len(plans),
                           'command_decisions':len(decisions), 'planning_decisions':len(plans),
@@ -1385,6 +1620,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'cosmetic_input_note':'Separately declared operator presentation inputs, not Jev choices. Original image/crop and ordinary-input bindings checked; semantic visual review, success and gameplay effects are not independently established.',
                           'reused_native_checkpoints':checkpoint_reuses,
                           'observed_public_notices':public_notice_count,
+                          'accepted_trade_continuations':trade_confirmations,
+                          'trade_continuation_note':'Prior actual model offer/action and original frame/list pixels checked; one Enter only. Technology acquisition and OCR semantics are not independently inferred.',
                           'retained_public_notice_ids':[n['id'] for n in public_notices],
                           'public_notice_verification':'Exact request history, prior native-save context, pinned source hashes and original image integrity checked. No OCR or current-world inference is performed.',
                           'city_labor_results':[labor_outcomes[k] for k in sorted(labor_outcomes)],
@@ -1402,10 +1639,11 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                              'pending_forced_command': forced_pending is not None,
                              'pending_city_control':city_pending is not None or forced_city_pending is not None,
                              'pending_labor_refresh':labor_refresh is not None,
+                             'pending_trade_continuation':trade_pending is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] in ('human_reviewed','assistant_reviewed') and len(dispatched) == len(decisions)
                               and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries
-                              and city_pending is None and forced_city_pending is None and labor_refresh is None},
+                              and city_pending is None and forced_city_pending is None and labor_refresh is None and trade_pending is None},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
                            'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
                            'This verifier performs no OCR, live game calls or automatic victory recognition.',

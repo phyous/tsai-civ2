@@ -46,10 +46,10 @@ an explicitly selected private env file. Credentials never enter the page or run
 evidence. Do not commit `.env`, downloaded games, profiles, or private files.
 
 The current controller is experimental and pauses at unsupported native screens.
-After building the OCR adapter, start and verify a fresh game with
-`python3 -m civ2.boot`. A model session uses:
+After building the OCR adapter, a debugging session can use native saves:
 
 ```sh
+python3 -m civ2.boot
 python3 -m civ2.run --initial-save .runtime/setup/initial.sav \
   --directory runs/attempt-001 --env-file /path/to/private/env
 ```
@@ -58,14 +58,27 @@ Install `ffmpeg` for continuous video capture.
 The dense spectator panel can show 16 command probabilities and separate
 independent Jev vectors in the same live/recording layout, plus recent evaluations
 when there is room. [Native city labor](docs/labor-controls.md) includes calibrated
-worker reassignment and a fresh save check after every change. The
+worker reassignment and a fresh state check after every change. The
 [persistent OCR worker](docs/ocr-performance.md) reduces observation overhead.
 The [researched strategy guide](docs/strategy-sources.md) is included in actual
 Jev requests, with its revision and sources retained in the decision evidence.
 
-Current runs use native saves for debugging. The final recorded campaign must
-make no between-turn save calls; a validated read-only live-state observer is
-required before that campaign begins.
+The recording path uses a [read-only Win16 observer](docs/observer-build.md),
+which reads the original game's state without a Save dialog or game-memory
+writes. Build its ignored runtime overlay, then use a fresh runtime:
+
+```sh
+python3 -m civ2.boot --port 3930 --profile final-001 \
+  --directory .runtime/final-001-setup --no-saves
+python3 -m civ2.run --port 3930 --no-saves \
+  --setup-directory .runtime/final-001-setup --directory runs/final-001 --planning
+```
+
+Setup verifies that native autosave is off before model play. The original
+startup autosave, if created before that setting can be changed, is recorded
+explicitly; later new or modified game saves stop the run. Host observation
+capsules, screenshots and video are evidence files, not game saves. Native
+save-based debugging remains available separately.
 
 ## Optional observed-target planning
 

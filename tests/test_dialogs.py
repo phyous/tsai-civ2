@@ -386,6 +386,27 @@ class DialogTests(unittest.TestCase):
         r=classify_dialog(o,game_text=DIPLOMACY)
         self.assertFalse(r['supported']);self.assertEqual(r['options'],[])
 
+    def test_emissary_audience_uses_source_width_and_retains_radio_choice(self):
+        source='@EMISSARY\n@width=320\n@title=%STRING0 Emissary\nAn emissary from %STRING1 %STRING2 of the %STRING3 wishes to speak with you. Will you receive %STRING4?\n\n"Yes. I will grant an audience."\n"No. Send %STRING4 away."\n'
+        o=observation(row('Neutral TEST Emissary',y=165,w=150),
+            row('An emissary from TEST Leader of the',x=303,y=190,w=286),
+            row('TEST people wishes to speak with you. Will you',x=308,y=210,w=296),
+            row('receive her?',x=201,y=231,w=88),
+            row('"Yes. I will grant an audience."',x=301,y=256,w=214),
+            row('O "No. Send her away."',x=258,y=281,w=176),row('OK',y=315,w=24),
+            row('30,000 People',x=550,y=210,w=90),row('End of Turn',x=515,y=453,w=80))
+        r=classify_dialog(o,game_text=source)
+        self.assertTrue(r['supported'],r);self.assertEqual(r['resource_tag'],'EMISSARY')
+        self.assertTrue(r['requires_model']);self.assertIsNone(r['mechanical_action'])
+        self.assertEqual(r['options'][1]['text'],'O "No. Send her away."')
+        self.assertEqual(r['options'][1]['center'],[258,281])
+        for change in ('missing','unknown','not_radio'):
+            altered=copy.deepcopy(o)
+            if change=='missing':altered['lines'].pop(5)
+            elif change=='unknown':altered['lines'].insert(6,row('Pay TEST gold.',x=275,y=302,w=100))
+            else:altered['lines'][5]['text']='Do "No. Send her away."'
+            self.assertFalse(classify_dialog(altered,game_text=source)['supported'],change)
+
     def test_generic_game_over_is_not_victory(self):
         o=observation(row('Game Over!',y=90),row('Your final score has been computed.',y=135),
                       row("No, I'm done.",y=190),row('Yes, keep playing.',y=215))
@@ -558,6 +579,33 @@ class DialogTests(unittest.TestCase):
             bad=copy.deepcopy(o);bad['lines'][-1]['text']=text
             self.assertFalse(classify_dialog(bad,state=s)['supported'],text)
 
+    def test_colored_city_sprite_geometry_does_not_depend_on_ocr_alphabet_or_confidence(self):
+        s=copy.deepcopy(ROMAN_STATE);s['cities']=[{'name':'Rome'}]
+        for text in ('Ві 3','AB4','ШБ','1XX'):
+            for confidence in (.5,.8,1):
+                o=native_map();fragment=row(text,x=244,y=274,w=32,h=16,confidence=confidence)
+                fragment['map_patch_colors']={'source_sha256':o['sha256'],'bounds':fragment['bounds'],
+                    'rgb_spread_threshold':24,'pixel_count':512,'chromatic_pixels':383}
+                o['lines'] += [row('Rome',x=235,y=293,w=51,h=16),fragment]
+                self.assertEqual(classify_dialog(o,state=s)['kind'],'normal_map',(text,confidence))
+                for changed in ('gray','hash','position','name','control'):
+                    bad=copy.deepcopy(o)
+                    if changed=='gray':bad['lines'][-1]['map_patch_colors']['chromatic_pixels']=255
+                    elif changed=='hash':bad['lines'][-1]['map_patch_colors']['source_sha256']='b'*64
+                    elif changed=='position':bad['lines'][-1]['bounds']=[320,150,32,16];bad['lines'][-1]['center']=[336,158]
+                    elif changed=='name':bad['lines'][-2]['text']='Unknown'
+                    else:bad['lines'][-1]['text']='Help'
+                    self.assertFalse(classify_dialog(bad,state=s)['supported'],changed)
+
+    def test_optional_original006_colored_badges_bind_known_labels(self):
+        from civ2.observe import recognize
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-006/screens/ui-0000827.png'
+        if not p.exists()or not(root/'.runtime/ocr').exists():self.skipTest('Private original city sprite frame unavailable')
+        state=copy.deepcopy(ROMAN_STATE);state['evidence']={'save_sha256':'a'*64}
+        state['cities']=[{'id':i,'name':name,'owner':1,'size':1,'x':i*2,'y':0}for i,name in enumerate(('Rome','Veii','Antium'))]
+        o=recognize(p);self.assertEqual(classify_dialog(o,state=state)['kind'],'end_turn')
+        self.assertFalse(classify_dialog(o,state=ROMAN_STATE)['supported'])
+
     def test_high_confidence_badge_is_geometry_only_and_requires_owned_save_identity(self):
         o=native_map();s=copy.deepcopy(ROMAN_STATE)
         s.update(cities=[{'name':'Rome','owner':1,'size':2}],evidence={'save_sha256':'a'*64})
@@ -634,6 +682,12 @@ class DialogTests(unittest.TestCase):
         if not p.exists() or not (root/'.runtime/ocr').exists():self.skipTest('private original005sprite frame unavailable')
         state=copy.deepcopy(ROMAN_STATE);state['cities']=[{'name':'Rome'}]
         self.assertEqual(classify_dialog(recognize(p),state=state)['kind'],'normal_map')
+
+    def test_map_status_year_allows_no_separator_but_requires_complete_era(self):
+        for text in ('1650B.C.','1650 B.C.','AD1650','1650','1650C','1650BC warning'):
+            o=native_map();o['lines'][5]['text']=text
+            expected=text in ('1650B.C.','1650 B.C.')
+            self.assertEqual(classify_dialog(o,state=ROMAN_STATE)['supported'],expected,text)
 
     def test_menu_and_government_text_alone_do_not_identify_native_map(self):
         o=observation(row("Sid Meier's Civilization II",y=12),row('Game Kingdom View Orders Advisors World Civilopedia',y=30,w=530),row('4000 B.C. Despotism',x=530,y=90,w=200))
@@ -755,6 +809,10 @@ class DialogTests(unittest.TestCase):
             self.assertFalse(classify_dialog(bad,game_text=source)['supported'])
         bad=copy.deepcopy(o);bad['lines'].append(row('Cancel',x=410,y=296,w=40))
         self.assertFalse(classify_dialog(bad,game_text=source)['supported'])
+        damaged=copy.deepcopy(o);damaged['lines'][0]['text']='Cmiization II';damaged['lines'][2]['text']=damaged['lines'][2]['text'][:-1]
+        self.assertTrue(classify_dialog(damaged,game_text=source)['supported'])
+        damaged['lines'][0]['text']='TEST unknown warning'
+        self.assertFalse(classify_dialog(damaged,game_text=source)['supported'])
 
     def test_optional_original_history_report(self):
         from civ2.observe import recognize
@@ -763,6 +821,18 @@ class DialogTests(unittest.TestCase):
         if not path.exists() or not (root/'.runtime/ocr').exists():self.skipTest('Private original history report unavailable')
         r=classify_dialog(recognize(path),game_text=game_text())
         self.assertTrue(r['supported']);self.assertEqual(r['resource_tag'],'HISTORY')
+
+    def test_optional_original_livy_report_and_first_viking_audience(self):
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        root=Path(__file__).resolve().parents[1]
+        paths=[root/'runs/attempt-005/screens/ui-0001108.png',root/'runs/attempt-006/screens/ui-0000910.png']
+        if not all(p.exists() for p in paths) or not(root/'.runtime/ocr').exists():self.skipTest('Private original report/audience frames unavailable')
+        history=classify_dialog(recognize(paths[0]),game_text=game_text())
+        self.assertEqual(history['resource_tag'],'HISTORY');self.assertFalse(history['requires_model'])
+        audience=classify_dialog(recognize(paths[1]),game_text=game_text())
+        self.assertEqual(audience['resource_tag'],'EMISSARY');self.assertTrue(audience['requires_model'])
+        self.assertEqual([r['text'] for r in audience['options']],['"Yes. I will grant an audience."','O "No. Send her away."'])
 
     def test_optional_original_completion_radio_markers(self):
         from civ2.observe import recognize

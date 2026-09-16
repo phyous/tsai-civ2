@@ -4,13 +4,13 @@ import unittest
 from unittest.mock import patch
 from PIL import Image
 
-from civ2.cursor import CONSTRAINTS, CursorError, locate_cursor, locate_clipped_cursor, move_and_click, move_cursor
+from civ2.cursor import CONSTRAINTS, MAP_CONSTRAINTS, CursorError, locate_cursor, locate_clipped_cursor, move_and_click, move_cursor
 
 
-def picture(*positions):
+def picture(*positions,constraints=CONSTRAINTS):
     image = Image.new('RGB',(640,480),(131,118,93))
     for x,y in positions:
-        for dx,dy,value in CONSTRAINTS:
+        for dx,dy,value in constraints:
             image.putpixel((x+dx,y+dy),value)
     return image
 
@@ -69,6 +69,40 @@ class MeasuredEdgeGame(FakeGame):
 
 
 class CursorTests(unittest.TestCase):
+    def test_exact_map_arrow_is_distinct_and_rejects_one_changed_pixel(self):
+        image=picture((269,249),constraints=MAP_CONSTRAINTS)
+        self.assertEqual(locate_cursor(image),(269,249))
+        image.putpixel((270,250),(254,254,254))
+        with self.assertRaises(CursorError):locate_cursor(image)
+        with self.assertRaises(CursorError):locate_cursor(picture())
+
+    def test_two_map_arrows_or_mixed_original_shapes_are_ambiguous(self):
+        with self.assertRaisesRegex(CursorError,'More than one'):
+            locate_cursor(picture((10,20),(403,337),constraints=MAP_CONSTRAINTS))
+        image=picture((10,20))
+        for dx,dy,value in MAP_CONSTRAINTS:image.putpixel((403+dx,337+dy),value)
+        with self.assertRaisesRegex(CursorError,'More than one'):locate_cursor(image)
+
+    @patch('civ2.cursor.time.sleep')
+    def test_map_arrow_parking_uses_full_feedback_without_button(self,_):
+        game=FakeGame()
+        def capture(path,binary=False):
+            out=BytesIO();picture(game.cursor,constraints=MAP_CONSTRAINTS).save(out,format='PNG');return out.getvalue()
+        game.request=capture
+        receipt=move_cursor(game,620,410)
+        self.assertFalse(receipt['issued'])
+        self.assertTrue(all(e['type']=='mousemove' for e in game.inputs))
+        self.assertLessEqual(max(abs(a-b) for a,b in zip(game.cursor,(620,410))),3)
+
+    def test_optional_original_map_arrow_before_after_motion_and_other_campaign(self):
+        root=Path(__file__).resolve().parents[1]
+        cases=[('runs/attempt-005/screens/ui-0001045.png',(269,249)),
+               ('runs/attempt-005/screens/ui-0001047.png',(293,249)),
+               ('runs/attempt-004/screens/ui-0000152.png',(203,178))]
+        if not all((root/p).exists() for p,_ in cases):self.skipTest('Private original map-arrow frames unavailable')
+        for path,expected in cases:
+            with Image.open(root/path) as image:self.assertEqual(locate_cursor(image),expected)
+
     def test_exact_arrow_and_unconstrained_background(self):
         self.assertEqual(locate_cursor(picture((403,337))),(403,337))
     def test_absent_ambiguous_or_scaled_cursor_is_refused(self):

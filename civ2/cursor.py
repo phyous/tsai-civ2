@@ -23,6 +23,18 @@ ARROW = (
 )
 CONSTRAINTS = tuple((x, y, (0, 0, 0) if char == 'B' else (255, 255, 255))
                     for y, row in enumerate(ARROW) for x, char in enumerate(row) if char != '.')
+# The original map uses a second18px arrow (005/1045 hotspot269,249).
+# It shares the first9 rows, then has a shorter head and alternating-width stem.
+# These are exact observed pixels, not a scaled or approximate cursor match.
+MAP_ARROW = (
+    'BB.........','BWB........','BWWB.......','BWWWB......',
+    'BWWWWB.....','BWWWWWB....','BWWWWWWB...','BWWWWWWWB..',
+    'BWWWWWWWWB.','BWWWWWBBBBB','BWWBBWB....','BWB.BWWB...',
+    'BB...BWB...','B....BWWB..','......BWB..','......BWWB.',
+    '.......BWB.','.......BB..',
+)
+MAP_CONSTRAINTS = tuple((x,y,(0,0,0) if char=='B' else (255,255,255))
+                        for y,row in enumerate(MAP_ARROW) for x,char in enumerate(row) if char!='.')
 # Start at the existing estimator's upper accepted gain until actual motion
 # calibrates each axis. Starting at 1 made the observed Windows vertical gain 2
 # overshoot near bottom controls and clip the cursor before any readback.
@@ -40,14 +52,15 @@ def locate_cursor(image: Image.Image) -> tuple[int, int]:
     pixels = image.convert('RGB').load()
     candidates = []
     black, white = (0, 0, 0), (255, 255, 255)
-    for y in range(480 - len(ARROW) + 1):
-        for x in range(640 - len(ARROW[0]) + 1):
-            if pixels[x, y] != black or pixels[x + 1, y] != black or pixels[x + 1, y + 1] != white:
-                continue
-            if all(pixels[x + dx, y + dy] == value for dx, dy, value in CONSTRAINTS):
-                candidates.append((x, y))
-                if len(candidates) > 1:
-                    raise CursorError('More than one original Windows arrow is visible')
+    for shape,constraints in ((ARROW,CONSTRAINTS),(MAP_ARROW,MAP_CONSTRAINTS)):
+        for y in range(480 - len(shape) + 1):
+            for x in range(640 - len(shape[0]) + 1):
+                if pixels[x, y] != black or pixels[x + 1, y] != black or pixels[x + 1, y + 1] != white:
+                    continue
+                if all(pixels[x + dx, y + dy] == value for dx, dy, value in constraints):
+                    candidates.append((x, y))
+                    if len(candidates) > 1:
+                        raise CursorError('More than one original Windows arrow is visible')
     if not candidates:
         raise CursorError('The original Windows arrow is not fully visible')
     return candidates[0]
@@ -143,7 +156,9 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
             value = round(error[index] / gains[index])
             if value == 0 and abs(error[index]) > 2:
                 value = 1 if error[index] > 0 else -1
-            delta.append(max(-12, min(12, value)))
+            # Use the full bounded host-input range. Every step still requires
+            # a freshly observed guest cursor before another move or click.
+            delta.append(max(-32, min(32, value)))
         actual_delta = tuple(delta)
         if actual_delta == (0, 0):
             raise CursorError('Cursor movement is below the supported resolution')

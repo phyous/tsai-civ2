@@ -1,6 +1,7 @@
 """Offline runner-contract tests. All observations and inputs are synthetic TEST data."""
 from collections import deque
 import copy
+import hashlib
 from unittest import mock
 import unittest
 
@@ -42,6 +43,43 @@ def session():
 
 
 class SessionTests(unittest.TestCase):
+    def test_live_checkpoint_never_calls_save_or_save_parser(self):
+        s=session(); data=b'TEST live snapshot capsule'
+        after=state();after['evidence']={'kind':'live_memory',
+            'observation_sha256':hashlib.sha256(data).hexdigest()}
+        s.observer=mock.Mock()
+        s.observer.read.return_value={'state':after,'data':data,'receipt':{'nonce':'TEST'}}
+        s._archive_observer_frames=mock.Mock(side_effect=lambda receipt:receipt)
+        with mock.patch('civ2.session.parse_save') as parser:
+            self.assertEqual(s.checkpoint(),after)
+        s.observer.read.assert_called_once_with(rules_text=s.rules_text)
+        s.ui.save_native.assert_not_called();parser.assert_not_called()
+        s.game.rpc.assert_not_called()
+        s.journal.artifact.assert_called_once_with('observations/d000001.json',data)
+        event=s.journal.append.call_args
+        self.assertEqual(event.kwargs['observation_kind'],'live_memory')
+        self.assertNotIn('save_sha256',s.state['evidence'])
+
+    def test_live_observer_failure_has_no_save_fallback(self):
+        s=session();s.observer=mock.Mock()
+        s.observer.read.side_effect=RuntimeError('TEST unstable original map')
+        with self.assertRaisesRegex(RuntimeError,'unstable'):
+            s.checkpoint()
+        s.ui.save_native.assert_not_called();s.game.rpc.assert_not_called()
+        s.journal.artifact.assert_not_called()
+
+    def test_live_snapshot_rejects_hash_mismatch_and_save_alias(self):
+        data=b'TEST capsule'; digest=hashlib.sha256(data).hexdigest()
+        for evidence in ({'kind':'live_memory','observation_sha256':'a'*64},
+                         {'kind':'live_memory','save_sha256':digest},
+                         {'kind':'live_memory','observation_sha256':digest,'save_sha256':digest}):
+            s=session();s.observer=mock.Mock()
+            after=state();after['evidence']=evidence
+            s.observer.read.return_value={'state':after,'data':data,'receipt':{}}
+            with self.subTest(evidence=evidence),self.assertRaises(ValueError):
+                s.checkpoint()
+            s.ui.save_native.assert_not_called();s.journal.artifact.assert_not_called()
+
     def test_button_dispatch_does_not_confirm_again_but_list_dispatch_does(self):
         for control,confirm in [('button',False),('list_item',True),('option',True)]:
             with self.subTest(control=control):

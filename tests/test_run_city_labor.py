@@ -36,9 +36,8 @@ def session(observations,after='expected'):
         return s.state
     s.checkpoint=mock.Mock(side_effect=checkpoint)
     def choose(screen,reviewed,*,labor_ready=False):
-        assert labor_ready
         actions=city_control_candidates(s.state,screen,reviewed,rules,labor_ready=labor_ready)
-        s.decisions+=1;action=actions['labor_remove_worker_2']
+        s.decisions+=1;action=actions['labor_remove_worker_2' if labor_ready else 'review_labor']
         s.history.append({'decision':s.decisions,'action':deepcopy(action)})
         return action,frame(90)
     s.choose_city_control=mock.Mock(side_effect=choose)
@@ -48,28 +47,42 @@ def session(observations,after='expected'):
 
 
 def sequence():
-    return [frame(1),frame(2),frame(3,'end_turn'),frame(4,'end_turn'),
+    return [frame(1),frame(3,'end_turn'),frame(4,'end_turn'),
             frame(5,'city_locator'),frame(6,'city_locator'),frame(7),
             frame(8),frame(9,'end_turn'),frame(10,'end_turn'),
             frame(11,'city_locator'),frame(12,'city_locator'),frame(13)]
 
 
-def run(s):
+def run(s,limit=2):
     with mock.patch('civ2.run.game_text',return_value='TEST'), \
          mock.patch('civ2.run.classify_dialog',side_effect=lambda o,**kw:o['classified']), \
          mock.patch('civ2.run.time.sleep'):
-        return run_steps(s,max_decisions=1)
+        return run_steps(s,max_decisions=limit)
 
 
 def events(s,kind):return [c.kwargs for c in s.journal.append.call_args_list if c.args[0]==kind]
 
 
 class LaborRunTests(unittest.TestCase):
+    def test_exit_change_and_buy_do_not_prepare_unselected_labor(self):
+        for identifier in ('exit_city','change_production','open_buy_quote'):
+            with self.subTest(identifier=identifier):
+                s=session([frame(1)])
+                def choose(screen,reviewed,*,labor_ready=False):
+                    self.assertFalse(labor_ready)
+                    s.decisions+=1
+                    return city_control_candidates(s.state,screen,reviewed,s.rules)[identifier],frame(90)
+                s.choose_city_control.side_effect=choose
+                run(s,limit=1)
+                self.assertEqual(events(s,'city_labor_refresh_started'),[])
+                s.checkpoint.assert_not_called();s.game.chord.assert_not_called();s.ui.key.assert_not_called()
+                self.assertEqual(controller_context(s)['pending_city_control']['action']['id'],identifier)
+
     def test_prepare_and_verify_complete_before_decision_limit_with_outer_context_intact(self):
         s=session(sequence());result=run(s);ctx=controller_context(s)
         self.assertIn('decision checkpoint',result['reason'])
-        self.assertEqual(s.choose_city_control.call_count,1);self.assertEqual(s.checkpoints,2)
-        self.assertEqual(s.ui.key.call_args_list,[mock.call('Escape'),mock.call('Escape')])
+        self.assertEqual(s.choose_city_control.call_count,2);self.assertEqual(s.checkpoints,2)
+        self.assertEqual(s.ui.key.call_args_list,[mock.call('Escape')])
         self.assertEqual(s.game.chord.call_args_list,[mock.call('ShiftLeft','KeyC',hold_ms=120)]*2)
         self.assertEqual(s.ui.select_text.call_count,4)
         self.assertIsNone(ctx['pending_labor_refresh']);self.assertIsNone(ctx['pending_city_control'])
@@ -81,6 +94,11 @@ class LaborRunTests(unittest.TestCase):
         self.assertEqual(checkpoints[1]['result']['status'],'observed_expected_change')
         self.assertEqual([e['purpose'] for e in events(s,'city_labor_ready')],['prepare_labor_choices','verify_labor'])
         self.assertIn('observed_expected_change',s.history[-1]['outcome'])
+        preparation=events(s,'city_labor_refresh_started')[0]
+        self.assertEqual(preparation['decision'],1)
+        self.assertEqual(preparation['preparation_action']['id'],'review_labor')
+        self.assertEqual([e['step'] for e in events(s,'city_labor_refresh_input')],
+                         ['open_locator','close_city','open_locator'])
 
     def test_no_effect_is_explicit_counts_against_budget_and_reopens_for_model(self):
         s=session(sequence(),'unchanged');run(s)
@@ -95,18 +113,18 @@ class LaborRunTests(unittest.TestCase):
         self.assertEqual(events(s,'city_labor_checkpoint')[-1]['result']['status'],'unexpected_change')
         self.assertEqual(controller_context(s)['pending_labor_refresh']['phase'],'failed')
         self.assertIsNone(controller_context(s)['city_labor_ready'])
-        self.assertEqual(s.choose_city_control.call_count,1);self.assertEqual(s.game.chord.call_count,1)
+        self.assertEqual(s.choose_city_control.call_count,2);self.assertEqual(s.game.chord.call_count,1)
 
     def test_wrong_city_after_refresh_cannot_authorize_labor(self):
-        observations=sequence();observations[6]['classified']['title']='City of TEST Veii, 3700 B.C.'
+        observations=sequence();observations[5]['classified']['title']='City of TEST Veii, 3700 B.C.'
         s=session(observations);result=run(s)
-        self.assertIn('different city',result['reason']);s.choose_city_control.assert_not_called()
+        self.assertIn('different city',result['reason']);self.assertEqual(s.choose_city_control.call_count,1)
         self.assertEqual(events(s,'city_labor_ready'),[])
 
     def test_failed_locator_cannot_fall_through_to_unit_or_empire_decision(self):
-        observations=sequence();observations[4]=frame(5,'normal_map')
+        observations=sequence();observations[3]=frame(5,'normal_map')
         s=session(observations);result=run(s)
-        self.assertIn('no observed transition',result['reason']);s.choose_city_control.assert_not_called()
+        self.assertIn('no observed transition',result['reason']);self.assertEqual(s.choose_city_control.call_count,1)
         self.assertEqual(s.checkpoint.call_count,1)
 
     def test_refresh_state_cannot_be_overwritten_or_reopen_after_turn_change(self):

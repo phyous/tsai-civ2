@@ -24,6 +24,29 @@ def labor(state,screen,rules,record=None):
 
 
 class LaborControlTests(unittest.TestCase):
+    def test_labor_review_is_explicit_exit_then_fresh_choices_not_a_reassignment(self):
+        s,c,r=inputs(True)
+        actions=city_control_candidates(s,c,rules=r)
+        self.assertEqual(set(actions),{'change_production','open_buy_quote','review_labor','exit_city'})
+        action=actions['review_labor'];p=action['parameters']
+        self.assertEqual(action['kind'],'city_control')
+        self.assertEqual(p['observed_text'],'Exit')
+        self.assertEqual(p['center'],actions['exit_city']['parameters']['center'])
+        self.assertEqual(p['expected_screen'],'fresh_city_labor')
+        self.assertNotIn('slot',p)
+        validate_city_control(action,s,c,rules=r)
+        fresh=city_control_candidates(s,c,rules=r,labor_ready=True)
+        self.assertNotIn('review_labor',fresh)
+        self.assertEqual(sum(a['kind']=='city_labor' for a in fresh.values()),20)
+        with self.assertRaises(CityControlError):validate_city_control(action,s,c,rules=r,labor_ready=True)
+
+    def test_review_labor_is_absent_without_a_valid_available_labor_choice(self):
+        s,c,r=inputs()
+        record={**reviewed(),'labor_reassignments':2}
+        self.assertNotIn('review_labor',city_control_candidates(s,c,record,r))
+        c.pop('evidence')
+        self.assertNotIn('review_labor',city_control_candidates(s,c,rules=r))
+
     def test_one_worked_square_can_be_removed_without_touching_center(self):
         s,c,r=inputs();actions=labor(s,c,r)
         self.assertEqual(list(actions),['labor_remove_worker_2'])

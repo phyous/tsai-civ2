@@ -20,6 +20,9 @@ import math
 import re
 import unicodedata
 from .native_events import EVENT_TITLES, classify_information
+from .map_badges import proven_badge
+from .tax_controls import proven_tax_arrows
+from .exchange_picker import classify_exchange_picker
 
 
 class DialogObservationError(ValueError):
@@ -35,6 +38,13 @@ def _pattern(template):
     text=_normal(template.replace('^',' '))
     pieces=re.split(r'(%string\d+|%number\d+)',text)
     return ''.join(r'.{1,180}?' if p.startswith('%string') else r'[0-9,+.\-]+' if p.startswith('%number') else re.escape(p) for p in pieces)
+
+
+def _choice_pattern(template):
+    pattern=_pattern(template)
+    # A quoted option's variable may not swallow the closing quote and the
+    # next, independently rendered quoted alternative.
+    return pattern.replace(r'.{1,180}?',r'[^\"]{1,180}?') if _normal(template).startswith('"') else pattern
 
 
 def dialog_resources(game_text):
@@ -95,6 +105,9 @@ def _rows(observation):
             raise DialogObservationError('Invalid OCR confidence')
         prepared=dict(text=text,normal=_normal(text),center=list(center),bounds=list(bounds),
                       source_line=index,confidence=confidence)
+        if proven_badge(row,observation['sha256']):prepared['original_city_badge']=True
+        if (arrows:=proven_tax_arrows(row,observation['sha256'])):
+            prepared['native_tax_arrows']=arrows
         colors=row.get('map_patch_colors')
         if (isinstance(colors,dict) and colors.get('source_sha256')==observation['sha256']
                 and colors.get('bounds')==list(bounds) and colors.get('rgb_spread_threshold')==24
@@ -108,7 +121,7 @@ def _rows(observation):
             for p in provenance:
                 if not isinstance(p,dict):continue
                 mode=p.get('preprocessing','');coords=p.get('normalized_bounds')
-                if (mode!='native' and not re.fullmatch(r'map_label_\d+(?:_gray|_white)?_3x',str(mode))):continue
+                if (mode!='native' and not re.fullmatch(r'map_label_\d+(?:_gray|_white|_wide_gray|_white_low|_white_wide)?_3x',str(mode))):continue
                 if (not isinstance(p.get('text'),str) or not re.fullmatch(r'[A-Za-z]{3,25}',p['text'])
                         or type(p.get('confidence')) not in (int,float) or not .8<=p['confidence']<=1
                         or not isinstance(coords,list) or len(coords)!=4
@@ -146,7 +159,9 @@ def _saved_city_name(raw_name,state):
     """Resolve only a unique exact/one-edit owned SAV identity, never a new city."""
     if not isinstance(state,dict) or not isinstance(raw_name,str) or len(_normal(raw_name))<3:
         return None
-    digest=state.get('evidence',{}).get('save_sha256')
+    from .revision import observation_digest
+    try: digest=observation_digest(state)
+    except ValueError:return None
     player=state.get('player',{}).get('id')
     if not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest) or type(player) is not int:
         return None
@@ -176,12 +191,35 @@ def _recent_founded_name(raw_name,year_text,state):
     return matches[0] if len(matches)==1 else None
 
 
+def _clipped_city_label(row,state):
+    """A viewport-edge fragment is layout only, never a reconstructed actor.
+
+    Original005/1189 clips Antium to 'ium' against the map's left border.
+    Require a unique strict suffix/prefix of an already observed city name.
+    """
+    from .revision import observation_digest
+    try: observation_digest(state)
+    except (ValueError,TypeError):return False
+    text=row['normal'];x,y,w,h=row['bounds']
+    if (row['confidence']<.8 or not re.fullmatch('[a-z]{3,25}',text)
+            or text in {'yes','exit','help','buy','next','back','auto','done','save','load','menu','quit','warning'}
+            or not 70<=y<=440 or not 1<=h<=24 or not 1<=w<=160):return False
+    left=0<=x<=8;right=452<=x+w<=460
+    if left==right:return False
+    names={_normal(c['name']) for key in ('cities','known_cities') for c in state.get(key,[])
+           if isinstance(c,dict) and isinstance(c.get('name'),str)
+           and all(type(c.get(k)) is int for k in ('x','y'))}
+    matches={name for name in names if len(name)>len(text)
+             and (name.endswith(text) if left else name.startswith(text))}
+    return len(matches)==1
+
+
 def _production_stat(text):
     return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+/\d+\s+hp:\s*\d+/\d+)?\)',text))
 
 
 def _city_sprite_text(row, labels):
-    """Ignore only low-confidence glyph fragments on a known city's sprite.
+    """Recognize bounded fragments on a known city's colored sprite.
 
     The Rome icons at006/34 and005/295 were read as 'ОБ П' and 'Wu Fom 1'
     (confidence.30), directly above the independently read Rome label. This is artwork evidence,
@@ -191,7 +229,7 @@ def _city_sprite_text(row, labels):
     translated=row['text'].translate(str.maketrans({'О':'O','К':'K'}))
     words=_normal(''.join(c if c.isalnum() or c.isspace() else ' ' for c in translated)).split()
     controls={'ok','no','yes','exit','help','next','back','buy','auto','cancel','done','name','save','load','menu','quit','warning'}
-    if (not 0<=row['confidence']<.5 or not 1<=len(glyphs)<=8
+    if ((row['confidence']>=.5 and row.get('chromatic_fraction',0)<.5) or not 1<=len(glyphs)<=8
             or not any(c.isalnum() for c in glyphs)
             or (any(not c.isalnum() and c not in '()[]|/' for c in glyphs)
                 and row.get('chromatic_fraction',0)<.5)
@@ -217,7 +255,9 @@ def _owned_city_size_sprite(row, labels, state):
             or not 1<=row['bounds'][2]<=48 or not 1<=row['bounds'][3]<=20):
         return False
     player=state.get('player',{}).get('id')
-    digest=state.get('evidence',{}).get('save_sha256')
+    from .revision import observation_digest
+    try: digest=observation_digest(state)
+    except ValueError:return False
     if (type(player) is not int or not isinstance(digest,str)
             or not re.fullmatch('[0-9a-f]{64}',digest)):
         return False
@@ -231,6 +271,14 @@ def _owned_city_size_sprite(row, labels, state):
                and 0<=row['center'][0]-label['center'][0]<=24
                and 12<=label['center'][1]-row['center'][1]<=28
                and -2<=label['bounds'][1]-(y+h)<=10 for label in labels)
+
+
+def _city_badge_text(row,labels):
+    if (not row.get('original_city_badge') or row['confidence']<.8
+            or not re.fullmatch(r'[1-9][0-9]?',row['text'])):return False
+    return any(abs(row['center'][0]-label['center'][0])<=32
+               and 14<=label['center'][1]-row['center'][1]<=30
+               and -2<=label['bounds'][1]-(row['bounds'][1]+row['bounds'][3])<=12 for label in labels)
 
 
 def _native_map_kind(rows, observation, state):
@@ -259,7 +307,7 @@ def _native_map_kind(rows, observation, state):
         return None, 'Native map and world pane titles are incomplete'
     status=[r for r in rows if r['bounds'][0]>=466 and 175<=r['center'][1]<=246]
     people=[r for r in status if re.fullmatch(r'[0-9,]+\s+people',r['normal'])]
-    years=[r for r in status if re.fullmatch(r'\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',r['normal'])]
+    years=[r for r in status if re.fullmatch(r'\d{1,5}\s*(?:b\.?\s*c\.?|a\.?\s*d\.?)',r['normal'])]
     # Original narrow status-font 1 is observed as I/l and 5 as E. This is only a pane
     # layout marker, never an OCR-derived treasury value; economy comes from SAV.
     gold=[r for r in status if re.fullmatch(r'[0-9ile,]{1,16}\s+(?:gold|cold)(?:\s+[0-9.]+)?',r['normal'])]
@@ -273,6 +321,7 @@ def _native_map_kind(rows, observation, state):
                 for key in ('cities','known_cities') for c in state.get(key,[])
                 if isinstance(c,dict) and isinstance(c.get('name'),str)}
     def city_label(row):
+        if _clipped_city_label(row,state):return True
         readings={row['normal'],*row.get('same_pixel_map_readings',[])}
         readings.update(_normal(c['name']) for text in list(readings)
                         if text not in {'ok','cancel','help','exit','buy','yes','no','next','back','auto','done','save','load','menu','quit','warning'}
@@ -286,9 +335,10 @@ def _native_map_kind(rows, observation, state):
     for r in rows:
         if r['bounds'][1]>=65 and r['bounds'][0]<462:
             if (r not in labels and not _city_sprite_text(r,labels)
-                    and not _owned_city_size_sprite(r,labels,state)):
+                    and not _owned_city_size_sprite(r,labels,state) and not _city_badge_text(r,labels)):
                 return None, 'Unexpected text over the native map playfield; possible unrecognized modal'
     full=' '.join(r['normal'] for r in rows)
+
     if re.search(r'\b(?:select|choose|emissary|confirmation|warning|please|options|really|are you sure)\b',full):
         return None, 'Possible unrecognized modal or open menu'
     end=[r for r in rows if r['normal']=='end of turn' and r['bounds'][0]>=466 and 175<=r['center'][1]<=465]
@@ -366,7 +416,7 @@ def _civilopedia_reference(rows, observation, rules):
             'anchor_lines':[r['source_line'] for r in [title,allows[0],repeated[0],*controls.values()]]}
 
 
-def classify_dialog(observation, *, rules=None, game_text=None, state=None):
+def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None, state=None):
     """Return supported/unknown classification with exact visible option targets.
 
     ``options`` contains decision choices; ``buttons`` contains observed native
@@ -404,6 +454,53 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         limit=min(r['bounds'][1] for r in bottom_buttons)
         return [r for r in below if r['bounds'][1]+r['bounds'][3]<=limit+2],bottom_buttons,limit
     full=' '.join(r['normal'] for r in rows)
+    # Original tax scrollbars expose six observed arrow buttons, not a guessed
+    # percentage-to-pixel mapping. One model click is followed by a fresh read.
+    tax_labels={'How Shall We Distribute The Wealth','Government','Maximum Rate','Taxes','Science','Luxuries','Lock'}
+    if isinstance(labels_text,str) and tax_labels<=set(labels_text.splitlines()) and (width,height)==(640,480):
+        titles=[r for r in rows if 90<=r['center'][1]<=125 and 280<=r['center'][0]<=350
+                and r['confidence']>=.8 and _edit_distance(r['normal'],'how shall we distribute the wealth')<=4]
+        contexts=[(r,m) for r in rows if (m:=re.fullmatch(r'government: (anarchy|despotism|monarchy|communism|fundamentalism|republic|democracy) maximum rate: (\d{1,3})%',r['normal']))
+                  and r['confidence']>=.8 and 120<=r['center'][1]<=160]
+        rates=[(r,m) for r in rows if (m:=re.fullmatch(r'(taxes|science|luxuries):\s*(\d{1,3})%',r['normal']))
+               and r['confidence']>=.8 and 'native_tax_arrows' in r]
+        buttons=[r for r in rows if r['normal'] in {'ok','cancel','yes','no','help','done','exit'}]
+        if (len(titles)==len(contexts)==1 and len(rates)==3 and {m[1] for _,m in rates}=={'taxes','science','luxuries'}
+                and len(buttons)==1 and buttons[0]['normal']=='ok'
+                and 300<=buttons[0]['center'][0]<=340 and 350<=buttons[0]['center'][1]<=385):
+            limit=int(contexts[0][1][2]);values={m[1]:int(m[2]) for _,m in rates}
+            panel=[r for r in rows if 118<=r['bounds'][0] and r['bounds'][0]+r['bounds'][2]<=520
+                   and 125<=r['center'][1]<=350]
+            markers=[r for r in panel if r not in [contexts[0][0],*[r for r,_ in rates]]]
+            def marker_ok(row):
+                if re.fullmatch(r'(?:0|100)%|l?lock|total income: \d+(?: total cost: \d+)?|total cost: \d+|discoveries: \d+ turns?',row['normal']):return True
+                # A '+' OCR read on the right-arrow glyph remains pixel-proven
+                # artwork. It does not create an eighth control.
+                x,y,w,h=row['bounds']
+                return row['text'] in ('+','<','>','←','→') and any(
+                    bx<=x and by<=y and x+w<=bx+bw and y+h<=by+bh
+                    for rate,_ in rates for arrow in rate['native_tax_arrows']
+                    for bx,by,bw,bh in [arrow['bounds']])
+            if (limit in range(0,101,10) and sum(values.values())==100
+                    and all(v in range(0,limit+1,10) for v in values.values())
+                    and all(marker_ok(r) and r['confidence']>=.8 for r in markers)
+                    and len([r for r in markers if r['normal']=='0%'])==3
+                    and len([r for r in markers if r['normal']=='100%'])==3):
+                options=[]
+                for row,match in rates:
+                    for arrow in row['native_tax_arrows']:
+                        direction=arrow['direction'];verb='decrease' if direction=='left' else 'increase'
+                        options.append(dict(text=f"{row['text']} — {direction} arrow (attempt {verb})",
+                            center=arrow['center'],control='button',source_line=row['source_line'],
+                            confidence=row['confidence'],enabled=None,
+                            observed_glyph={'direction':direction,'bounds':arrow['bounds']}))
+                ok=_option(buttons[0],'button');options.append(ok)
+                result['tax_allocation']={'government':contexts[0][1][1],'maximum_rate':limit,'rates':values,
+                    'semantics':'Each arrow attempts one native adjustment; the game enforces limits and redistributes other rows. Reobserve after every click; OK confirms.'}
+                result['evidence']['tax_controls']={'source':'Original LABELS.TXT and six exact 17x17 scrollbar-arrow pixel patterns',
+                    'labels_sha256':hashlib.sha256(labels_text.encode('utf-8')).hexdigest(),
+                    'source_image_sha256':observation['sha256']}
+                return finish('tax_allocation',titles[0]['text'],options,[ok],model=True)
     # Original untitled @THRONE notice. Only dismiss its complete narrative;
     # this does not choose a decoration on the following interactive screen.
     throne = re.search(r'(?ms)^@THRONE\s*\n(.*?)(?=^@|\Z)', game_text or '')
@@ -426,6 +523,12 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             result['evidence']['template_sha256']=hashlib.sha256(expected.encode()).hexdigest()
             return finish('presentation_notice','Throne room notice',[button],[button],
                           mechanical='acknowledge_presentation')
+    exchange=classify_exchange_picker(observation,rows,dialog_resources(game_text or ''),rules,state)
+    if exchange:
+        result.update(resource_tag=exchange['resource_tag'],advance=exchange['advance'],prior_trade=exchange['prior_trade'])
+        result['evidence']['exchange_picker']=exchange['evidence']
+        return finish('exchange_picker',exchange['title'],exchange['options'],exchange['buttons'],
+                      model=exchange['requires_model'],mechanical=exchange['mechanical_action'])
     reference=_civilopedia_reference(rows,observation,rules)
     if reference is not None:
         if 'reason' in reference:
@@ -608,6 +711,29 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         ok=_option(button_rows[0],'button')
         return finish('information',title['text'],[ok],[ok],mechanical='acknowledge_information',
                       reason='Original founding notice acknowledged after observed title, body and OK')
+    # Optional council consultation is a real two-option native choice. A
+    # damaged heading needs the complete original body and both alternatives;
+    # its displayed date remains observed text, independent of the save year.
+    if game_text:
+        council=[t for t in dialog_resources(game_text) if t['tag']=='COUNCILTIME'
+                 and t['title']=='The High Council: %STRING2' and t['width']==320
+                 and t['options']==['Consult High Council.','No thanks, too busy.']
+                 and not t['buttons'] and not t['listbox']]
+        titles=[r for r in rows if (m:=re.fullmatch(r'(.+?):\s*(\d{1,5}\s*(?:b\.?\s*c\.?|a\.?\s*d\.?))',r['normal']))
+                and _edit_distance(m[1],'the high council')<=4 and r['confidence']>=.8]
+        if len(council)==len(titles)==1:
+            title=titles[0];body,controls,_=body_rows(title,{'ok','cancel','yes','no','help'},320)
+            expected={_normal(t) for t in council[0]['options']}
+            options=[r for r in body if re.sub(r'^(?:o|[○●•])\s+','',r['normal']) in expected]
+            prose=[r for r in body if r not in options]
+            if (len(options)==2 and {re.sub(r'^(?:o|[○●•])\s+','',r['normal']) for r in options}==expected
+                    and len(controls)==1 and controls[0]['normal']=='ok' and prose
+                    and all(r['confidence']>=.8 for r in [*body,*controls])
+                    and max(r['center'][1] for r in prose)<min(r['center'][1] for r in options)
+                    and re.fullmatch(_pattern(council[0]['body']),_normal(' '.join(r['text'] for r in prose)))):
+                result['resource_tag']='COUNCILTIME'
+                return finish('high_council',title['text'],[_option(r,'option') for r in options],
+                              [_option(r,'button') for r in controls],model=True)
     patterns={
         'new_city_name':r'what shall we name "?this city',
         'research_choice':r'what discovery shall our .+ pursue',
@@ -621,6 +747,47 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         'city_locator':r'where in the (?:heck is|beck is|heckis)',
     }
     matches=[(kind,r) for kind,p in patterns.items() for r in single_title(p)]
+    if not matches and game_text:
+        offers=[t for t in dialog_resources(game_text) if t['tag']=='AUTOREV'
+                and _normal(t['title'])=='civ rules: governments' and len(t['options'])==2]
+        recovered=[]
+        for heading in rows:
+            if heading['confidence']<.8 or _edit_distance(heading['normal'],'civ rules: governments')>4:continue
+            for template in offers:
+                body,controls,_=body_rows(heading,{'ok','cancel','help'},template['width'] or 440)
+                radio=lambda r:re.sub(r'^[•○●o)]*\s*','',r['normal'])
+                choices=[r for r in body if any(re.fullmatch(_pattern(t),radio(r)) for t in template['options'])]
+                prose=[r for r in body if r not in choices]
+                if (len(choices)==2 and len(controls)==1 and controls[0]['normal']=='ok'
+                        and all(r['confidence']>=.8 for r in body+controls)
+                        and re.fullmatch(_pattern(template['body']),_normal(' '.join(r['text'] for r in prose)))):
+                    recovered.append(heading)
+        if len(recovered)==1:
+            matches=[('revolution_offer',recovered[0])]
+            result['title_recovery']={'source':'Complete original AUTOREV body and both actual choices; bounded title glyph difference',
+                                      'ocr_text':recovered[0]['text']}
+    if not matches and game_text:
+        templates=[t for t in dialog_resources(game_text) if t['tag']=='REVOLUTION'
+                   and _normal(t['title'])=='revolution' and t['options']==['Yes','No']]
+        recovered=[]
+        if len(templates)==1:
+            for heading in rows:
+                if heading['confidence']<.8 or _edit_distance(heading['normal'],'revolution')>2:continue
+                body,controls,_=body_rows(heading,{'ok','cancel','help'},240)
+                radio=lambda r:re.sub(r'^[o0•○●]\s+','',r['normal'])
+                choices=[r for r in body if radio(r) in ('yes','no')]
+                prose=' '.join(r['normal'] for r in body if r not in choices)
+                if (len(choices)==2 and {radio(r) for r in choices}=={'yes','no'}
+                        and len(controls)==1 and controls[0]['normal']=='ok'
+                        and all(r['confidence']>=.8 for r in body+controls)
+                        and re.fullmatch(_pattern(templates[0]['body']),prose)):
+                    recovered.append(heading)
+        if len(recovered)==1:
+            matches=[('revolution_choice',recovered[0])]
+            result['resource_tag']='REVOLUTION'
+            result['title_recovery']={'source':'Original REVOLUTION body, both observed alternatives and sole OK; bounded title glyph difference',
+                                      'ocr_text':recovered[0]['text'],'source_line':recovered[0]['source_line']}
+        elif len(recovered)>1:return unknown('Ambiguous original revolution headings')
     # The original selected-font research screenshot reads the @RESEARCH
     # heading as "Whait ... porsue?". These two measured glyph variants do not
     # authorize a list by themselves: exact advance peers and all three native
@@ -720,15 +887,22 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                 if len(ok)==1 and len(button_rows)==1:
                     return finish('information',title['text'],ok,buttons,mechanical='acknowledge_information')
                 return unknown('Post-revolution acknowledgement is ambiguous',kind,title['text'])
-            choices=[_option(r,'option') for r in body if r['normal'] in ('yes','no')]
-            if 'do we want a revolution to overthrow' not in body_text or {_normal(r['text']) for r in choices}!={'yes','no'}:
+            radio=lambda r:re.sub(r'^[o0•○●]\s+','',r['normal'])
+            choice_rows=[r for r in body if radio(r) in ('yes','no')]
+            prose=' '.join(r['normal'] for r in body if r not in choice_rows)
+            if (len(choice_rows)!=2 or {radio(r) for r in choice_rows}!={'yes','no'}
+                    or not re.fullmatch(r'do we want a revolution to overthrow the [a-z ]+',prose)
+                    or any(r['confidence']<.8 for r in body+button_rows)
+                    or len(button_rows)!=1 or button_rows[0]['normal']!='ok'):
                 return unknown('Revolution question or both actual alternatives missing',kind,title['text'])
+            choices=[_option(r,'option') for r in choice_rows]
             return finish(kind,title['text'],choices,buttons,model=True)
         if kind=='revolution_offer':
             templates=[t for t in dialog_resources(game_text or '') if t['tag'] in ('AUTOMONARCHY','AUTOREV')
                        and _normal(t['title'])=='civ rules: governments' and len(t['options'])==2]
             matches=[]
             for template in templates:
+                body,button_rows,_=body_rows(title,{'ok','cancel','help'},template['width'] or 440)
                 choices=[];prose=[]
                 for line in body:
                     text=re.sub(r'^[•○●]\s*','',line['normal'])
@@ -821,7 +995,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                 # Production suffixes must be native parenthesized stat/turn
                 # annotations; no prefix stripping of unknown OCR glyphs.
                 base=re.sub(r'\s+\([^()]*\)\s*$','',row['normal'])
-                if row['normal'] in names or (kind=='production_choice' and base in names):
+                government_label=re.sub(r'^(?:o|[○●•])\s+','',row['normal']) if kind=='government_choice' else None
+                if row['normal'] in names or (kind=='production_choice' and base in names) or government_label in names:
                     if row['confidence']<.8:return unknown('Low-confidence option text',kind,title['text'])
                     choices.append(_option(row,'list_item'))
                 elif (recover_research and len(row['normal'])>=5 and row['confidence']>=.8
@@ -848,18 +1023,38 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         # still need a complete resource-matched body and actual option labels.
         if not game_text:return unknown('Original diplomacy templates required',kind,title['text'])
         templates=[t for t in dialog_resources(game_text) if re.fullmatch(_pattern(t['title']),title['normal'])]
-        below=[r for r in rows if r['bounds'][1]>title['bounds'][1]+title['bounds'][3]-2 and r not in button_rows]
-        actual=' '.join(r['normal'] for r in below)
         found=[]
         for template in templates:
             if not template['body']:continue
-            match=re.match(_pattern(template['body']),actual)
+            # EXCHANGE0 may append one counteroffer from the original LABELS
+            # catalog. Its presence and text must be observed, never invented.
+            optional=[]
+            if template['tag']=='EXCHANGE0' and isinstance(labels_text,str):
+                label='"Will you accept %STRING4 instead?"'
+                if labels_text.splitlines().count(label)==1:optional=[label]
+            # Original emissary notices are narrower than the dialogue menu.
+            # Scope every source template to its own observed frame, excluding
+            # the game status pane visible beside it and text below its OK.
+            below,template_buttons,_=body_rows(title,{'ok','cancel','help','goal','auto'},template['width'] or source_width)
+            if template_buttons!=button_rows or not below:continue
+            half=max((template['width'] or source_width)/2,title['bounds'][2]/2+12)
+            if any(r not in below and r not in template_buttons
+                   and r['bounds'][1]>title['bounds'][1]+title['bounds'][3]-2
+                   and r['center'][1]<min(b['center'][1] for b in template_buttons)
+                   and abs(r['center'][0]-title['center'][0])<=half for r in rows):continue
+            # Normalize the complete wrapped text once. Normalizing each row
+            # would erase an internal colon/period at a line break.
+            actual=_normal(' '.join(r['text'] for r in below))
+            # GREETINGS02 renders its _._._. spacing markup as an ellipsis.
+            # Source text remains immutable; match its observed rendered form.
+            rendered_body=template['body'].replace('_._._.','...')
+            match=(re.match if template['options'] else re.fullmatch)(_pattern(rendered_body),actual)
             if not match:continue
             # Match choices after the complete body, not phrases quoted by the
             # emissary within the body. Handle OCR-wrapped options in 1..3 rows.
-            used=0;after=[]
-            for row in below:
-                start=used;used+=len(row['normal'])+1
+            after=[]
+            for index,row in enumerate(below):
+                start=len(_normal(' '.join(r['text'] for r in below[:index])))+1 if index else 0
                 if start>=match.end():after.append(row)
             options=[];i=0;valid=True
             while i<len(after):
@@ -867,8 +1062,11 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                 for count in range(1,min(3,len(after)-i)+1):
                     segment=after[i:i+count]
                     if count>1 and any(segment[j+1]['bounds'][1]-segment[j]['bounds'][1]>28 for j in range(count-1)):continue
-                    joined=' '.join(r['normal'] for r in segment)
-                    if any(re.fullmatch(_pattern(t),joined) for t in template['options']):
+                    joined=_normal(' '.join(r['text'] for r in segment))
+                    # A visible radio-circle prefix is artwork, not part of the
+                    # source alternative. Preserve it in the actual option text.
+                    joined=re.sub(r'^(?:o|[○●•])\s+(?=["\'])','',joined)
+                    if any(re.fullmatch(_choice_pattern(t),joined) for t in template['options']+optional):
                         matches_option.append((count,segment))
                 if len(matches_option)!=1:valid=False;break
                 count,segment=matches_option[0]
@@ -880,10 +1078,19 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
             if template['options'] and not options:continue
             # Non-menu choice dialogs require all source alternatives; menu
             # templates may have a native filtered subset, all still observed.
-            if template['tag'] not in ('DIPLOMACY','TREATYMENU') and len(options)!=len(template['options']):continue
+            if optional:
+                if len(options) not in (len(template['options']),len(template['options'])+1):continue
+                expected=template['options']+(optional if len(options)>len(template['options']) else [])
+                if any(not re.fullmatch(_choice_pattern(source),re.sub(r'^(?:o|[○●•])\s+(?=["\'])','',_normal(option['text'])))
+                       for source,option in zip(expected,options)):continue
+            elif template['tag'] not in ('DIPLOMACY','TREATYMENU') and len(options)!=len(template['options']):continue
             found.append((template,options))
         if len(found)!=1:return unknown('Diplomatic text/options do not match one complete original template',kind,title['text'])
         template,choices=found[0];result['resource_tag']=template['tag']
+        if template['tag']=='EXCHANGE0' and len(choices)>len(template['options']):
+            result['evidence']['optional_label_source']={'resource':'LABELS.TXT',
+                'sha256':hashlib.sha256(labels_text.encode('utf-8')).hexdigest(),
+                'template':'"Will you accept %STRING4 instead?"'}
         if not choices:
             choices=[_option(r,'button') for r in button_rows if r['normal']=='ok']
             if len(choices)!=1:return unknown('No visible acknowledgement button',kind,title['text'])
@@ -939,12 +1146,13 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
         def resource_lines(tag):
             found=re.search(r'(?m)^@'+re.escape(tag)+r'\s*\n([\s\S]*?)(?=^@|\Z)',game_text)
             return [line.strip() for line in found[1].splitlines() if line.strip() and not line.lstrip().startswith(';')] if found else []
-        headings=single_title(r'(?:civilization ii|ciadization i)')
+        headings=[r for r in rows if r['bounds'][1]>40
+                  and (r['normal']=='ciadization i' or _edit_distance(r['normal'],'civilization ii')<=3)]
         authors=resource_lines('HISTORIANS');categories=resource_lines('HISTORIES');ranks=resource_lines('HISTORYRANK')
         if len(history)==1 and len(headings)==1 and len(authors)>1 and authors[0].isdigit() and int(authors[0])==len(authors)-1 and categories and len(ranks)==7:
             title=headings[0];body,controls,_=body_rows(title,{'ok','cancel','yes','no','help','continue'},500)
             author=[r for r in body if any(r['normal']==_normal(a)+' completes his epic history' for a in authors[1:])]
-            category=[r for r in body if (m:=re.fullmatch(r"['\"]the ([a-z ]+) civilizations in the world['\"]",r['normal']))
+            category=[r for r in body if (m:=re.fullmatch(r"['\"]the ([a-z ]+) civilizations in the world['\"]?",r['normal']))
                       and m[1].replace(' ','') in {_normal(c).replace(' ','') for c in categories}]
             ranked=[r for r in body if (m:=re.fullmatch(r'([1-7])\. the ([a-z]+) civilization of the ([a-z ]{3,60})',r['normal']))
                     and m[2] in {_normal(rank) for rank in ranks}]
@@ -1060,9 +1268,11 @@ def classify_dialog(observation, *, rules=None, game_text=None, state=None):
                 if city is not None:
                     result['observed_city_name']=city['name']
                     if _normal(city['name'])!=_normal(raw_name):
-                        result['city_name_recovery']={'source':'Unique one-edit match to owned city in original save',
+                        from .revision import prefixed_revision
+                        source='live memory observation' if state['evidence'].get('kind')=='live_memory' else 'original save'
+                        result['city_name_recovery']={'source':'Unique one-edit match to owned city in '+source,
                             'ocr_text':raw_name,'canonical_name':city['name'],'city_id':city['id'],
-                            'save_sha256':state['evidence']['save_sha256'],'source_line':titles[0]['source_line']}
+                            **prefixed_revision(state),'source_line':titles[0]['source_line']}
                 elif titles[0]['confidence']>=.8:
                     notice=_recent_founded_name(raw_name,match[2],state)
                     if notice is not None:
