@@ -979,6 +979,10 @@ def _recover_moving_status(image,rows,executable,directory,evidence):
     if not valid(first,second):
         first=_crop_text(image,row,'moving_status_white190_3x',executable,directory,evidence,padding=(3,3),white_threshold=190)
         second=_crop_text(image,row,'moving_status_white230_3x',executable,directory,evidence,padding=(3,3),white_threshold=230)
+        if (not valid(first,second) and len(second)==1 and second[0]['text']=='Moving Units'
+                and second[0]['confidence']>=.8 and _same_location(row,second[0])):
+            first=second
+            second=_crop_text(image,row,'moving_status_white240_3x',executable,directory,evidence,padding=(3,3),white_threshold=240)
     if valid(first,second) and _replace_crop_row(rows,index,first,lambda old,new:True):
         rows[index]['provenance']+=second[0]['provenance']
 

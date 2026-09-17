@@ -637,7 +637,8 @@ def run_steps(session, *, max_decisions=10000):
             if len(matches) != 1:
                 return {'status':'paused','reason':'Selected city is not uniquely present in the native locator.', 'screen':observation['path']}
             session.game.rpc('resume')
-            receipt = session.ui.select_text(observation,matches[0]['text'],exact=True)
+            receipt = session.ui.select_text(observation,matches[0]['text'],exact=True,
+                source_line=matches[0]['source_line'],center=matches[0]['center'])
             selected = session.ui.observe()
             selected_dialog = classify_dialog(selected,rules=session.rules,game_text=resources, labels_text=labels_text(),state=classification_state(session))
             if selected_dialog['kind'] != 'city_locator' or not selected_dialog['supported']:
@@ -645,7 +646,8 @@ def run_steps(session, *, max_decisions=10000):
             zoom = [button for button in selected_dialog['buttons'] if button['text'].casefold() == 'zoom to city']
             if len(zoom) != 1:
                 return {'status':'paused','reason':'Native Zoom To City control is not uniquely observed.', 'screen':selected['path']}
-            zoom_receipt = session.ui.select_text(selected,zoom[0]['text'],exact=True)
+            zoom_receipt = session.ui.select_text(selected,zoom[0]['text'],exact=True,
+                source_line=zoom[0]['source_line'],center=zoom[0]['center'])
             session.journal.append('navigate_selected_city',city=context['pending_city'],receipt=receipt,zoom_receipt=zoom_receipt)
             if context['pending_labor_refresh'] and context['pending_labor_refresh']['phase']=='await_locator':
                 context['pending_labor_refresh']['phase']='await_reopened'

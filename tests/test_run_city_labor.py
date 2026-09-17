@@ -14,8 +14,8 @@ def frame(number,kind='city_screen'):
     _,screen,_=inputs();screen.update(sha256=f'{number:064x}',mechanical_action=None,
         requires_model=False,resource_tag=None)
     if kind!='city_screen':screen.update(kind=kind,title=kind,options=[],buttons=[])
-    if kind=='city_locator':screen.update(options=[dict(text='TEST Rome',center=[200,200])],
-        buttons=[dict(text='Zoom To City',center=[300,350])])
+    if kind=='city_locator':screen.update(options=[dict(text='TEST Rome',center=[200,200],source_line=0)],
+        buttons=[dict(text='Zoom To City',center=[300,350],source_line=1)])
     return dict(sha256=screen['sha256'],path=f'/tmp/TEST-labor/screens/{number}.png',
                 text=screen['title'],classified=screen)
 
@@ -85,6 +85,9 @@ class LaborRunTests(unittest.TestCase):
         self.assertEqual(s.ui.key.call_args_list,[mock.call('Escape')])
         self.assertEqual(s.game.chord.call_args_list,[mock.call('ShiftLeft','KeyC',hold_ms=120)]*2)
         self.assertEqual(s.ui.select_text.call_count,4)
+        self.assertEqual([call.kwargs for call in s.ui.select_text.call_args_list],
+            [dict(exact=True,source_line=0,center=[200,200]),
+             dict(exact=True,source_line=1,center=[300,350])]*2)
         self.assertIsNone(ctx['pending_labor_refresh']);self.assertIsNone(ctx['pending_city_control'])
         self.assertEqual(ctx['pending_empire'],{'id':'inspect_city_0'})
         self.assertTrue(ctx['pending_empire_confirmed'])

@@ -81,11 +81,37 @@ class UI:
         except CursorError as error:
             return {'issued':False,'error':str(error)}
 
-    def select_text(self, observation, text, *, exact=False, confirm=False, timeout=20):
+    def select_text(self, observation, text, *, exact=False, confirm=False, timeout=20,
+                    source_line=None, center=None):
         # The caller supplies the fresh screen containing this exact target.
         if self.latest is not observation:
             raise ValueError('Selection requires the latest observed screen')
-        point = find_text(observation, text, exact=exact)
+        if source_line is None and center is None:
+            point = find_text(observation, text, exact=exact)
+        else:
+            # A classified foreground control can share its label with map or
+            # status text behind the dialog. Bind its original OCR row and
+            # exact observed center instead of searching the whole image again.
+            rows = observation.get('lines', [])
+            if (not exact or type(source_line) is not int or
+                    not 0 <= source_line < len(rows) or
+                    not isinstance(center, (list, tuple)) or len(center) != 2 or
+                    any(type(v) is not int for v in center)):
+                raise ValueError('Selection requires an exact observed control row')
+            row = rows[source_line]
+            bounds = row.get('bounds')
+            if (not isinstance(text, str) or row.get('text', '').strip() != text.strip() or
+                    row.get('center') != list(center) or
+                    not isinstance(bounds, (list, tuple)) or len(bounds) != 4 or
+                    any(type(v) is not int for v in bounds)):
+                raise ValueError('Selected control differs from its observed row')
+            x, y, width, height = bounds
+            if (width <= 0 or height <= 0 or x < 0 or y < 0 or
+                    not x <= center[0] <= x + width or not y <= center[1] <= y + height or
+                    not 0 <= center[0] < observation['width'] or
+                    not 0 <= center[1] < observation['height']):
+                raise ValueError('Selected control geometry is outside its source image')
+            point = list(center)
         receipts = self.game.click(*point, timeout=timeout)
         time.sleep(.2)
         parking = self.park_pointer()

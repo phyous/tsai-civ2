@@ -97,6 +97,22 @@ class LocatorPixels(unittest.TestCase):
         o=observe.recognize(p);r=next(x for x in o['lines'] if x['text']=='Moving Units')
         self.assertEqual(r['provenance'][0]['text'],'Morng Uhits')
         self.assertTrue({'moving_status_white190_3x','moving_status_white230_3x'}<={x['preprocessing'] for x in r['provenance']})
+
+    def test_brighter_status_peer_still_requires_exact_independent_read(self):
+        old=prepared('Moving Urits',514,252,72,14);good=prepared('Moving Units',514,252,72,14)
+        bad=prepared('Moving Ünits',514,252,72,14)
+        for peer,expected in ((good,'Moving Units'),(bad,'Moving Urits')):
+            rows=[copy.deepcopy(old)]
+            with patch.object(observe,'_crop_text',side_effect=[[],[],[bad],[good],[peer]]):
+                observe._recover_moving_status(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],expected)
+
+    def test_optional_original_low_threshold_accent_is_not_an_alias(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0002003.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original unit heading unavailable')
+        o=observe.recognize(p);r=next(x for x in o['lines'] if x['text']=='Moving Units')
+        self.assertEqual(r['provenance'][0]['text'],'Moving Urits')
+        self.assertTrue({'moving_status_white230_3x','moving_status_white240_3x'}<={x['preprocessing'] for x in r['provenance']})
     def test_lower_scale_title_still_requires_same_city_and_paired_pixels(self):
         original=prepared('What shall me bood in Antiom?',226,96,188,16)
         wrong=prepared('What shall me boikd in Antion?',226,96,188,16)
