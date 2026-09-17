@@ -193,6 +193,23 @@ def _transport_specification(unit, rules):
     return {key: original[key] for key in fields}
 
 
+def _civilian_interaction(unit, point, observation, rules):
+    """Offer original diplomacy/trade entry, never infer a successful mission."""
+    matches=[r for r in rules.get('units',[]) if isinstance(r,dict) and r.get('id')==unit.get('type_id')]
+    if len(matches)!=1:return None
+    original=matches[0]
+    fields=('id','domain','role','attack')
+    if (not all(type(original.get(k)) is int for k in fields) or original.get('domain')!=0 or original.get('attack')!=0
+            or original.get('role') not in (6,7)):return None
+    saved=unit.get('specification')
+    if saved is not None and (not isinstance(saved,dict) or any(type(saved.get(k)) is not int or saved[k]!=original[k] for k in fields)):return None
+    if original['role']==6:return 'diplomacy'
+    cities=observation.get('known_cities',[])
+    if any(isinstance(city,dict) and city.get('x')==point['x'] and city.get('y')==point['y']
+           and _integer(city.get('owner')) and city['owner']!=unit['owner'] for city in cities):return 'trade'
+    return None
+
+
 def _boarding_transports(observation, point, rules):
     """Observed own ships only; co-location does not establish available capacity."""
     player = observation.get('player', {}).get('id')
@@ -447,7 +464,8 @@ def unit_candidates(observation, unit_id=None, rules=None):
                 continue
             crossing = {'request_landfall': True, 'transport_specification': transport_spec}
         occupants = [u for u in visible if u.get("x") == point["x"] and u.get("y") == point["y"]]
-        if occupants and spec["attack"] <= 0:
+        interaction=_civilian_interaction(unit,point,observation,rules) if occupants and spec['attack']==0 else None
+        if occupants and spec["attack"] <= 0 and interaction is None:
             continue
         description = _label(terrain) if tile else "unexplored terrain; entry may be blocked"
         if 'boarding_transports' in crossing:
@@ -456,7 +474,10 @@ def unit_candidates(observation, unit_id=None, rules=None):
             description += '; request native Make Landfall; cargo is unknown and any dialog requires a separate choice'
         if occupants:
             names = ", ".join(sorted({_label(u.get("type")) or "foreign unit" for u in occupants}))
-            description += "; visible " + names + ", combat or diplomacy may follow"
+            description += "; visible " + names
+            if interaction:
+                description += '; request original '+interaction+' interaction; availability and terms require a separate observed choice'
+            else:description += ", combat or diplomacy may follow"
         city_distance = _city_distance_label(observation, point) if cities else ""
         add("move_"+short, "move", f"Move {name} to ({point['x']},{point['y']}) — {description}{city_distance}", key,
             destination=point, dx=dx, dy=dy, knowledge="explored" if tile else "unexplored", **crossing)

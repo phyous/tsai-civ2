@@ -96,3 +96,13 @@ Practical guidance is to establish defended food-surplus cities and roads, maint
 The interface can automatically advance to another unit, interrupt with diplomacy, complete construction/research before movement, or ask a confirmation. A key valid on the map can mean something different inside a city or dialog. Verify the current context and actor before every command; “Enter” is not a universal safe dismissal. Saving itself is a native modal flow and must finish before reading the file. No hidden map or future-order information should be introduced to compensate for a difficult UI state.
 
 Run `python3 -m unittest tests.test_save tests.test_rules tests.test_city -v`. Synthetic tests carry TEST labels. Original tutorial and city checks run only when the user's ignored calibration assets are present; no original fixture is distributed with the tests.
+
+Original ground units with RULES role 6 (Diplomacy) may request entry onto an
+observed occupied foreign square even though their attack is zero. Role 7
+(Trade) units may request such entry when the destination is a known foreign
+city. Saved specifications must match the original rules. This exposes an
+ordinary movement request; it does not assert a successful bribe, delivery,
+price or treaty outcome. Unarmed Settlers remain excluded from occupied enemy
+squares. Subsequent native mission menus still require their own supported,
+model-selected choices. The manual's Diplomats and Trade Routes sections
+explicitly describe these entry mechanisms; this is not ordinary combat.

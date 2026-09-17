@@ -19,10 +19,17 @@ EVENT_TITLES = {
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
     'DESTROYED': 'defense minister',
+    'CITYCAPTURE': 'defense minister',
+    'MULTIPLEWIN': 'defense minister',
+    'MULTIPLELOSE': 'defense minister',
+    'TOOKCIV': 'civilization advance stolen!',
     'SNEAK': 'defense minister',
     'SURPRISESCROLLS': 'village',
     'SURPRISEMETALS': 'village',
+    'SURPRISEMERCS': 'village',
     'TERMS': 'foreign minister',
+    'WITHDRAWN': 'foreign minister',
+    'WITHDRAWN1': 'foreign minister',
     **dict.fromkeys(('STARTWONDER','SWITCHWONDER','ABANDONWONDER','ALMOSTWONDER'), 'travellers report'),
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
@@ -49,8 +56,21 @@ TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
                  'SNEAK': {'detense mfinister'},
                  # Original011/1245: complete source treaty-withdrawal reminder,
                  # including its two-square radius, and the sole observed OK.
-                 'TERMS': {'foreign ifinister'}}
+                 'TERMS': {'foreign ifinister'},
+                 # Original011/1629: after a separate actual Withdraw choice,
+                 # complete singular relocation notice and sole observed OK.
+                 'WITHDRAWN1': {'foreign ifinister'}}
 RULE_REJECTIONS = {'ADJACENTCITY': 'Cities cannot be built in adjacent squares.'}
+# Reviewed complete original GAME.TXT records. These narrow additions have
+# source/synthetic coverage; they are not a claim of live modal calibration.
+COMBAT_NOTICE_RESOURCES = {
+    'CITYCAPTURE': '6d85a84bf5749949f3c4fcd9915ca8f44dfc80e2ce6b54069252be45c1a7d1fe',
+    'MULTIPLEWIN': '72e8bd528879eca5bff6259e6976b83a451aa9724dce6e94161d347d51504438',
+    'MULTIPLELOSE': 'dcb38e4e3fff4ce44a83d9834d5d7f69e512deb089af8a31e048b1015f73fb7f',
+    'TOOKCIV': 'ef12f6bbbaeed93332c5c54ee7d7587c579421cd3da72ff5be8e1aed81a4a192',
+}
+# Original LABELS.TXT lines191–194; do not let a variable verb absorb a choice.
+CAPTURE_VERBS = ('capture', 'liberate', 'captured', 'liberated')
 OBSERVED_EVENT_TITLES = set(EVENT_TITLES.values()) | set().union(*TITLE_ALIASES.values())
 CONTROLS = {'ok', 'cancel', 'yes', 'no', 'help', 'continue', 'back', 'next', 'done', 'close'}
 TOKEN = re.compile(r'%(STRING|NUMBER)(\d{1,2})', re.I)
@@ -96,7 +116,7 @@ def _rows(observation):
     return result
 
 
-def _body_pattern(body, values):
+def _body_pattern(body, values, *, minimum_anchors=5, terminal_dot_optional=True):
     """Bind repeated placeholders consistently; require a real lexical anchor."""
     if not isinstance(body, str) or not body.strip() or len(body) > 2000:
         return None
@@ -135,13 +155,13 @@ def _body_pattern(body, values):
     chunks.append(re.escape(text[position:])); anchors += text[position:]
     # BUILT consists entirely of placeholders: its original completion verb
     # must be supplied from LABELS.TXT before it can be recognized safely.
-    if len(re.sub(r'[^a-z]', '', anchors)) < 5:
+    if len(re.sub(r'[^a-z]', '', anchors)) < minimum_anchors:
         return None
     expression=''.join(chunks)
     # Original006/734 omits only the last printed dot. Preserve every lexical
     # token and internal punctuation; these are already whitelisted notices
     # with no choices and one independently observed OK control.
-    if text.endswith('.') and expression.endswith(r'\.'):
+    if terminal_dot_optional and text.endswith('.') and expression.endswith(r'\.'):
         expression=expression[:-2]+r'\.?'
     return re.compile(expression)
 
@@ -181,12 +201,21 @@ def classify_information(observation, resources, *, placeholder_values=None):
             continue
         if tag in RULE_REJECTIONS and _normal(body or '') != _normal(RULE_REJECTIONS[tag]):
             continue
+        pinned = tag in COMBAT_NOTICE_RESOURCES
+        if pinned and hashlib.sha256(json.dumps(resource, sort_keys=True,
+                separators=(',', ':'), ensure_ascii=False).encode()).hexdigest() != COMBAT_NOTICE_RESOURCES[tag]:
+            continue
         tag_values = placeholder_values.get(tag, {})
         if not isinstance(tag_values, dict):
             continue
+        if tag == 'CITYCAPTURE':
+            tag_values = {**tag_values, 'STRING3': CAPTURE_VERBS}
         if tag in ('BUILT', 'BUILT3') and not tag_values.get('STRING3'):
             continue
-        pattern = _body_pattern(body, tag_values)
+        # TOOKCIV has only "take" as fixed prose. Its complete source hash and
+        # exact distinctive title permit four letters for that template alone.
+        pattern = _body_pattern(body, tag_values, minimum_anchors=4 if tag=='TOOKCIV' else 5,
+                                terminal_dot_optional=not pinned)
         if pattern is None:
             continue
         allowed_titles = {_normal(title)} | TITLE_ALIASES.get(tag, set())

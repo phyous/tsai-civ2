@@ -1307,6 +1307,14 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         if not choices:
             choices=[_option(r,'button') for r in button_rows if r['normal']=='ok']
             if len(choices)!=1:return unknown('No visible acknowledgement button',kind,title['text'])
+            if template['tag']=='INTRUDER':
+                # The complete source-matched withdrawal warning is public
+                # information. Retain it for later model decisions; this
+                # acknowledgement does not choose or execute a unit retreat.
+                result['evidence'].update(source='original GAME.TXT event template',
+                    source_tag=template['tag'],
+                    template_sha256=hashlib.sha256(json.dumps(template,sort_keys=True).encode()).hexdigest())
+                return finish('information',title['text'],choices,buttons,mechanical='acknowledge_information')
             return finish(kind,title['text'],choices,buttons,mechanical='acknowledge_information')
         return finish(kind,title['text'],choices,buttons,model=True)
     # @GHOSTTOWN is a strategic choice: completing a worker can remove its

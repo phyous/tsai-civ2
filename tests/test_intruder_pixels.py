@@ -5,6 +5,12 @@ from unittest import TestCase,mock
 from PIL import Image
 from civ2 import observe
 
+GAME='''@INTRUDER
+@title=%STRING0 Emissary
+@width=320
+"Your troops have violated the territory of our city of %STRING1.  By the terms of our peace treaty, you must withdraw immediately or face the consequences!"
+
+'''
 
 def row(text,x,y,w=312,h=18):
     return dict(text=text,bounds=[x,y,w,h],center=[x+w//2,y+h//2],confidence=1,
@@ -20,6 +26,25 @@ def notice():
 
 
 class IntruderPixelsTests(TestCase):
+    def test_source_bound_warning_can_enter_existing_public_notice_history(self):
+        import hashlib,json,tempfile
+        from civ2.dialogs import classify_dialog,dialog_resources
+        from civ2.evidence import Journal,canonical
+        from civ2.verify import PUBLIC_NOTICE_RESOURCES
+        from tests.test_session import session
+        rows=notice();rows[1]['text']+='r'
+        with tempfile.TemporaryDirectory() as directory:
+            s=session();s.journal=Journal(Path(directory)/'TEST-run');s.checkpoints=1
+            p=s.journal.directory/'screens/TEST.png';p.parent.mkdir();Image.new('RGB',(640,480),'gray').save(p)
+            o=dict(width=640,height=480,sha256=hashlib.sha256(p.read_bytes()).hexdigest(),path=str(p),lines=rows)
+            d=classify_dialog(o,game_text=GAME)
+            self.assertTrue(d['supported'],d);self.assertEqual(d['kind'],'information')
+            captured=s.remember_public_notice(o,d,GAME)
+            self.assertEqual(captured['resource_tag'],'INTRUDER')
+            self.assertIn('TEST Hamburg',captured['observed_text'])
+            self.assertEqual(hashlib.sha256(canonical(dialog_resources(GAME)[0])).hexdigest(),PUBLIC_NOTICE_RESOURCES['INTRUDER'])
+            s.game.rpc.assert_not_called();s.journal.close()
+
     def test_complete_notice_needs_two_unchanged_source_word_readings(self):
         for bad in (False,True):
             rows=notice();a=deepcopy(rows[1]);a['text']+='r';b=deepcopy(a)
@@ -45,6 +70,8 @@ class IntruderPixelsTests(TestCase):
         from civ2.run import game_text,labels_text
         o=observe.recognize(path);d=classify_dialog(o,game_text=game_text(),labels_text=labels_text())
         self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'INTRUDER')
+        self.assertEqual(d['kind'],'information')
+        self.assertEqual(d['evidence']['source_tag'],'INTRUDER')
         self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
         first=next(r for r in o['lines'] if r['text'].startswith('"Your troops'))
         self.assertEqual(first['provenance'][0]['text'],'"Your troops have violated the territory of ou')
