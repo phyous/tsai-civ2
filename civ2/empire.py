@@ -93,14 +93,41 @@ def _production_context(state,rules):
         if build.get('role')==5:builds.append(city['id'])
         here=[u for u in units if (u.get('x'),u.get('y'))==(city.get('x'),city.get('y'))]
         armed=sum(spec(u.get('type_id')).get('attack',0)>0 for u in here)
+        home=[u for u in units if type(u.get('home_city_id')) is int and u['home_city_id']==city['id']]
+        # These stock ground roles are explicitly covered by the manual's
+        # military/Settler support rules. Other types remain unclassified.
+        ground=[u for u in home if spec(u.get('type_id')).get('domain')==0
+                and (spec(u.get('type_id')).get('role')==5
+                     or (spec(u.get('type_id')).get('role') in (0,1)
+                         and type(spec(u.get('type_id')).get('attack')) is int
+                         and spec(u.get('type_id'))['attack']>0))]
+        home_workers=[u for u in ground if spec(u.get('type_id')).get('role')==5]
+        support=dict(home_units=len(home),home_units_away=sum(
+            (u.get('x'),u.get('y'))!=(city.get('x'),city.get('y')) for u in home),
+            known_ground_support_units=len(ground),home_worker_units=len(home_workers),
+            unclassified_home_units=len(home)-len(ground))
+        government=state['player'].get('government_id');size=city.get('size')
+        if type(government) is int and government in (1,2) and type(size) is int and size>0:
+            allowance=size if government==1 else 3
+            support.update(free_shield_support_allowance=allowance,
+                minimum_shield_support=max(0,len(ground)-allowance),
+                food_for_population=2*size,food_for_known_home_workers=len(home_workers))
+            for resource in ('food','shields'):
+                gross=city.get(resource+'_produced')
+                if type(gross) is int and gross>=0:
+                    support['gross_'+resource]=gross
+                    cost=2*size+len(home_workers) if resource=='food' else support['minimum_shield_support']
+                    support[resource+'_after_listed_costs']=gross-cost
         city_facts.append(dict(city_id=city['id'],name=city['name'],owned_units_here=len(here),
             armed_units_here=armed,unknown_unit_specifications_here=sum(type(spec(u.get('type_id')).get('attack')) is not int for u in here),
-            production=deepcopy(production),unit_production_repeats=production.get('kind')=='unit'))
+            production=deepcopy(production),unit_production_repeats=production.get('kind')=='unit',support_review=support))
     return dict(owned_worker_units=len(workers),worker_producing_city_ids=builds,
         unknown_unit_specifications=unknown,unknown_production_specifications=unknown_builds,
         no_observed_worker_or_worker_build=(not workers and not builds and unknown==unknown_builds==0),
         cities=city_facts,
-        note='Only owned records and original unit roles/base attack are counted. Garrison counts do not establish safety, sufficiency or a required build. Unit production repeats after completion until changed; this is not a completion forecast.')
+        note='Only owned records and original unit roles/base attack are counted. Garrison counts do not establish safety, sufficiency or a required build. Unit production repeats after completion until changed; this is not a completion forecast.',
+        support_note='Original manual: home city pays support regardless of current location. Arithmetic is limited to Despotism/Monarchy and current recorded population/output. The shield minimum counts only known ground combat/worker roles; unclassified units may add costs. Food subtracts two per citizen and one per known home worker. These remainders are not verified net surplus: waste, other unit costs, food routes and native effects are not modeled. A nonnegative remainder does not establish sustainability or predict output after Settler completion. Missing home identities are not assigned to a nearby city.',
+        support_source='https://archive.org/details/civ2_manual')
 
 
 def empire_candidates(state,screen,reviewed=None,rules=None):
@@ -195,6 +222,7 @@ def empire_request_for(state,screen,actions=None,reviewed=None,rules=None,recent
             'The original game is at End of Turn. Choose exactly one actual action. '
             'Unit production automatically repeats after completion: a city still producing Warriors can already have made several. '
             'Check current garrisons and the worker pipeline before continuing that repeated build. '
+            'Also check home-city support: movement does not remove that cost, and Settler completion can lower population and output while adding a supported unit. Gross output and listed-cost arithmetic are not verified net surplus. '
             'If no worker exists and no city is building one, further military production alone cannot expand the empire or improve terrain; consider a concrete production change when food and defense permit. '
             'The supplied current city records already show builds, stored resources, output and happiness; '
             'opening a city is not needed merely to learn those facts. Production and research progress by advancing turns. '
