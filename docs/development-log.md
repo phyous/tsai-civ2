@@ -144,6 +144,21 @@ in [the presentation record](throne-presentation.md).
 
 ## Evidence conventions
 
+Attempt 007 started a fresh verified game with a read-only Win16 memory
+observer. Native autosave was disabled before model play; its ledger retains
+the original startup save inventory and rejects any subsequent save changes.
+Initial paired observations took roughly 1.5 seconds. The campaign exposed
+redundant city reviews, unconditional labor preparation, and a city-date OCR
+error; these led to the [action timing changes](action-performance.md).
+
+On turn 12, generic emulator operations became much slower. A later observation
+on turn 13 took about 54 seconds. Interrupting the controller also interrupted
+its encoder, so this attempt is now debugging evidence and cannot be presented
+as a continuous final recording. Future encoders run in an independent process
+session. The original game state was retained without a save or restart while
+the host timing issue was investigated. None of these campaigns has yet
+established victory.
+
 Each model session retains original saves, original screenshots, requests,
 validated responses, ordinary input receipts and a hash-linked event ledger.
 The continuous recording contains only real captured dashboard frames; capture
@@ -154,3 +169,18 @@ is excluded from model observations.
 An end-game text cue is only a candidate for inspection. Completion requires
 the original game's Roman victory, the requested settings, a full recording and
 a reviewed evidence bundle.
+
+## September 17 continuation
+
+The paused debug campaigns resumed in their original runtimes and recordings.
+Historian notices now retain only the ranks actually visible, and their full
+original resource structure and sole acknowledgement are checked. Additional
+pixel-based recovery covers city captions, footer text and save confirmations;
+these fixes do not choose game strategy. Attempt 005 reached five cities and
+Horseback Riding. It remains a debug campaign, not a completed game.
+
+The optional modern DOSBox WebAssembly backend passed an isolated public-state
+comparison against the identical original debug save and a five-minute paused
+gap without slow recovery. Its relative mouse motion was measured against the
+actual Windows cursor. Browser integration is being validated separately before
+a fresh no-save campaign; this is not yet a full-playthrough speed measurement.

@@ -77,3 +77,10 @@ The launcher is tested for profile isolation, reserved/occupied ports, stale PID
 refusal, manifest/path redirection and owned-process shutdown. The integration is
 based on the observed benchmark; these tests do not claim a campaign victory or
 measure performance on every host.
+
+The optional modern WebAssembly backend can be selected with `--backend modern`
+after its separately downloaded runtime assets are installed. This is recorded
+in the launch manifest and propagated to the embedded game. The default remains
+`legacy`; existing manifests without a backend field retain their original
+URLs and process-ownership checks. Spectator `watch.html` reads the existing
+runtime and does not launch another emulator.

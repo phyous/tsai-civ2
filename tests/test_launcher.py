@@ -45,6 +45,12 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(commands['chrome'][-1], 'http://127.0.0.1:3975/')
         with self.assertRaises(L.LauncherError):L._directory('isolated-test', create=True)
 
+    def test_modern_backend_is_explicit_and_legacy_url_is_unchanged(self):
+        directory=L._directory('modern-test',create=True)
+        self.assertEqual(L.commands(directory,3975,'/test/chrome','modern')['chrome'][-1],
+                         'http://127.0.0.1:3975/?backend=modern')
+        with self.assertRaises(L.LauncherError):L.commands(directory,3975,'/test/chrome','arbitrary')
+
     def test_profile_paths_reject_traversal_and_symlink(self):
         for name in ('../outside','/tmp/outside','.', 'a/b', 'a b'):
             with self.assertRaises(L.LauncherError):L._directory(name, create=True)

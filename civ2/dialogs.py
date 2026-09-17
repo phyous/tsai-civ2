@@ -23,6 +23,9 @@ from .native_events import EVENT_TITLES, classify_information
 from .map_badges import proven_badge
 from .tax_controls import proven_tax_arrows
 from .exchange_picker import classify_exchange_picker
+from .acquisition_notice import classify_acquisition_notice
+from .history_notice import classify_history_notice
+from .native_map import evidence_for as native_map_evidence
 
 
 class DialogObservationError(ValueError):
@@ -218,6 +221,29 @@ def _production_stat(text):
     return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+/\d+\s+hp:\s*\d+/\d+)?\)',text))
 
 
+def _production_icon_rows(body, names):
+    """Colored original artwork left of a fully read production label/stat pair.
+
+    The color fraction was validated against this observation's image hash in
+    _rows. It cannot identify an option or supply missing text.
+    """
+    labels=[r for r in body if r['normal'] in names and r['confidence']>=.8]
+    stats=[r for r in body if _production_stat(r['normal']) and r['confidence']>=.8]
+    icons=[]
+    for row in body:
+        x,y,w,h=row['bounds']
+        if (row in labels or row in stats or row['confidence']>=.5
+                or row.get('chromatic_fraction',0)<.5 or not 1<=w<=68 or not 1<=h<=20
+                or not re.fullmatch(r'[A-Za-z0-9]{1,12}',row['text'])
+                or row['normal'] in {'ok','no','yes','help','cancel','buy','exit','auto','done'}):continue
+        paired=[r for r in labels if 2<=r['bounds'][0]-(x+w)<=48
+                and abs(r['center'][1]-row['center'][1])<=8
+                and any(s['bounds'][0]>r['bounds'][0]+r['bounds'][2]
+                        and abs(s['center'][1]-r['center'][1])<=8 for s in stats)]
+        if len(paired)==1:icons.append(row)
+    return icons
+
+
 def _city_sprite_text(row, labels):
     """Recognize bounded fragments on a known city's colored sprite.
 
@@ -281,7 +307,7 @@ def _city_badge_text(row,labels):
                and -2<=label['bounds'][1]-(row['bounds'][1]+row['bounds'][3])<=12 for label in labels)
 
 
-def _native_map_kind(rows, observation, state):
+def _native_map_kind(rows, observation, state, native_map_context=None):
     """Recognize the observed 640x480 Roman map layout, never a generic backdrop.
 
     The map does not display the government. Fixed pane geometry plus independent
@@ -332,9 +358,14 @@ def _native_map_kind(rows, observation, state):
         return len(matches)==1
     labels=[r for r in rows if r['bounds'][1]>=65 and r['bounds'][0]<462
             and r['confidence']>=.8 and city_label(r)]
+    map_proof = native_map_evidence(native_map_context, observation)
+    if map_proof and any(r['bounds'][1]>=65 and r['bounds'][0]<462 and r['normal'] in
+                        {'ok','cancel','yes','no','help','close','continue','back','next','done','exit',
+                         'save','load','buy','change','auto'} for r in rows):
+        return None, 'Possible unrecognized modal or open menu'
     for r in rows:
         if r['bounds'][1]>=65 and r['bounds'][0]<462:
-            if (r not in labels and not _city_sprite_text(r,labels)
+            if (not map_proof and r not in labels and not _city_sprite_text(r,labels)
                     and not _owned_city_size_sprite(r,labels,state) and not _city_badge_text(r,labels)):
                 return None, 'Unexpected text over the native map playfield; possible unrecognized modal'
     full=' '.join(r['normal'] for r in rows)
@@ -416,7 +447,7 @@ def _civilopedia_reference(rows, observation, rules):
             'anchor_lines':[r['source_line'] for r in [title,allows[0],repeated[0],*controls.values()]]}
 
 
-def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None, state=None):
+def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None, state=None, native_map_context=None):
     """Return supported/unknown classification with exact visible option targets.
 
     ``options`` contains decision choices; ``buttons`` contains observed native
@@ -523,6 +554,18 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             result['evidence']['template_sha256']=hashlib.sha256(expected.encode()).hexdigest()
             return finish('presentation_notice','Throne room notice',[button],[button],
                           mechanical='acknowledge_presentation')
+    history=classify_history_notice(observation,rows,game_text,dialog_resources(game_text or ''))
+    if history:
+        result['resource_tag']='HISTORY'
+        result['evidence']['history_report']=history['evidence']
+        return finish('information',history['title'],[history['button']],[history['button']],
+                      mechanical='acknowledge_information')
+    acquisition=classify_acquisition_notice(observation,rows,labels_text,rules,state)
+    if acquisition:
+        result['resource_tag']=acquisition['resource_tag']
+        result['evidence']['acquisition_notice']=acquisition['evidence']
+        return finish('information',acquisition['title'],[acquisition['button']],[acquisition['button']],
+                      mechanical='acknowledge_information')
     exchange=classify_exchange_picker(observation,rows,dialog_resources(game_text or ''),rules,state)
     if exchange:
         result.update(resource_tag=exchange['resource_tag'],advance=exchange['advance'],prior_trade=exchange['prior_trade'])
@@ -730,7 +773,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                     and len(controls)==1 and controls[0]['normal']=='ok' and prose
                     and all(r['confidence']>=.8 for r in [*body,*controls])
                     and max(r['center'][1] for r in prose)<min(r['center'][1] for r in options)
-                    and re.fullmatch(_pattern(council[0]['body']),_normal(' '.join(r['text'] for r in prose)))):
+                    and re.fullmatch(_pattern(council[0]['body']),
+                        re.sub(r'\s*,\s*', ', ', _normal(' '.join(r['text'] for r in prose))))):
                 result['resource_tag']='COUNCILTIME'
                 return finish('high_council',title['text'],[_option(r,'option') for r in options],
                               [_option(r,'button') for r in controls],model=True)
@@ -836,6 +880,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             if len(names)!=1:
                 continue
             body,buttons,_=body_rows(title,{'ok','auto','help'},440)
+            icons=_production_icon_rows(body,rule_names)
+            body=[r for r in body if r not in icons]
             options=[r for r in body if r['normal'] in rule_names and r['confidence']>=.8]
             stats=[r for r in body if _production_stat(r['normal'])]
             corroborated=({r['normal'] for r in buttons}=={'auto','help','ok'} and len(buttons)==3
@@ -860,6 +906,13 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                       'new_city_name':460,'diplomacy':440,'tax_rate':260,'luxury_rate':260,
                       'revolution_choice':240,'revolution_offer':440,'city_locator':360}[kind]
         body,button_rows,_=body_rows(title,{'ok','cancel','help','goal','auto','zoom to city'},source_width)
+        if kind=='production_choice' and isinstance(rules,dict):
+            names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[])
+                   if r.get('name') and r['name']!='Nothing'}
+            icons=_production_icon_rows(body,names)
+            if icons:
+                result['evidence']['production_artwork']=[dict(text=r['text'],bounds=r['bounds'],source_line=r['source_line']) for r in icons]
+                body=[r for r in body if r not in icons]
         buttons=[_option(r,'button') for r in button_rows]
         if not _unique(buttons):return unknown('Ambiguous duplicate dialog buttons',kind,title['text'])
         if kind in ('tax_rate','luxury_rate'):
@@ -1139,34 +1192,6 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 return finish('worker_disband_choice',title['text'],[_option(r,'option') for r in choices],
                               [_option(r,'button') for r in controls],model=True,
                               reason='Original size-one worker completion warning; both observed alternatives require a model choice')
-    if game_text:
-        history=[t for t in dialog_resources(game_text) if t['tag']=='HISTORY'
-                 and _normal(t['title'])=='civilization ii' and not t['options'] and not t['listbox']
-                 and _normal(t['body'].replace('^',' '))=="%string1 completes his epic history: 'the %string2 civilizations in the world'"]
-        def resource_lines(tag):
-            found=re.search(r'(?m)^@'+re.escape(tag)+r'\s*\n([\s\S]*?)(?=^@|\Z)',game_text)
-            return [line.strip() for line in found[1].splitlines() if line.strip() and not line.lstrip().startswith(';')] if found else []
-        headings=[r for r in rows if r['bounds'][1]>40
-                  and (r['normal']=='ciadization i' or _edit_distance(r['normal'],'civilization ii')<=3)]
-        authors=resource_lines('HISTORIANS');categories=resource_lines('HISTORIES');ranks=resource_lines('HISTORYRANK')
-        if len(history)==1 and len(headings)==1 and len(authors)>1 and authors[0].isdigit() and int(authors[0])==len(authors)-1 and categories and len(ranks)==7:
-            title=headings[0];body,controls,_=body_rows(title,{'ok','cancel','yes','no','help','continue'},500)
-            author=[r for r in body if any(r['normal']==_normal(a)+' completes his epic history' for a in authors[1:])]
-            category=[r for r in body if (m:=re.fullmatch(r"['\"]the ([a-z ]+) civilizations in the world['\"]?",r['normal']))
-                      and m[1].replace(' ','') in {_normal(c).replace(' ','') for c in categories}]
-            ranked=[r for r in body if (m:=re.fullmatch(r'([1-7])\. the ([a-z]+) civilization of the ([a-z ]{3,60})',r['normal']))
-                    and m[2] in {_normal(rank) for rank in ranks}]
-            if (len(author)==len(category)==1 and 1<=len(ranked)<=7 and len(body)==2+len(ranked)
-                    and len({r['normal'].split('.')[0] for r in ranked})==len(ranked)
-                    and len(controls)==1 and controls[0]['normal']=='ok'
-                    and all(r['confidence']>=.8 for r in [title,*body,*controls])
-                    and author[0]['center'][1]<category[0]['center'][1]<min(r['center'][1] for r in ranked)
-                    and abs(controls[0]['center'][0]-title['center'][0])<=8):
-                result['resource_tag']='HISTORY'
-                result['evidence']['history_report']={'source':'Original HISTORY, HISTORIANS, HISTORIES and HISTORYRANK resources',
-                    'observed_body':'\n'.join(r['text'] for r in body),'source_lines':[r['source_line'] for r in body]}
-                button=_option(controls[0],'button')
-                return finish('information',title['text'],[button],[button],mechanical='acknowledge_information')
     # The original BUILT notice can add the LABELS.TXT radio choices to its
     # template body. Both are real choices, so never acknowledge its OK using
     # the information-only path. Bind names to observed own cities/public rules.
@@ -1257,7 +1282,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         if all(len(matches)==1 for matches in anchors.values()):
             result['evidence']['city_resource_map']={key:{field:matches[0][field]
                 for field in ('center','bounds','source_line')} for key,matches in anchors.items()}
-        titles=[r for r in rows if r['bounds'][1]<height*.15 and ('treasury' in r['normal'] or 'dreasury' in r['normal'])]
+        titles=[r for r in rows if 32<=r['bounds'][1]<=56 and r['confidence']>=.8
+                and re.match(r'^City of .+?,\s*\d{1,5}\s*(?:B\.?\s*C\.?|A\.?\s*D\.?)',r['text'],re.I)]
         title=titles[0]['text'] if len(titles)==1 else 'Original city screen'
         if len(titles)==1:
             match=re.match(r'city of (.+?),\s*(\d+\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',titles[0]['text'],re.I)
@@ -1281,8 +1307,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                             'ocr_text':raw_name,'canonical_name':notice['name'],'year_text':notice['year_text'],
                             'notice_image_sha256':notice['image_sha256'],'source_line':titles[0]['source_line']}
         return finish('city_screen',title,buttons,buttons,model=True)
-    map_kind,map_reason=_native_map_kind(rows,observation,state)
+    map_kind,map_reason=_native_map_kind(rows,observation,state,native_map_context)
     if map_kind:
+        map_proof=native_map_evidence(native_map_context,observation)
+        if map_proof:result['evidence']['native_map']=map_proof
         return finish(map_kind,'End of Turn' if map_kind=='end_turn' else 'Original map',reason=map_reason)
     result['reason']=map_reason
     return result

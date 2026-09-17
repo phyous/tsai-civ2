@@ -189,6 +189,17 @@ class MemoryTests(unittest.TestCase):
             with mock.patch('civ2.memory.secrets.token_hex',return_value='a'*32),mock.patch('civ2.memory.time.sleep'):
                 self.assertEqual(observer._read_wire(7),wire())
 
+    def test_modern_inventory_hash_detects_same_size_edits(self):
+        original=dict(name='AUTO.SAV',size=1000,modifiedAt=None,sha256='a'*64)
+        self.assertEqual(memory._save_inventory([original]),[original])
+        capsule(save_inventory_initial=[original],save_inventory_before=[original],save_inventory_after=[original])
+        changed=original|{'sha256':'b'*64}
+        with self.assertRaisesRegex(memory.MemoryObservationError,'save created'):
+            capsule(save_inventory_initial=[original],save_inventory_before=[original],save_inventory_after=[changed])
+        for bad in (original|{'sha256':'bad'},original|{'modifiedAt':'2026-09-16T00:00:00.000Z'},
+                    {k:v for k,v in original.items() if k!='sha256'}):
+            with self.assertRaises(memory.MemoryObservationError):memory._save_inventory([bad])
+
     def test_any_native_save_creation_or_change_is_fatal(self):
         entry={'name':'TEST New Save.SAV','size':1234,'modifiedAt':'2026-09-16T00:00:00.000Z'}
         with self.assertRaisesRegex(memory.MemoryObservationError,'save created'):capsule(save_inventory_after=[entry])

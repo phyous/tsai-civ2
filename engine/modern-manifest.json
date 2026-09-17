@@ -1,0 +1,50 @@
+{
+  "name": "emulators",
+  "version": "8.4.2",
+  "license": "GPL-2.0",
+  "source": "https://github.com/js-dos/emulators",
+  "archive": {
+    "url": "https://registry.npmjs.org/emulators/-/emulators-8.4.2.tgz",
+    "bytes": 6646356,
+    "sha256": "de834d68e70a2cc632cf9945c6e593079b73f2e255a23a4f60d4a08d8b01f2e7"
+  },
+  "files": [
+    {
+      "member": "package/dist/emulators.js",
+      "path": "vendor/modern/emulators.js",
+      "bytes": 83969,
+      "sha256": "18b960a4faaa781bff90cbf97aa7978e61dca277ba7544653b7ea99d91fa6d94"
+    },
+    {
+      "member": "package/dist/wdosbox.js",
+      "path": "vendor/modern/wdosbox.js",
+      "bytes": 112002,
+      "sha256": "4fdff4523283ca15a42d977a3c26d39486ee1dcc5b769791609ecb6294526dbb"
+    },
+    {
+      "member": "package/dist/wdosbox.wasm",
+      "path": "vendor/modern/wdosbox.wasm",
+      "bytes": 1459578,
+      "sha256": "6615d2b06fc057d9454ae5b7b0593601bad7e64631707d4895a5639fc2f22aef"
+    },
+    {
+      "member": "package/dist/wlibzip.js",
+      "path": "vendor/modern/wlibzip.js",
+      "bytes": 72957,
+      "sha256": "b8e55c2aa4c96e961c9965f289c0f40b5d44f02a557dcf980ddc29787b493842"
+    },
+    {
+      "member": "package/dist/wlibzip.wasm",
+      "path": "vendor/modern/wlibzip.wasm",
+      "bytes": 112483,
+      "sha256": "25064d970c42ca7ea0fdb8b058204d6e41cc8826a676219677772f5591e8337b"
+    },
+    {
+      "member": "package/LICENSE",
+      "path": "vendor/modern/LICENSE",
+      "bytes": 18092,
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+    }
+  ],
+  "runtime_version": "8.4.2 (7fb80db8afda9ca5cde776abb7313545)"
+}

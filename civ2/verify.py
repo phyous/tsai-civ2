@@ -37,6 +37,7 @@ DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_
               'empire_command_dispatched': 'empire_action', 'city_control_dispatched':'city_action'}
 KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'screen_observed', 'mechanical_input', 'open_city_control',
+                'native_map_observed', 'native_map_observation_failed',
                 'navigate_selected_city', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
@@ -66,6 +67,7 @@ PUBLIC_NOTICE_NOTE = (
     'Only the most recent bounded notices are retained; absence is not evidence that an event did not occur.'
 )
 PUBLIC_NOTICE_RESOURCES = {'ADJACENTCITY': 'd7a2b9c34bc0aeba6a1debda44e8a02691579cc0d56bed16d1784addbedab834',
+ 'SURPRISESCROLLS':'70dbeae8b4336f362d5b3d9fa07ca294e93831d26d78553ac5db40690304fdef',
  'GREETINGS00':'950585acaf81ab9ce622ac94efd3915f89db60c2919745118cfd9ed08e57a682',
  'GREETINGS01':'6e1950c896d141797f7ed9923065a16350a1bcd3d8793e01c1f464890ee60ec0',
  'GREETINGS02':'ba01eb38f7f93cf856846ed33e7aed322488fd2cc5445c4285a5ef468a574ba7',
@@ -1068,6 +1070,57 @@ def _terminal(files, name, chain):
             'verification': 'Review declaration and image integrity checked; this tool does not recognize victory pixels or independently authenticate the declared reviewer.'}
 
 
+def _runtime_sequences(value):
+    if isinstance(value,dict):
+        if value.get('type') in ('key','mouse','relativeMouse') and _int(value.get('sequence'),1):
+            yield value['sequence']
+        for child in value.values():yield from _runtime_sequences(child)
+    elif isinstance(value,list):
+        for child in value:yield from _runtime_sequences(child)
+
+
+def _native_map_event(files,payload,initial_state,inventory,boundary,minimum_sequence):
+    from .memory import parse_memory
+    from .native_map import context_for,LEFT_MAP_REASON
+    from .dialogs import _rows,_native_map_kind
+    _require(initial_state is not None and initial_state['evidence'].get('kind')=='live_memory'
+             and payload.get('trigger_reason')==LEFT_MAP_REASON,
+             'Native map fallback is not a live left-map observation')
+    trigger=files.descriptor(payload.get('trigger_image'))
+    _require(trigger['path'].startswith('screens/'),'Native map trigger is not a recorded original image')
+    info=files.descriptor(payload.get('artifact'));data=files.path(info['path']).read_bytes()
+    state=parse_memory(data);proof=_loads(data)['proof'];receipt=payload.get('receipt')
+    _require(proof['save_inventory_initial']==inventory and proof.get('campaign_start')==boundary,
+             'Native map context changes the campaign save boundary')
+    _require(isinstance(receipt,dict) and receipt.get('kind')=='live_memory' and receipt.get('proof')==proof
+             and receipt.get('observation_sha256')==info['sha256']
+             and isinstance(receipt.get('images'),list) and len(receipt['images'])==3
+             and receipt.get('source_images')==[i.get('path') for i in receipt['images']],
+             'Native map receipt differs from the source capsule')
+    for image,digest in zip(receipt['images'],proof['image_sha256']):
+        actual=files.descriptor(image)
+        _require(actual['path'].startswith('screens/') and actual['sha256']==digest,
+                 'Native map frame differs from its source capsule')
+        from PIL import Image
+        with Image.open(files.path(actual['path'])) as picture:
+            _require(picture.format=='PNG' and picture.size==(640,480),'Native map frame is not original resolution')
+    sequence=payload.get('input_sequence')
+    _require(_int(sequence) and sequence>=minimum_sequence,'Native map input sequence predates ordinary input')
+    observation=payload.get('observation')
+    _require(isinstance(observation,dict) and set(observation)=={'width','height','sha256','lines'},
+             'Native map OCR evidence is malformed')
+    context=context_for(data,observation['sha256'],sequence)
+    kind,reason=_native_map_kind(_rows(observation),observation,state,context)
+    _require(kind in ('normal_map','end_turn') and payload.get('classification')==
+             dict(kind=kind,supported=True,reason=reason),
+             'Native map classification lacks original menu, pane or turn-status evidence')
+    _require(all(state['settings'][k]==initial_state['settings'][k] for k in
+                 ('difficulty','barbarians','bloodlust','simplified_combat','round_world','restart_eliminated','scenario'))
+             and all(state['map'][k]==initial_state['map'][k] for k in ('width','height','coordinate_width')),
+             'Native map context changes campaign settings')
+    return sequence
+
+
 def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     """Verify retained evidence, never infer victory or claim command acceptance."""
     files = Files(directory)
@@ -1091,11 +1144,15 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     checks, initial_state = None, None
     initial_memory_inventory=None
     initial_campaign_start=None
+    native_map_observations=native_map_failures=0
+    latest_runtime_input=0
+    native_map_seen=set()
     for event in events:
         kind, payload = event['kind'], event['payload']
         files.references(payload)
+        latest_runtime_input=max([latest_runtime_input,*_runtime_sequences(payload)])
         if kind not in {'screen_observed','pointer_park_for_observation',
-                        'trade_followup_pending','trade_advance_dispatched'}:
+                        'trade_followup_pending','trade_advance_dispatched','native_map_observed','native_map_observation_failed'}:
             trade_pending=None;trade_eligible=None
         if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted'}:
             cosmetic_section_sequence=None
@@ -1185,6 +1242,27 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                                           turn=state['turn'],year=state['year_raw'])
                                      if last_finish is not None and state['turn']>last_finish['turn'] else None)
             last_finish=None
+        elif kind=='native_map_observed':
+            digest=payload.get('artifact',{}).get('sha256')
+            _require(digest not in native_map_seen,'Native map context reuses an earlier source capsule')
+            try:
+                latest_runtime_input=_native_map_event(files,payload,initial_state,initial_memory_inventory,
+                                                      initial_campaign_start,latest_runtime_input)
+            except VerificationError:raise
+            except (ValueError,RuntimeError,KeyError,TypeError,OSError):
+                raise VerificationError('Native map source observation validation failed') from None
+            native_map_seen.add(digest)
+            native_map_observations+=1
+        elif kind=='native_map_observation_failed':
+            from .native_map import LEFT_MAP_REASON
+            _require(initial_state is not None and initial_state['evidence'].get('kind')=='live_memory'
+                     and payload.get('trigger_reason')==LEFT_MAP_REASON
+                     and payload.get('error_type') in ('OSError','ValueError','RuntimeError','KeyError',
+                         'MemoryObservationError','FileNotFoundError','PermissionError'),
+                     'Native map failure is malformed or grants unsupported context')
+            _require(files.descriptor(payload.get('trigger_image'))['path'].startswith('screens/'),
+                     'Native map failure has no recorded trigger frame')
+            native_map_failures+=1
         elif kind=='screen_observed':
             observed_screens[payload.get('screen')]={'classification':payload.get('classification'),
                                                      'supported':payload.get('supported')}
@@ -1620,6 +1698,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'cosmetic_input_note':'Separately declared operator presentation inputs, not Jev choices. Original image/crop and ordinary-input bindings checked; semantic visual review, success and gameplay effects are not independently established.',
                           'reused_native_checkpoints':checkpoint_reuses,
                           'observed_public_notices':public_notice_count,
+                          'native_map_observations':native_map_observations,
+                          'native_map_observation_failures':native_map_failures,
+                          'native_map_note':'Full source capsule, bracketed original frame, no intervening input and recorded menu/status OCR checked. This allows map artwork only; it is not a gameplay checkpoint or modal acknowledgement.',
                           'accepted_trade_continuations':trade_confirmations,
                           'trade_continuation_note':'Prior actual model offer/action and original frame/list pixels checked; one Enter only. Technology acquisition and OCR semantics are not independently inferred.',
                           'retained_public_notice_ids':[n['id'] for n in public_notices],

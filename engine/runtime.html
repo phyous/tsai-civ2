@@ -20,17 +20,14 @@ html.embed canvas { width:min(100vw, calc(100vh * 4 / 3)) !important; height:min
   <canvas id="canvas" width="640" height="480" tabindex="0" aria-label="Original Civilization II game"></canvas>
   <nav><button id="start">Start game</button><button id="pause">Pause</button><button id="resume">Resume</button><span id="status">Ready to start</span></nav>
 </main>
-<script src="vendor/es6-promise.js"></script>
-<script src="vendor/browserfs.min.js"></script>
-<script src="vendor/loader.js"></script>
-<script src="bridge.js"></script>
-<script src="/transport.js"></script>
+<script src="runtime-loader.js"></script>
 <script>
 const message = document.querySelector('#status');
 function showError(error) { message.textContent = error.message; }
-document.querySelector('#start').onclick = () => Civ2Runtime.boot().then(() => message.textContent = 'Running').catch(showError);
-document.querySelector('#pause').onclick = () => { try { Civ2Runtime.pause(); message.textContent = 'Paused'; } catch (e) { showError(e); } };
-document.querySelector('#resume').onclick = () => { try { Civ2Runtime.resume(); message.textContent = 'Running'; } catch (e) { showError(e); } };
+document.querySelector('#start').onclick = () => Civ2RuntimeReady.then(runtime => runtime.boot()).then(() => message.textContent = 'Running').catch(showError);
+document.querySelector('#pause').onclick = () => Civ2RuntimeReady.then(runtime => runtime.pause()).then(() => message.textContent='Paused').catch(showError);
+document.querySelector('#resume').onclick = () => Civ2RuntimeReady.then(runtime => runtime.resume()).then(() => message.textContent='Running').catch(showError);
+Civ2RuntimeReady.catch(showError);
 if (new URLSearchParams(location.search).get('autoboot') === '1') document.querySelector('#start').click();
 </script>
 </html>

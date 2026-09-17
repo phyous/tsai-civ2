@@ -19,6 +19,7 @@ EVENT_TITLES = {
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
     'DESTROYED': 'defense minister',
+    'SURPRISESCROLLS': 'village',
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
                      'INHOCK', 'FERTILE', 'UPGRADED', 'UPGRADE'), 'domestic advisor'),
@@ -31,7 +32,9 @@ EVENT_TITLES = {
 # These aliases never replace observed text and still require a complete body
 # from the matching original resource and the sole aligned OK control.
 TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
-                 'CIVADVANCE': {'ciadization advance'},
+                 # Original005/1688: complete Horseback Riding discovery and
+                 # sole OK. Preserve this observed title, not guessed glyphs.
+                 'CIVADVANCE': {'ciadization advance', 'cialization advance'},
                  # Original006/608: complete destruction notice and sole OK.
                  'DESTROYED': {'detense ifinister'}}
 RULE_REJECTIONS = {'ADJACENTCITY': 'Cities cannot be built in adjacent squares.'}

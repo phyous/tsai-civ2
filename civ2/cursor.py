@@ -134,7 +134,7 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
     diagnostic = game.rpc('inputDiagnostics')
     if diagnostic.get('paused'):
         raise CursorError('Resume the original runtime before positioning its cursor')
-    host = diagnostic.get('lastMouse') or diagnostic.get('sdlMouse')
+    host = diagnostic.get('lastMouse') or diagnostic.get('hostMouse') or diagnostic.get('sdlMouse')
     if not isinstance(host, dict) or any(type(host.get(axis)) is not int for axis in ('x', 'y')):
         raise CursorError('Current emulator mouse coordinates are unavailable')
     host_x, host_y = host['x'], host['y']
@@ -178,7 +178,11 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
                 gain = (after[index] - cursor[index]) / actual_delta[index]
                 if math.isfinite(gain) and .25 <= gain <= 8:
                     gains[index] = gain
-        host_position = game.rpc('inputDiagnostics')['sdlMouse']
+        position_diagnostics = game.rpc('inputDiagnostics')
+        host_position = position_diagnostics.get('hostMouse') or position_diagnostics.get('sdlMouse')
+        if (not isinstance(host_position,dict) or any(type(host_position.get(axis)) is not int for axis in ('x','y'))
+                or not 0<=host_position['x']<640 or not 0<=host_position['y']<480):
+            raise CursorError('Current emulator mouse coordinates are unavailable')
         host_x, host_y, cursor = host_position['x'], host_position['y'], after
     # No further mousemove here: SDL canvas positions are not guest positions.
     if press:

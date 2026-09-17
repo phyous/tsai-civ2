@@ -1,4 +1,5 @@
 """OCR fallback uses image evidence without inventing labels or coordinates."""
+import copy
 import hashlib
 from pathlib import Path
 import subprocess
@@ -250,7 +251,7 @@ class NativeRowCropTests(unittest.TestCase):
         anchors=[self.prepared('Dictator TEST Caesar of the Romans'),self.prepared('OK')]
         for second,accepted in [(good,True),(self.prepared('Game loaded!'),False)]:
             rows=anchors+[dict(old)]
-            with patch.object(observe,'_crop_text',side_effect=[[good],[second]]):
+            with patch.object(observe,'_crop_text',side_effect=[[good],[second],[good],[second],[good],[second]]):
                 observe._recover_saved_caption(Image.new('RGB',(640,480)),rows,None,None,{})
             self.assertEqual(rows[-1]['text'],'Game samed!' if accepted else 'Gaue saved!!')
         with patch.object(observe,'_crop_text') as crop:
@@ -291,13 +292,13 @@ class NativeRowCropTests(unittest.TestCase):
         for peer,accept in ((good,True),(self.prepared('What shall me bukd in OTHER?',x=200,y=130,width=280),False),
                             (self.prepared('What shall me bukd in TEST?',x=200,y=200,width=280),False)):
             rows=[dict(original),*buttons]
-            with patch.object(observe,'_crop_text',side_effect=[[good],[peer],[good],[peer]]),patch.object(observe,'_production_names',return_value=set()):
+            with patch.object(observe,'_crop_text',side_effect=[[good],[peer],[good],[peer],[good],[peer]]),patch.object(observe,'_production_names',return_value=set()):
                 observe._recover_city_and_production_rows(image,rows,None,None,{})
             self.assertEqual(rows[0]['text'],good['text'] if accept else original['text'])
             if accept:self.assertEqual(rows[0]['provenance'][0]['text'],original['text'])
         for text in ('What shall me bukd in OTHER?','What shall we purchase in TEST?'):
             rows=[dict(original),*buttons];bad=self.prepared(text,x=200,y=130,width=280)
-            with patch.object(observe,'_crop_text',side_effect=[[bad],[bad],[bad],[bad]]),patch.object(observe,'_production_names',return_value=set()):
+            with patch.object(observe,'_crop_text',side_effect=[[bad],[bad],[bad],[bad],[bad],[bad]]),patch.object(observe,'_production_names',return_value=set()):
                 observe._recover_city_and_production_rows(image,rows,None,None,{})
             self.assertEqual(rows[0]['text'],original['text'])
         with patch.object(observe,'_crop_text') as crop:
@@ -317,6 +318,16 @@ class NativeRowCropTests(unittest.TestCase):
             with patch.object(observe,'_crop_text') as crop:
                 observe._recover_map_labels(image,rows,None,None,{})
             crop.assert_not_called()
+
+    def test_mixed_script_map_label_is_only_a_crop_candidate(self):
+        menu=[self.prepared(s,x=10+i*60,y=22,width=40) for i,s in enumerate(('Game','Kingdom','View','Orders'))]
+        original=self.prepared('veц');fresh=self.prepared('Veil',source='TEST pixel crop')
+        for second,expected in ((fresh,'Veil'),(self.prepared('Veii'),'veц')):
+            rows=copy.deepcopy(menu+[original])
+            with patch.object(observe,'_crop_text',side_effect=[[fresh],[second],[],[],[]]):
+                observe._recover_map_labels(Image.new('RGB',(640,480),'gray'),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[-1]['text'],expected)
+            self.assertEqual(rows[-1]['provenance'][0]['text'],'veц')
 
     def test_production_crops_require_complete_buttons_and_preserve_numeric_values(self):
         rows=[self.prepared('What shall me boild in TEST?',x=190,y=130,width=280),

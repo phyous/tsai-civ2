@@ -81,11 +81,14 @@ def _chrome_path(value=None):
     raise LauncherError('Chrome was not found; provide its executable with --chrome')
 
 
-def commands(directory, port, chrome):
+def commands(directory, port, chrome, backend="legacy"):
+    if backend not in ("legacy", "modern"):
+        raise LauncherError("Unknown runtime backend")
+    query = "?backend=modern" if backend == "modern" else ""
     return {
         'server': [sys.executable, '-m', 'civ2.launcher', '_serve', directory.name, '--port', str(port)],
         'chrome': [chrome, *FLAGS, f'--user-data-dir={directory / "chrome-profile"}',
-                   f'http://127.0.0.1:{port}/'],
+                   f'http://127.0.0.1:{port}/{query}'],
     }
 
 
@@ -137,7 +140,7 @@ def _load(identifier):
                 or set(value['processes']) != {'server', 'chrome'}):
             raise ValueError()
         # Commands must carry this launch's own port/profile, never a user profile.
-        expected = commands(directory, value['port'], value['commands']['chrome'][0])
+        expected = commands(directory, value['port'], value['commands']['chrome'][0], value.get('backend','legacy'))
         expected['server'][0] = value['commands']['server'][0]
         if value['commands'] != expected:
             raise ValueError()
@@ -174,16 +177,18 @@ def _wait_ready(port, processes, *, connected=False, timeout=30):
     raise LauncherError('Runtime startup timed out; inspect the ignored local logs')
 
 
-def start(*, port=None, chrome=None, identifier=None):
+def start(*, port=None, chrome=None, identifier=None, backend="legacy"):
+    if backend not in ("legacy", "modern"):
+        raise LauncherError("Unknown runtime backend")
     port = select_port(port)
     chrome = _chrome_path(chrome)
     identifier = identifier or datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
     directory = _directory(identifier, create=True)
     profile = directory / 'chrome-profile'
     profile.mkdir(mode=0o700)
-    launch_commands = commands(directory, port, chrome)
+    launch_commands = commands(directory, port, chrome, backend)
     value = dict(version=1, id=identifier, repository=str(ROOT), directory=str(directory),
-        profile=str(profile), port=port, url=f'http://127.0.0.1:{port}/',
+        profile=str(profile), port=port, backend=backend, url=launch_commands['chrome'][-1],
         watch_url=f'http://127.0.0.1:{port}/web/watch.html', commands=launch_commands,
         processes={'server':None,'chrome':None}, status='starting')
     _write(directory, value)
@@ -284,6 +289,7 @@ def main():
     launch = sub.add_parser('start', help='Create a fresh isolated headless runtime')
     launch.add_argument('--port', type=int)
     launch.add_argument('--chrome')
+    launch.add_argument('--backend', choices=('legacy','modern'), default='legacy')
     launch.add_argument('--name', dest='identifier')
     for command in ('stop', 'status'):
         sub.add_parser(command).add_argument('identifier')
@@ -298,7 +304,7 @@ def main():
             from .server import create_app
             web.run_app(create_app(args.port), host='127.0.0.1', port=args.port, access_log=None)
             return
-        result = start(port=args.port, chrome=args.chrome, identifier=args.identifier) if args.command=='start' \
+        result = start(port=args.port, chrome=args.chrome, identifier=args.identifier, backend=args.backend) if args.command=='start' \
                  else stop(args.identifier) if args.command=='stop' else status(args.identifier)
         print(json.dumps({k:v for k,v in result.items() if k != 'commands'}, indent=2))
     except (LauncherError, OSError) as error:

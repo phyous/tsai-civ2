@@ -69,6 +69,20 @@ class MeasuredEdgeGame(FakeGame):
 
 
 class CursorTests(unittest.TestCase):
+    def test_modern_host_bookkeeping_still_requires_actual_cursor_feedback(self):
+        class ModernFake(FakeGame):
+            def rpc(self,cmd,*args):
+                result=super().rpc(cmd,*args)
+                if cmd=='inputDiagnostics':
+                    return {'paused':False,'lastMouse':None,'sdlMouse':None,
+                            'hostMouse':dict(zip(('x','y'),self.host))}
+                return result
+        game=ModernFake()
+        with patch('civ2.cursor.time.sleep'):
+            result=move_and_click(game,200,200)
+        self.assertLessEqual(max(abs(a-b) for a,b in zip(result['observed_cursor'],[200,200])),3)
+        self.assertEqual([e['type'] for e in game.inputs if e['type']!='mousemove'],['mousedown','mouseup'])
+
     def test_exact_map_arrow_is_distinct_and_rejects_one_changed_pixel(self):
         image=picture((269,249),constraints=MAP_CONSTRAINTS)
         self.assertEqual(locate_cursor(image),(269,249))

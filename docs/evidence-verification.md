@@ -17,6 +17,24 @@ The report checks:
 - Dispatch receipts: exactly the selected ordinary keyboard command, or the selected dialog click and optional Enter. Mouse feedback targets, bounded relative movement and balanced key/button releases are checked. A model decision without a dispatch remains explicitly undispatched. Input delivery does not prove native acceptance or a strategic effect.
 - Recording manifest/journal agreement, sample numbering/timing, frame count and duration. When available, `ffprobe` additionally checks the encoded video dimensions, frame rate, duration and reported frame count.
 
+Recorded campaigns can use `live_memory` instead of native saves. The verifier
+decodes both retained native envelopes in every observation capsule and checks
+their pinned executable/helper provenance, matching original state and topology,
+unchanged input sequence, and the three retained frame hashes. Animation is
+allowed to change the pixels; image equality is reported rather than assumed.
+The initial setup report must establish the requested settings and native
+autosave OFF. Its startup-to-play boundary and save inventory remain identical
+in every later capsule. A live campaign cannot silently switch to saves, rebase
+that inventory, or substitute a `save_sha256` alias for an observation hash.
+
+City labor preparation is separately chosen by Jev. Its actual Exit click is
+bound to the model decision, followed by a fresh observation and navigation back
+to the same city. Any later labor reassignment needs its own actual choice.
+An immediately preceding accepted technology exchange can have a forced
+singleton advance confirmation, but only when the retained original list,
+offered technology, model acceptance and balanced Enter receipt all match.
+This confirmation does not by itself claim that the technology was acquired.
+
 `dialog_keyboard_recovery` records are reported separately. They bind a manually reviewed keyboard selection to an existing model choice; they do not count as automatically verified dispatches or proof of an autonomous run. Unknown development events are counted and prevent the report's `release_review_ready` flag. Incomplete attempts can pass integrity checks while remaining incomplete and having no verified outcome.
 
 Optional planning runs use separate `inference_started(stage="planning")`, `model_plan` and `plan_status` events. The verifier checks the actual `task_choice` response, selected actor/save binding, request target and its observation boundary. Planning events must declare `executes_input=false`; they cannot appear in command dispatches or native-effect batches. A later unit request's persistent-plan context must match its prior active plan status, but its separate unit-action answer still selects the only command. Reports count planning and command responses separately, include both in model usage totals, and never list a valid plan as a missing game dispatch. Earlier traces without planning fields retain their original command semantics.
@@ -51,3 +69,11 @@ A local hash chain is not server-signed proof that a remote model generated its 
 The artifact inventory is for local verification. Original saves, game data and private calibration images do not become authorized public assets merely because they pass checks. Prepare the eventual public bundle separately, with a source revision, reviewed result images, appropriate recordings, and only redistributable evidence.
 
 Run `python3 -m unittest tests.test_verify -v`. Tests use generated classic-format **TEST** bytes, visibly labeled synthetic images and a short generated test video when ffmpeg/ffprobe are available; they are not game or victory evidence.
+
+For the optional modern emulator, native save inventory entries use actual
+file-content SHA-256 hashes and `modifiedAt: null`, because that API does not
+expose modification times. Legacy inventories retain their timestamp schema.
+The validator requires one complete schema and compares every entry across the
+campaign boundary and each observation; changing bytes without changing file
+size is still detected in the modern inventory. A missing timestamp alone is
+never accepted as evidence of unchanged saves.

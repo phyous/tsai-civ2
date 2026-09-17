@@ -269,6 +269,44 @@ def labor_refresh_step(session,context,observation,dialog,resources):
     return failed('Unknown labor refresh phase')
 
 
+def _native_map_fallback(session, observation, dialog, resources):
+    """One read-only attempt for left-map artwork; never change native state."""
+    from .native_map import LEFT_MAP_REASON, archive_read
+    from .observe import recognize
+    if (getattr(session, 'observer', None) is None or dialog.get('supported')
+            or dialog.get('kind') != 'unknown' or dialog.get('reason') != LEFT_MAP_REASON):
+        return observation, dialog
+    trigger = session.journal.artifact(f'screens/native-map-trigger-{session.journal.sequence+1:06d}-'+observation['sha256']+'.png',
+                                       Path(observation['path']).read_bytes())
+    if trigger['sha256'] != observation['sha256']:
+        raise ValueError('Native map trigger image changed')
+    try:
+        value = session.observer.read(rules_text=session.rules_text)
+        status = session.game.rpc('status')
+        if status.get('paused') is not True or status.get('heldKeys') or status.get('buttons'):
+            raise ValueError('Native map context must return paused with no held input')
+        state, context, artifact, receipt = archive_read(session.journal,value,status['inputSequence'])
+        middle = session.journal.directory/receipt['source_images'][1]
+        fresh = recognize(middle);fresh['path'] = str(middle)
+        classified = classify_dialog(fresh,rules=session.rules,game_text=resources,labels_text=labels_text(),
+                                     state=state,native_map_context=context)
+        final_status=session.game.rpc('status')
+        if (final_status.get('paused') is not True or final_status.get('inputSequence') != status['inputSequence']
+                or final_status.get('heldKeys') or final_status.get('buttons')):
+            raise ValueError('Ordinary input changed during native map classification')
+        if not classified.get('supported') or classified.get('kind') not in ('normal_map','end_turn'):
+            raise ValueError('Native map proof did not establish original map/status cues')
+        session.journal.append('native_map_observed',trigger_image=trigger,trigger_reason=LEFT_MAP_REASON,
+            artifact=artifact,receipt=receipt,input_sequence=status['inputSequence'],
+            observation={k:deepcopy(fresh[k]) for k in ('width','height','sha256','lines')},
+            classification={k:classified[k] for k in ('kind','supported','reason')})
+        return fresh, classified
+    except (OSError, ValueError, RuntimeError, KeyError) as error:
+        session.journal.append('native_map_observation_failed',trigger_image=trigger,
+            trigger_reason=LEFT_MAP_REASON,error_type=type(error).__name__)
+        return observation, dialog
+
+
 def observe_ready(session, resources):
     """Wait only for native painting, including the blinking end-turn cue.
 
@@ -287,6 +325,7 @@ def observe_ready(session, resources):
         observation = session.ui.observe()
         dialog = classify_dialog(observation, rules=session.rules, game_text=resources, labels_text=labels_text(),
                                  state=classification_state(session))
+    observation, dialog = _native_map_fallback(session, observation, dialog, resources)
     delays = (.13, .37, .61, .19, .43, .73, .29, .47)
     # These failures already passed the original Roman map/menu/pane guards.
     # A blinking cue or animated city artwork may need a longer paint window.

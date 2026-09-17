@@ -14,6 +14,7 @@
       <canvas id="dashboard" width="1920" height="1080" aria-label="Empire statistics, actual Jev probabilities, and recent game events"></canvas>
       <div id="game-window">
         <iframe id="game" src="/engine/runtime.html?embed=1" title="Original Civilization II game, spectator view" tabindex="-1" allow="autoplay" sandbox="allow-scripts allow-same-origin allow-pointer-lock"></iframe>
+        <script>if (new URLSearchParams(location.search).get('backend') === 'modern') document.getElementById('game').src = '/engine/runtime.html?embed=1&backend=modern';</script>
       </div>
       <nav id="controls" aria-label="Emulator controls">
         <button id="start" data-action="start" type="button"><span aria-hidden="true">▶</span> Start game</button>

@@ -35,3 +35,17 @@ That preparation clicks the actual observed Exit, refreshes state, reopens the
 same city, and then asks Jev to choose any actual labor reassignment separately.
 Do not present menu visits or an unchanged production selection as progress,
 and do not infer a total-game speedup before measuring actual play.
+
+September 17 isolated follow-up: a 300.5-second pause on the old engine did
+not reproduce the slowdown (five baseline reads median 1.40 s, ten resumed
+reads median 1.46 s). The slow campaign also had a successful 1.87 s read after
+its long pause, before the later slowdown. Long pauses alone are therefore not
+a supported explanation.
+
+An isolated modern DOSBox WebAssembly prototype loaded the identical original
+debug save through the game's Load dialog. Ten complete observer envelopes
+passed checksums, region bounds and native window checks; paired regions agreed
+and their public projection matched the original save. Individual reads had a
+295 ms median, with paired reads about 0.54–0.66 s. This is an observation
+benchmark, not yet a measured full-campaign speedup. The modern backend remains
+optional while input handling and browser integration are validated.

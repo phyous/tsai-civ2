@@ -25,6 +25,21 @@ def notice(*body, title='Domestic Advisor'):
 
 
 class NativeEventTests(unittest.TestCase):
+    def test_village_scrolls_notice_is_complete_information_not_a_hut_choice(self):
+        source=resource(tag='SURPRISESCROLLS',title='Village',
+                        body='You have discovered scrolls of ancient wisdom.')
+        screen=notice('You have discovered scrolls of ancient wisdom.',title='Village')
+        result=classify_information(screen,[source])
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['resource_tag'],'SURPRISESCROLLS')
+        self.assertEqual(result['mechanical_action'],'acknowledge_information')
+        self.assertFalse(result['requires_model'])
+        for bad in (notice('You have discovered scrolls.',title='Village'),
+                    notice('Would you like to exchange ancient wisdom?',title='Village')):
+            self.assertFalse(classify_information(bad,[source])['supported'])
+        choice={**source,'options':['Study','Discard']}
+        self.assertFalse(classify_information(screen,[choice])['supported'])
+
     def test_complete_wrapped_original_template_yields_only_observed_ok(self):
         source = resource()
         screen = notice('TEST disorder in TEST Rome.', 'Citizens protest!')
@@ -153,7 +168,7 @@ class NativeEventTests(unittest.TestCase):
     def test_advance_notice_requires_complete_original_discovery_body(self):
         source=resource(tag='CIVADVANCE',title='Civilization Advance',
                         body='%STRING0 %STRING1 discover the secret of %STRING2.')
-        for title in ('Civilization Advance','Ciadization Advance'):
+        for title in ('Civilization Advance','Ciadization Advance','Cialization Advance'):
             screen=notice('Roman wise men discover the secret of','Alphabet.',title=title)
             result=classify_information(screen,[source])
             self.assertTrue(result['supported'],result)
@@ -165,6 +180,19 @@ class NativeEventTests(unittest.TestCase):
                          'Roman wise men select the secret of Alphabet.',
                          'Roman wise men discover the secret of Alphabet. Really continue?'):
                 self.assertFalse(classify_information(notice(body,title=title),[source])['supported'])
+
+    def test_optional_original_horseback_riding_notice_preserves_raw_ocr(self):
+        from civ2.observe import recognize
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0001688.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original discovery notice unavailable')
+        o=recognize(p);r=classify_dialog(o,game_text=game_text())
+        self.assertTrue(r['supported'],r);self.assertEqual(r['resource_tag'],'CIVADVANCE')
+        self.assertEqual(r['title'],'Cialization Advance')
+        self.assertIn('Horsehack Riding',r['evidence']['observed_body'])
+        changed=copy.deepcopy(o);changed['lines'].append(row('Cancel',x=425,y=275,width=45))
+        self.assertFalse(classify_dialog(changed,game_text=game_text())['supported'])
 
     def test_original_notice_integration_keeps_rejection_distinct(self):
         from civ2.dialogs import classify_dialog

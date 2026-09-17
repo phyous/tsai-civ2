@@ -90,6 +90,12 @@ class GovernanceTests(unittest.TestCase):
         self.assertTrue(r['supported'],r);self.assertTrue(r['requires_model'])
         self.assertIsNone(r['mechanical_action']);self.assertEqual(r['resource_tag'],'COUNCILTIME')
         self.assertEqual(r['options'][0]['text'],'O Consult High Council.')
+        compact=copy.deepcopy(o);compact['lines'][2]['text']=compact['lines'][2]['text'].replace('wish, you','wish,you')
+        compact_result=classify_dialog(compact,game_text=COUNCIL)
+        self.assertEqual(compact_result['kind'],'high_council');self.assertTrue(compact_result['requires_model'])
+        self.assertIn('wish,you',compact_result['visible_text'],'original spacing remains evidence')
+        missing_comma=copy.deepcopy(compact);missing_comma['lines'][2]['text']=missing_comma['lines'][2]['text'].replace('wish,you','wish you')
+        self.assertFalse(classify_dialog(missing_comma,game_text=COUNCIL)['supported'])
         for change in ('missing','body','heading','extra'):
             bad=copy.deepcopy(o)
             if change=='missing':bad['lines'].pop(6)
@@ -101,7 +107,7 @@ class GovernanceTests(unittest.TestCase):
 
     def test_optional_original_council_and_government_selection(self):
         root=Path(__file__).resolve().parents[1]
-        cases=[('005',1164,'high_council'),('004',776,'government_choice')]
+        cases=[('005',1164,'high_council'),('004',776,'government_choice'),('006',1092,'high_council')]
         paths=[root/f'runs/attempt-{a}/screens/ui-{n:07d}.png' for a,n,_ in cases]
         if not all(p.exists() for p in paths) or not(root/'.runtime/ocr').exists():self.skipTest('Private original governance frames unavailable')
         from civ2.run import game_text

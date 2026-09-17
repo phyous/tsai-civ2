@@ -203,12 +203,16 @@ def _save_inventory(value):
     _require(isinstance(value, list) and len(value) <= 4096, 'Invalid original save inventory')
     result = []
     for item in value:
-        _require(isinstance(item, dict) and set(item) == {'name', 'size', 'modifiedAt'}, 'Invalid save inventory entry')
+        _require(isinstance(item, dict) and set(item) in ({'name', 'size', 'modifiedAt'},
+                 {'name', 'size', 'modifiedAt', 'sha256'}), 'Invalid save inventory entry')
+        content_hashed = 'sha256' in item
+        _require(not content_hashed or (item['modifiedAt'] is None and isinstance(item['sha256'],str)
+                 and re.fullmatch(r'[a-f0-9]{64}',item['sha256'])), 'Invalid content-hashed save inventory')
         name, size, modified = item['name'], item['size'], item['modifiedAt']
         _require(isinstance(name, str) and 1 <= len(name) <= 255 and name.lower().endswith('.sav')
                  and not any(c in name for c in ('/', '\\', '\0'))
                  and type(size) is int and 0 <= size <= 16777216
-                 and isinstance(modified, str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z', modified),
+                 and (content_hashed or (isinstance(modified, str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z', modified))),
                  'Save inventory metadata is unavailable or malformed')
         result.append(dict(item))
     result.sort(key=lambda item: item['name'])
