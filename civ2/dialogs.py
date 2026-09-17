@@ -1155,6 +1155,44 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             for index,row in enumerate(below):
                 start=len(_normal(' '.join(r['text'] for r in below[:index])))+1 if index else 0
                 if start>=match.end():after.append(row)
+            pronoun_recovery=None
+            if template['tag']=='EMISSARY':
+                # LABELS.TXT supplies the two literal pronouns him/her. The
+                # terminal variable must consume the complete visible body,
+                # not a prefix that leaves extra text on its last OCR row.
+                body_text=_normal(' '.join(r['text'] for r in below[:len(below)-len(after)]))
+                exact_body=any(re.fullmatch(_pattern(rendered_body.replace('%STRING4',pronoun)),body_text)
+                               for pronoun in ('him','her'))
+                if not exact_body:
+                    # Retained original006/910 prints "her?", read as hert.
+                    # Admit only that complete suffix with an independently
+                    # observed source alternative that also says her.
+                    peer=any(re.sub(r'^(?:o|[○●•])\s+(?=["\'])','',r['normal'])=='"no. send her away."' for r in after)
+                    if not peer or not re.fullmatch(_pattern(rendered_body.replace('%STRING4','hert')),body_text):continue
+                    pronoun_recovery={'observed_suffix':'hert','source_pronoun':'her',
+                        'source':'Original LABELS.TXT her; measured question-mark glyph and exact matching refusal alternative'}
+            detached=[];radio_valid=True
+            # Original EMISSARY can OCR a radio circle as its own row, even
+            # after the label in vertical sort order. Bind only a small marker
+            # immediately left of one complete source alternative, retaining
+            # both source rows and the actual label's click point.
+            if template['tag']=='EMISSARY':
+                markers=[r for r in after if r['normal'] in ('o','○','●','•')]
+                for marker in markers:
+                    peers=[r for r in after if r not in markers
+                           and r['confidence']>=.8
+                           and abs(r['center'][1]-marker['center'][1])<=3
+                           and 6<=r['bounds'][0]-marker['center'][0]<=28
+                           and marker['bounds'][0]+marker['bounds'][2]<=r['bounds'][0]-2
+                           and any(re.fullmatch(_choice_pattern(t),r['normal']) for t in template['options'])]
+                    if (marker['confidence']<.8 or not all(6<=v<=20 for v in marker['bounds'][2:])
+                            or len(peers)!=1 or any(d['label_source_line']==peers[0]['source_line'] for d in detached)):
+                        radio_valid=False;break
+                    detached.append({'marker_source_line':marker['source_line'],
+                        'label_source_line':peers[0]['source_line'],'marker_bounds':marker['bounds'],
+                        'label_center':peers[0]['center'],'observed_marker':marker['text']})
+                after=[r for r in after if r not in markers]
+            if not radio_valid:continue
             options=[];i=0;valid=True
             while i<len(after):
                 matches_option=[]
@@ -1183,9 +1221,11 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 if any(not re.fullmatch(_choice_pattern(source),re.sub(r'^(?:o|[○●•])\s+(?=["\'])','',_normal(option['text'])))
                        for source,option in zip(expected,options)):continue
             elif template['tag'] not in ('DIPLOMACY','TREATYMENU') and len(options)!=len(template['options']):continue
-            found.append((template,options))
+            found.append((template,options,detached,pronoun_recovery))
         if len(found)!=1:return unknown('Diplomatic text/options do not match one complete original template',kind,title['text'])
-        template,choices=found[0];result['resource_tag']=template['tag']
+        template,choices,detached,pronoun_recovery=found[0];result['resource_tag']=template['tag']
+        if detached:result['evidence']['detached_radio_markers']=detached
+        if pronoun_recovery:result['evidence']['audience_pronoun_reading']=pronoun_recovery
         if template['tag']=='EXCHANGE0' and len(choices)>len(template['options']):
             result['evidence']['optional_label_source']={'resource':'LABELS.TXT',
                 'sha256':hashlib.sha256(labels_text.encode('utf-8')).hexdigest(),
