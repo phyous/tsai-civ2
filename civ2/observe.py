@@ -335,6 +335,15 @@ def _stat_reading(text):
 
 def _stat_numbers_compatible(old,new):
     previous,fresh=re.findall(r'\d+',old),re.findall(r'\d+',new)
+    # Original008/382 reads the second ADM slash as 7: 0/171. Only
+    # two agreeing actual crops can supply the replacement caller-side;
+    # unchanged turn/HP values and one unique separator position are required.
+    pattern=r'^\((\d+) (?:Turns?|Tums?), ADM: ([0-9/]+) HP: (\d+)/(\d+)\)$'
+    a,b=re.fullmatch(pattern,old),re.fullmatch(pattern,new)
+    if (a and b and (a[1],a[3],a[4])==(b[1],b[3],b[4])
+            and a[2].count('/')==1 and b[2].count('/')==2
+            and sum(c=='7' and a[2][:i]+'/'+a[2][i+1:]==b[2] for i,c in enumerate(a[2]))==1):
+        return True
     return (previous==fresh or
             (len(fresh)==1 and '/' in old.split()[0]) or
             (len(previous)==len(fresh)==1 and not old.startswith('(') and previous[0]=='1'+fresh[0]))
@@ -667,6 +676,57 @@ def _recover_acquisition_line(image,rows,executable,directory,evidence):
         if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
 
 
+def _recover_support_notice(image,rows,executable,directory,evidence):
+    """Two real crops restore an observed support-loss report, not an action."""
+    if image.size!=(640,480):return
+    choices=[r for r in rows if re.fullmatch(r'(?:[O0•○●]\s+)?(?:Zoom to City|Continue)',r['text'])]
+    controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help')]
+    if (len(choices)!=2 or {re.sub(r'^[O0•○●]\s+','',r['text']) for r in choices}!={'Zoom to City','Continue'}
+            or len(controls)!=1 or controls[0]['text']!='OK'):return
+    body=[(i,r,m) for i,r in enumerate(rows)
+          if (m:=re.fullmatch(r"(.+) can't support (.+)[,.] Unit dis[bh]anded\.",r['text']))
+          and r['confidence']>=.8 and r['center'][1]<min(c['center'][1] for c in choices)]
+    if len(body)!=1:return
+    bi,br,match=body[0]
+    titles=[(i,r) for i,r in enumerate(rows) if r['confidence']>=.8
+            and _near_text(r['text'].casefold(),'military advisor',3)
+            and 16<=br['center'][1]-r['center'][1]<=40
+            and abs(r['center'][0]-controls[0]['center'][0])<=8]
+    if len(titles)!=1:return
+    expected_body=match[1]+" can't support "+match[2]+'. Unit disbanded.'
+    replacements=[]
+    for index,row,expected,name in ((*titles[0],'Military Advisor','title'),(bi,br,expected_body,'body')):
+        a=_crop_text(image,row,'support_'+name+'_rgb2',executable,directory,evidence,padding=(6,6),scale=2)
+        b=_crop_text(image,row,'support_'+name+'_gray2',executable,directory,evidence,padding=(6,6),scale=2,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=expected or b[0]['text']!=expected
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(row,b[0]) or not _same_location(a[0],b[0])):return
+        a[0]['provenance']=row['provenance']+a[0]['provenance']+b[0]['provenance'];replacements.append((index,a[0]))
+    for index,row in replacements:rows[index]=row
+
+
+def _recover_travellers_title(image,rows,executable,directory,evidence):
+    """Read a public wonder-report heading; the full source body stays required."""
+    if image.size!=(640,480):return
+    controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help')]
+    if len(controls)!=1 or controls[0]['text']!='OK':return
+    bodies=[r for r in rows if re.match(r'The .+ have (?:undertaken|changed|abandoned|nearly completed) ',r['text'])
+            and r['confidence']>=.8]
+    if len(bodies)!=1:return
+    headings=[(i,r) for i,r in enumerate(rows) if r['confidence']>=.8
+              and _near_text(r['text'].casefold(),'travellers report',3)
+              and 16<=bodies[0]['center'][1]-r['center'][1]<=40
+              and abs(r['center'][0]-controls[0]['center'][0])<=8]
+    if len(headings)!=1 or headings[0][1]['text']=='Travellers Report':return
+    index,title=headings[0]
+    a=_crop_text(image,title,'travellers_title_rgb3',executable,directory,evidence,padding=(3,3))
+    b=_crop_text(image,title,'travellers_title_gray3',executable,directory,evidence,padding=(3,3),grayscale=True)
+    if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']=='Travellers Report'
+            and min(a[0]['confidence'],b[0]['confidence'])>=.8
+            and _same_location(title,b[0]) and _same_location(a[0],b[0])):
+        if _replace_crop_row(rows,index,a,lambda old,new:True):rows[index]['provenance']+=b[0]['provenance']
+
+
 def _recover_population_notice(image,rows,executable,directory,evidence):
     """Read original milestone punctuation without changing its digits."""
     if image.size!=(640,480):return
@@ -834,6 +894,37 @@ def _recover_herald_panel(image,rows,executable,directory,evidence):
     button=buttons[0];button['provenance']=first[-1]['provenance']+second[-1]['provenance']+button['provenance']+buttons[1]['provenance']
     replacements.append(button)
     rows[:]=[r for r in rows if not (r['bounds'][0]>=box[0] and r['bounds'][1]>=box[1])]+replacements
+
+
+def _recover_split_production_title(image,rows,executable,directory,evidence):
+    """Use only two actual adjacent heading fragments as a crop boundary."""
+    if image.size!=(640,480):return
+    buttons=[r for r in rows if r['text'].casefold() in ('auto','help','ok','cancel','yes','no')]
+    if (len(buttons)!=3 or {r['text'].casefold() for r in buttons}!={'auto','help','ok'}
+            or any(r['confidence']<.8 for r in buttons)
+            or max(r['center'][1] for r in buttons)-min(r['center'][1] for r in buttons)>8):return
+    for right in list(rows):
+        suffix=re.fullmatch(r'hall (?:we|me) [a-z]{3,7} in (.{1,60})\?',right['text'],re.I)
+        if not suffix or right['confidence']<.8 or not 70<right['center'][1]<min(r['center'][1] for r in buttons)-20:continue
+        lefts=[r for r in rows if r is not right and r['confidence']>=.8
+               and re.fullmatch(r'[A-Za-z ]{2,12}',r['text']) and 8<=r['bounds'][2]<=80
+               and -1<=right['bounds'][0]-(r['bounds'][0]+r['bounds'][2])<=8
+               and abs(r['center'][1]-right['center'][1])<=3]
+        if len(lefts)!=1:continue
+        left=lefts[0];x=left['bounds'][0];y=min(left['bounds'][1],right['bounds'][1])
+        w=right['bounds'][0]+right['bounds'][2]-x;h=max(r['bounds'][1]+r['bounds'][3] for r in (left,right))-y
+        if not 10<=h<=24 or not 80<=w<=400:continue
+        area=dict(left,text=left['text']+' '+right['text'],bounds=[x,y,w,h],center=[round(x+w/2),round(y+h/2)],
+                  provenance=left['provenance']+right['provenance'])
+        a=_crop_text(image,area,'split_production_title_rgb2',executable,directory,evidence,padding=(6,6),scale=2)
+        b=_crop_text(image,area,'split_production_title_gray2',executable,directory,evidence,padding=(6,6),scale=2,grayscale=True)
+        if len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']:continue
+        match=re.fullmatch(r'What shall (?:we|me) ([a-z]{3,7}) in (.{1,60})\?',a[0]['text'],re.I)
+        if (not match or not _near_text(match[1].casefold(),'build',2) or match[2]!=suffix[1]
+                or min(a[0]['confidence'],b[0]['confidence'])<.8 or not _same_location(area,b[0])
+                or not _same_location(a[0],b[0])):continue
+        a[0]['provenance']=area['provenance']+a[0]['provenance']+b[0]['provenance']
+        rows[rows.index(left)]=a[0];rows.remove(right)
 
 
 def _recover_city_and_production_rows(image, rows, executable, directory, evidence):
@@ -1186,8 +1277,8 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_history_rows,_recover_research_rows,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+            for recover in (_recover_history_rows,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

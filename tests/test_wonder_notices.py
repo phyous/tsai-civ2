@@ -1,0 +1,59 @@
+"""Synthetic TEST public wonder reports and optional original notice."""
+import copy
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+from PIL import Image
+from civ2 import observe
+from civ2.native_events import classify_information
+from civ2.dialogs import classify_dialog
+from tests.test_herald import prepared
+from tests.test_native_events import resource,notice
+
+
+class WonderNoticeTests(unittest.TestCase):
+    def test_only_complete_original_informational_wonder_templates_are_supported(self):
+        cases=[('STARTWONDER','The %STRING1 have undertaken a great project: %STRING2!',
+                'The TEST Romans have undertaken a great project: TEST Wonder!'),
+               ('SWITCHWONDER','The %STRING1 have changed projects from %STRING2 to %STRING3!',
+                'The TEST Romans have changed projects from TEST One to TEST Two!'),
+               ('ABANDONWONDER','The %STRING1 have abandoned their great project, %STRING2.',
+                'The TEST Romans have abandoned their great project, TEST Wonder.'),
+               ('ALMOSTWONDER','The %STRING1 have nearly completed their great project, %STRING2.',
+                'The TEST Romans have nearly completed their great project, TEST Wonder.')]
+        for tag,body,text in cases:
+            source=resource(tag=tag,title='Travellers Report',body=body)
+            screen=notice(text,title='Travellers Report')
+            d=classify_information(screen,[source]);self.assertTrue(d['supported'],d)
+            self.assertEqual(d['resource_tag'],tag);self.assertFalse(d['requires_model'])
+            self.assertEqual(d['mechanical_action'],'acknowledge_information')
+            self.assertFalse(classify_information(notice(text.replace(' have ',' '),title='Travellers Report'),[source])['supported'])
+            self.assertFalse(classify_information(screen,[{**source,'options':['Pay gold','Refuse']}])['supported'])
+            self.assertFalse(classify_information(screen,[{**source,'tag':'TEST_UNKNOWN'}])['supported'])
+
+    def test_report_title_needs_exact_paired_pixels_and_visible_report_body(self):
+        base=[prepared('Dravellers Report',264,196,112,16),
+              prepared('The TEST Romans have undertaken a great',206,220,250,16),
+              prepared('project: TEST Wonder!',206,240,180,16),prepared('OK',309,286,24,14)]
+        good=prepared('Travellers Report',264,196,112,16)
+        for case in ('good','different','partial','extra','weak'):
+            rows=copy.deepcopy(base);peer=copy.deepcopy(good)
+            if case=='different':peer['text']='Travellers Reports'
+            if case=='partial':rows[1]['text']='The TEST Romans request tribute'
+            if case=='extra':rows.append(prepared('No',400,286,24,14))
+            if case=='weak':peer['confidence']=.5
+            with patch.object(observe,'_crop_text',side_effect=[[good],[peer]]):
+                observe._recover_travellers_title(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],good['text'] if case=='good' else base[0]['text'],case)
+
+    def test_optional_original_public_start_report(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0002312.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original report unavailable')
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'STARTWONDER')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        self.assertEqual(next(r for r in o['lines'] if r['text']=='Travellers Report')['provenance'][0]['text'],'Dravellers Report')
+
+
+if __name__=='__main__':unittest.main()

@@ -39,6 +39,18 @@ class CityLayoutTests(unittest.TestCase):
             elif case=='title_duplicate':o['lines'].append(deepcopy(o['lines'][0]))
             with self.subTest(case=case):self.assertFalse(classify_dialog(o)['supported'])
 
+    def test_two_absent_unit_captions_still_require_stable_sections_and_every_control(self):
+        o=complete_city();o['lines']=[r for r in o['lines'] if r['text']!='Units Present']
+        result=classify_dialog(o);self.assertTrue(result['supported'],result)
+        self.assertEqual(result['evidence']['city_layout']['missing_captions'],['Units Supported','Units Present'])
+        self.assertEqual(len(result['evidence']['city_layout']['observed_anchors']),13)
+        self.assertNotIn('Units Present',result['visible_text'])
+        for missing in ('Citizens','City Improvements','Buy','Change','Exit','Info','Map','Rename','Happy','View'):
+            changed=deepcopy(o);changed['lines']=[r for r in changed['lines'] if r['text']!=missing]
+            with self.subTest(missing=missing):self.assertFalse(classify_dialog(changed)['supported'])
+        partial=deepcopy(o);partial['lines'].append(row('Units Pres',x=315,y=284,w=70))
+        self.assertFalse(classify_dialog(partial)['supported'])
+
     def test_modal_guards_still_reject_complete_background_layout(self):
         for text in ('OK','Cancel','Please choose an improvement','Are you sure?','Warning'):
             o=complete_city();o['lines'].append(row(text,x=320,y=190,w=180))
@@ -53,5 +65,15 @@ class CityLayoutTests(unittest.TestCase):
         self.assertEqual(len(r['buttons']),8)
         self.assertEqual(r['title'],next(x['text'] for x in o['lines'] if x['text'].startswith('City of Rome')))
         self.assertEqual(r['evidence']['city_layout']['source_sha256'],o['sha256'])
+
+    def test_actual_wrapped_unit_collections_omit_both_headings(self):
+        from civ2.observe import recognize
+        path=Path(__file__).resolve().parents[1]/'runs/attempt-008/screens/ui-0000370.png'
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        o=recognize(path);r=classify_dialog(o)
+        self.assertTrue(r['supported'],r);self.assertEqual(r['kind'],'city_screen')
+        self.assertEqual(len(r['buttons']),8)
+        self.assertEqual(r['evidence']['city_layout']['missing_captions'],['Units Supported','Units Present'])
+        self.assertFalse(any(label in r['visible_text'] for label in ('Units Supported','Units Present')))
 
 if __name__=='__main__':unittest.main()

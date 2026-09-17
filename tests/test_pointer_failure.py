@@ -75,7 +75,7 @@ class FailedPointer(unittest.TestCase):
                 self.assertEqual(report['decisions']['failed_pointer_parks'][0]['relative_input_events'],count)
 
     def test_missing_input_or_gameplay_event_cannot_be_hidden_as_failure(self):
-        for case in ('gap','missing','button','held','bool_sequence','missing_frame','unknown_status'):
+        for case in ('gap','missing','button','held','bool_sequence','missing_frame','unknown_status','missing_status'):
             with self.subTest(case=case),tempfile.TemporaryDirectory() as directory:
                 r=self.receipt()
                 if case=='gap':r['input_sequence_after']=4
@@ -85,6 +85,7 @@ class FailedPointer(unittest.TestCase):
                 elif case=='bool_sequence':r['input_sequence_before']=True
                 elif case=='missing_frame':r['failure_frame_sha256']='e'*64
                 elif case=='unknown_status':r['status']='successful'
+                elif case=='missing_status':r.pop('status')
                 e=self.evidence(directory,r)
                 with self.assertRaises(VerificationError):verify_run(e.directory)
 

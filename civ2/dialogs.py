@@ -447,8 +447,8 @@ def _civilopedia_reference(rows, observation, rules):
             'anchor_lines':[r['source_line'] for r in [title,allows[0],repeated[0],*controls.values()]]}
 
 
-def _city_layout_without_supported_caption(rows, observation):
-    """Identify the complete original pane when its supported-unit caption is blank.
+def _city_layout_without_unit_captions(rows, observation, missing):
+    """Identify the original city pane when unit collections omit their captions.
 
     This supplies layout evidence only. It does not infer the absent caption,
     city statistics, a control's enabled state, or the absence of arbitrary
@@ -456,7 +456,8 @@ def _city_layout_without_supported_caption(rows, observation):
     """
     if (observation['width'], observation['height']) != (640, 480):
         return None
-    if any(r['normal'].startswith('units sup') for r in rows):
+    if any(r['normal'].startswith(('units sup','units pres'))
+           and r['normal'] not in ('units supported','units present') for r in rows):
         return None  # A clipped caption can be an occluded background window.
     titles=[r for r in rows if 32<=r['bounds'][1]<=56 and r['confidence']>=.8
             and re.match(r'^City of .+?,\s*\d{1,5}\s*(?:B\.?\s*C\.?|A\.?\s*D\.?)',r['text'],re.I)]
@@ -466,12 +467,18 @@ def _city_layout_without_supported_caption(rows, observation):
     regions={
         'food storage':(440,58,639,90), 'citizens':(5,92,202,130),
         'city resources':(202,92,438,130), 'resource map':(5,235,202,268),
-        'units present':(202,266,438,303), 'city improvements':(5,342,194,375),
+        'city improvements':(5,342,194,375),
         'buy':(444,235,514,267), 'change':(560,235,639,267),
         'info':(463,420,518,446), 'map':(520,420,577,446),
         'rename':(579,420,639,446), 'happy':(463,447,518,479),
         'view':(520,447,577,479), 'exit':(579,447,639,479),
     }
+    # The native collection layout can use the caption space for additional
+    # unit rows. An absent caption is not an absent or empty unit collection.
+    optional={'unitssupported':('units supported',(5,266,202,303)),
+              'unitspresent':('units present',(202,266,438,303))}
+    for key,(label,region) in optional.items():
+        if key not in missing:regions[label]=region
     anchors={}
     for label,(left,top,right,bottom) in regions.items():
         matches=[r for r in rows if r['normal']==label and r['confidence']>=.8
@@ -479,8 +486,10 @@ def _city_layout_without_supported_caption(rows, observation):
         if len(matches)!=1:
             return None
         anchors[label]={key:matches[0][key] for key in ('text','center','bounds','source_line')}
-    return {'source':'Complete original city pane: exact title, six section labels and eight city controls in their native regions',
-            'source_sha256':observation['sha256'], 'missing_caption':'Units Supported',
+    absent=[label.title() for key,(label,_) in optional.items() if key in missing]
+    return {'source':'Complete original city pane: exact title, stable section labels and eight city controls in their native regions',
+            'source_sha256':observation['sha256'], 'missing_captions':absent,
+            **({'missing_caption':absent[0]} if len(absent)==1 else {}),
             'title_source_line':titles[0]['source_line'], 'observed_anchors':anchors}
 
 
@@ -1233,11 +1242,14 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     # template body. Both are real choices, so never acknowledge its OK using
     # the information-only path. Bind names to observed own cities/public rules.
     if game_text and isinstance(state,dict) and isinstance(rules,dict):
-        built=[t for t in dialog_resources(game_text) if t['tag']=='BUILT'
-               and _normal(t['title'])=='domestic advisor'
-               and _normal(t['body'])=='%string0 %string3 %string1'
+        notice_templates={'BUILT':('domestic advisor','%string0 %string3 %string1'),
+                          'SUPPORT':('military advisor',"%string0 can't support %string1. unit disbanded")}
+        built=[t for t in dialog_resources(game_text) if t['tag'] in notice_templates
+               and (_normal(t['title']),_normal(t['body']))==notice_templates[t['tag']]
                and t['options']==[] and not t['listbox']]
-        headings=single_title('domestic advisor')
+        headings=single_title('domestic advisor')+single_title('military advisor')
+        if len(headings)==1:
+            built=[t for t in built if _normal(t['title'])==headings[0]['normal']]
         if len(built)==1 and len(headings)==1:
             title=headings[0]
             body,button_rows,_=body_rows(title,{'ok','cancel','yes','no','help'},600)
@@ -1253,16 +1265,21 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             sentence=text_rows[0]['normal'] if len(text_rows)==1 else None
             combinations=[(city,verb,item) for city in cities for verb in ('builds','completes') for item in names
                           if sentence==city+' '+verb+' '+item]
+            if built[0]['tag']=='SUPPORT':
+                units={_normal(u['name']) for u in rules.get('units',[]) if isinstance(u,dict) and isinstance(u.get('name'),str)}
+                combinations=[(city,'cannot support',item) for city in cities for item in units
+                              if sentence==city+" can't support "+item+'. unit disbanded']
             if (len(combinations)==1 and len(radios)==2 and {radio_label(r) for r in radios}=={'zoom to city','continue'}
                     and len(button_rows)==1 and button_rows[0]['normal']=='ok'
                     and all(r['confidence']>=.8 for r in [title,*body,*button_rows])
                     and abs(title['center'][0]-button_rows[0]['center'][0])<=8
                     and all(r['center'][1]>text_rows[0]['center'][1]+8 for r in radios)):
-                result['resource_tag']='BUILT'
-                result['evidence']['completion_notice']={'source':'Original GAME.TXT BUILT and LABELS.TXT Zoom to City/Continue',
+                tag=built[0]['tag']
+                result['resource_tag']=tag
+                result['evidence']['completion_notice' if tag=='BUILT' else 'support_loss_notice']={'source':f'Original GAME.TXT {tag} and LABELS.TXT Zoom to City/Continue',
                     'observed_body':text_rows[0]['text'],'body_source_line':text_rows[0]['source_line'],
                     'city_name':combinations[0][0],'item_name':combinations[0][2]}
-                return finish('production_notice',title['text'],[_option(r,'option') for r in radios],
+                return finish('production_notice' if tag=='BUILT' else 'support_loss_notice',title['text'],[_option(r,'option') for r in radios],
                               [_option(r,'button') for r in button_rows],model=True)
     if game_text:
         # Original LABELS.TXT supplies these finite completion verbs. Without
@@ -1308,8 +1325,9 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         labels.add('unitssupported')
     city_markers={'foodstorage','cityresources','unitssupported','unitspresent','resourcemap'}
     city_layout=None
-    if city_markers-labels=={'unitssupported'}:
-        city_layout=_city_layout_without_supported_caption(rows,observation)
+    missing_city_markers=city_markers-labels
+    if missing_city_markers and missing_city_markers<={'unitssupported','unitspresent'}:
+        city_layout=_city_layout_without_unit_captions(rows,observation,missing_city_markers)
     if city_markers<=labels or city_layout is not None:
         if re.search(r'\b(?:select|choose|emissary|confirmation|warning|please|really|are you sure)\b',full):
             return unknown('Possible unrecognized foreground modal over the city screen','city_screen')

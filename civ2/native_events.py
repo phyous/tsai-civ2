@@ -20,6 +20,7 @@ EVENT_TITLES = {
     'CIVADVANCE': 'civilization advance',
     'DESTROYED': 'defense minister',
     'SURPRISESCROLLS': 'village',
+    **dict.fromkeys(('STARTWONDER','SWITCHWONDER','ABANDONWONDER','ALMOSTWONDER'), 'travellers report'),
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
                      'INHOCK', 'FERTILE', 'UPGRADED', 'UPGRADE'), 'domestic advisor'),

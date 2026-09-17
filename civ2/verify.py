@@ -461,6 +461,7 @@ def _pointer_park(payload,files):
              'Observation pointer park contains a gameplay input')
     failed=receipt.get('status')=='failed'
     _require(receipt.get('status') in (None,'failed'), 'Pointer park has unknown outcome')
+    _require('error' not in receipt or failed, 'Pointer park error lacks explicit failed outcome')
     if failed:
         start,end=receipt.get('input_sequence_before'),receipt.get('input_sequence_after')
         _require(_int(start) and _int(end) and end>=start
