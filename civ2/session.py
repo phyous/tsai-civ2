@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 from .boot import original_rules, verify_setup
 from .city_controls import city_control_candidates, city_control_request_for, validate_city_control
+from .compact import compact_model_state
 from .engine import Game
 from .empire import empire_candidates, empire_request_for, validate_empire_action
 from .evidence import Journal, canonical
@@ -414,6 +415,7 @@ class Session:
         request['state']['recent_observed_events'] = deepcopy(list(
             getattr(self, 'recent_observed_events', ())))
         request['state']['recent_observed_events_note'] = public_notice_note(self.state)
+        request['state'] = compact_model_state(request['state'])
         self.decisions += 1
         decision_id = self.decisions
         input_artifact = self.journal.artifact(f'decisions/{decision_id:06d}-request.json', request)

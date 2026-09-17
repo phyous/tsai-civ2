@@ -128,5 +128,33 @@ class TradeEvidenceTests(unittest.TestCase):
             self.assertEqual(result['integrity'],'passed',result)
             self.assertTrue(result['completeness']['pending_trade_continuation'])
 
+    def test_exterior_herald_art_requires_complete_frame_and_no_overlap(self):
+        from PIL import ImageDraw
+        for mode in ('valid','broken_frame','overlap','inside','missing_pair','extra_key','duplicate'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as parent:
+                e=self.make(parent);path=e.directory/'screens/frame.png';im=Image.open(path).convert('RGB')
+                ImageDraw.Draw(im).rectangle((298,137,639,478),outline=(0,0,0))
+                if mode=='broken_frame':im.putpixel((298,220),(1,1,1))
+                im.save(path);sha=hashlib.sha256(path.read_bytes()).hexdigest()
+                def change(rows):
+                    for event in rows:
+                        p=event['payload']
+                        if event['kind']=='screen_observed' and p['classification']=='exchange_picker':p['screen']=sha
+                        if event['kind']!='trade_advance_dispatched':continue
+                        p['before']=sha;proof=p['evidence']['exchange_picker'];proof['image_sha256']=sha
+                        outside=dict(text='TEST ART',source_line=0,bounds=[518,56,44,40])
+                        if mode=='overlap':outside['bounds']=[518,125,44,40]
+                        elif mode=='inside':outside['bounds']=[518,220,44,40]
+                        proof.update(picker_frame_bounds=[298,137,640,479],outside_picker_rows=[outside])
+                        if mode=='missing_pair':proof.pop('picker_frame_bounds')
+                        elif mode=='extra_key':proof['inferred_empty']=True
+                        elif mode=='duplicate':proof['outside_picker_rows']*=2
+                e.rewrite(change)
+                if mode=='valid':
+                    result=verify_run(e.directory,ffprobe=None)
+                    self.assertEqual(result['decisions']['accepted_trade_continuations'],1)
+                else:
+                    with self.assertRaises(VerificationError):verify_run(e.directory,ffprobe=None)
+
 
 if __name__=='__main__':unittest.main()

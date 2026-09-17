@@ -172,14 +172,34 @@ class UI:
                     not 0 <= center[1] < observation['height']):
                 raise ValueError('Selected control geometry is outside its source image')
             point = list(center)
-        receipts = self.game.click(*point, timeout=timeout)
-        time.sleep(.2)
-        parking = self.park_pointer()
-        selected = self.observe()
-        if confirm:
-            receipts += self.key('Enter')
-        return {'target': text, 'point': point, 'before': observation['sha256'],
-                'selected_frame': selected['sha256'], 'inputs': receipts, 'pointer_park':parking}
+        receipt = {'target':text,'point':point,'before':observation['sha256'],'inputs':[]}
+        phase = 'click'
+        try:
+            receipt['inputs'] = self.game.click(*point, timeout=timeout)
+            time.sleep(.2)
+            phase = 'park_pointer'
+            receipt['pointer_park'] = self.park_pointer()
+            phase = 'observe'
+            selected = self.observe(retain_unreadable=True)
+            receipt['selected_frame'] = selected['sha256']
+            if confirm:
+                # Retaining an after-frame is bookkeeping, not permission for
+                # a further confirmation based on unreadable controls.
+                if selected.get('ocr',{}).get('unreadable_after_input'):
+                    raise ValueError('Unreadable selected frame cannot authorize confirmation')
+                phase = 'confirm'
+                receipt['inputs'] += self.key('Enter')
+            return receipt
+        except Exception as error:
+            # Callers can journal the exact inputs already returned even when
+            # a later park/capture/recognition operation fails. Never synthesize
+            # an issued click or a selected-frame hash for an incomplete step.
+            failed = getattr(error,'cursor_receipt',None)
+            if isinstance(failed,dict):
+                receipt['failed_cursor'] = deepcopy(failed)
+            error.selection_receipt = deepcopy(receipt)
+            error.selection_phase = phase
+            raise
 
     def save_native(self, name):
         """Write through the original Save dialog, then read the resulting file."""

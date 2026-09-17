@@ -239,7 +239,7 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("private server error", rendered)
         self.assertNotIn("test-placeholder", rendered)
 
-    def test_nonretryable_http_error_does_not_read_or_expose_body(self):
+    def test_nonretryable_http_error_does_not_expose_body(self):
         body = io.BytesIO(b"private response body")
         failure = HTTPError("https://api.typesafe.ai/v1/systemone", 401, "private server error", {}, body)
         client, transport, sleeps = self.client(failure)
@@ -249,6 +249,38 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(sleeps, [])
         self.assertTrue(body.closed)
         self.assertNotIn("private", "".join(traceback.format_exception(caught.exception)))
+
+    def test_http_diagnostics_are_bounded_and_public_category_has_no_remote_text(self):
+        private={'error':{'code':'context_length_exceeded',
+            'message':'Maximum context length is 32768 tokens. Bearer test-placeholder echoed-request-secret',
+            'request':{'state':'must-not-retain'}}}
+        failure=HTTPError('https://api.typesafe.ai/v1/systemone',400,'remote',{},
+                          io.BytesIO(json.dumps(private).encode()))
+        client,transport,_=self.client(failure)
+        with self.assertRaises(TransportError) as caught:client.evaluate({},QUESTIONS)
+        error=caught.exception
+        self.assertEqual(error.diagnostics['category'],'context_or_token_limit')
+        self.assertEqual(error.diagnostics['http_status'],400)
+        self.assertEqual(len(transport.requests),1)
+        self.assertNotIn('test-placeholder',repr(error._private_error))
+        self.assertNotIn('must-not-retain',repr(error._private_error))
+        self.assertNotIn('echoed-request-secret',repr(error.diagnostics))
+        self.assertNotIn('context_length_exceeded',str(error))
+
+    def test_error_body_read_limit_and_invalid_json_keep_error_safe(self):
+        from civ2.typesafe import MAX_ERROR_BYTES
+        for body in (b'x'*(MAX_ERROR_BYTES+200),b'not json'):
+            response=Response(body,status=400)
+            client,_,_=self.client(response)
+            with self.assertRaises(TransportError) as caught:client.evaluate({},QUESTIONS)
+            self.assertLessEqual(caught.exception.diagnostics['error_body_bytes'],MAX_ERROR_BYTES+1)
+            self.assertEqual(caught.exception._private_error,{})
+
+    def test_actual_nested_detail_token_error_is_categorized_without_echo(self):
+        client,_,_=self.client(Response({'detail':{'error_type':'max_tokens_exceeded'}},status=400))
+        with self.assertRaises(TransportError) as caught:client.evaluate({},QUESTIONS)
+        self.assertEqual(caught.exception.diagnostics['category'],'context_or_token_limit')
+        self.assertEqual(caught.exception._private_error,{'error_type':'max_tokens_exceeded'})
 
     def test_retry_cannot_exceed_request_limit(self):
         client, transport, _ = self.client(URLError("offline"), max_requests=1)

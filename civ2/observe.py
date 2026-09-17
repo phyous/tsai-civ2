@@ -11,6 +11,7 @@ from PIL import Image
 from .ocr_worker import run_ocr
 from .gdi_text import recover_quoted_herald
 from .gdi_titles import annotate_production_titles
+from .gdi_treaty import recover_treaty_between
 from .map_badges import annotate_badges
 from .tax_controls import annotate_tax_controls
 from .notice_icons import annotate_notice_icons
@@ -709,13 +710,15 @@ def _recover_history_title(image,rows,executable,directory,evidence):
                 or not 16<=y-old['center'][1]<=30
                 or abs(old['center'][0]-header['center'][0])>8
                 or _distance(_normal(old['text']),'civilization ii')<=3):continue
-        a=_crop_text(image,old,'history_title_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
-        b=_crop_text(image,old,'history_title_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
-        if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']
-                and min(a[0]['confidence'],b[0]['confidence'])>=.8
-                and _distance(_normal(a[0]['text']),'civilization ii')<=3
-                and _same_location(a[0],b[0]) and _same_location(old,b[0])):
-            if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+        for scale in (2,3):
+            a=_crop_text(image,old,f'history_title_rgb{scale}',executable,directory,evidence,padding=(3,3),scale=scale)
+            b=_crop_text(image,old,f'history_title_gray{scale}',executable,directory,evidence,padding=(3,3),scale=scale,grayscale=True)
+            if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']
+                    and min(a[0]['confidence'],b[0]['confidence'])>=.8
+                    and _distance(_normal(a[0]['text']),'civilization ii')<=3
+                    and _same_location(a[0],b[0]) and _same_location(old,b[0])):
+                if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+                break
 
 
 def _recover_acquisition_line(image,rows,executable,directory,evidence):
@@ -1020,6 +1023,32 @@ def _recover_audience_body(image,rows,executable,directory,evidence):
         rows[rows.index(old)]=a
 
 
+def _recover_treaty_reminder(image,rows,executable,directory,evidence):
+    """Read the printed treaty word without changing a nation or withdrawal term."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if r['text'].casefold() in ('foreign minister','foreign ifinister')
+            and r['confidence']>=.8 and 300<=r['center'][0]<=340 and 100<=r['center'][1]<=240]
+    buttons=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help')]
+    if len(titles)!=1 or len(buttons)!=1 or buttons[0]['text']!='OK':return
+    if abs(titles[0]['center'][0]-buttons[0]['center'][0])>8:return
+    body=[r for r in rows if 190<=r['bounds'][0]<=204 and titles[0]['center'][1]<r['center'][1]<buttons[0]['center'][1]-12]
+    body.sort(key=lambda r:r['center'][1])
+    if (len(body)!=5 or body[0]['text']!='Remember, Sire, that by the terms of our'
+            or body[2]['text']!='we must immediately withdraw all of our'
+            or body[3]['text']!='military units from the vicinity (two square'
+            or not re.fullmatch(r'radius\) of [A-Za-z -]{2,60} and all other [A-Za-z -]{2,60} cities\.',body[4]['text'])):return
+    old=body[1];match=re.fullmatch(r'recently-signed peace freaty with the ([A-Za-z -]{2,60}),',old['text'])
+    if not match:return
+    wanted='recently-signed peace treaty with the '+match[1]+','
+    a=_crop_text(image,old,'treaty_reminder_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
+    b=_crop_text(image,old,'treaty_reminder_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
+    if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']==wanted
+            and min(a[0]['confidence'],b[0]['confidence'])>=.8
+            and _same_location(old,a[0]) and _same_location(a[0],b[0])):
+        index=rows.index(old)
+        if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+
+
 def _recover_herald_title(image,rows,executable,directory,evidence):
     """Read a damaged Emissary suffix twice without changing nation or attitude."""
     if image.size!=(640,480):return
@@ -1158,12 +1187,13 @@ def _recover_treaty_closing_rows(image,rows,executable,directory,evidence):
     heading=headings[0];ok=controls[0]
     body=[r for r in rows if heading['center'][1]<r['center'][1]<ok['center'][1]-12 and 302<=r['bounds'][0]<=320]
     if (len(body)!=4 or body[0]['text']!='"We affirm this treaty of eternal friendship and'
-            or not body[1]['text'].startswith('goodwill between the people of the ')
+            or not re.match(r'goodwill [bh]etween the people of the ',body[1]['text'])
             or not body[1]['text'].endswith(' and')):return
     match=re.fullmatch(r'([A-Za-z -]+ civilizations\. We shall withdraw) ou[r]?',body[2]['text'])
     last='forces from your territory at once."'
     if match is None or not _near_text(body[3]['text'],last,2):return
-    for old,wanted in ((body[2],match[1]+' our'),(body[3],last)):
+    for old,wanted in ((body[1],re.sub(r'^goodwill hetween ','goodwill between ',body[1]['text'])),
+                       (body[2],match[1]+' our'),(body[3],last)):
         if old['text']==wanted:continue
         name='treaty_closing_'+str(rows.index(old))
         a=_crop_text(image,old,name+'_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
@@ -1173,6 +1203,9 @@ def _recover_treaty_closing_rows(image,rows,executable,directory,evidence):
                 or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):continue
         index=rows.index(old)
         if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+
+
+    recover_treaty_between(image,rows,evidence)
 
 
 def _recover_greeting_body(image,rows,executable,directory,evidence):
@@ -1694,7 +1727,7 @@ def recognize(path: str | Path) -> dict:
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
             for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_audience_body,_recover_herald_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+                            _recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_audience_body,_recover_treaty_reminder,_recover_herald_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

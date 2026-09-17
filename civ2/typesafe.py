@@ -23,6 +23,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_ERROR_BYTES = 16_384
 RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 529})
 
 
@@ -39,7 +40,45 @@ class RequestLimitError(TypeSafeError):
 
 
 class TransportError(TypeSafeError):
-    pass
+    def __init__(self, message, diagnostics=None, private_error=None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+        # Bounded local troubleshooting only. Never include remote text in the
+        # exception string, model state, public diagnostics, or journal.
+        self._private_error = private_error or {}
+
+
+def _http_error_details(body, status, api_key):
+    diagnostics={'http_status':status,'error_body_bytes':len(body),
+                 'truncated':len(body)>MAX_ERROR_BYTES,'category':'unclassified'}
+    private={}
+    if len(body)>MAX_ERROR_BYTES:return diagnostics,private
+    try:
+        parsed=json.loads(body)
+    except (ValueError,UnicodeError,RecursionError):return diagnostics,private
+    if not isinstance(parsed,dict):return diagnostics,private
+    payload=parsed.get('error',parsed.get('detail',parsed))
+    if isinstance(payload,str):payload={'message':payload}
+    if not isinstance(payload,dict):return diagnostics,private
+    for name in ('code','type','error_type','message','detail'):
+        value=payload.get(name)
+        if not isinstance(value,str):continue
+        # Even the private excerpt omits the actual credential and common
+        # Authorization forms; request/state objects are never retained.
+        value=value.replace(api_key,'[credential omitted]') if api_key else value
+        value=re.sub(r'(?i)bearer\s+\S+','Bearer [credential omitted]',value)
+        value=''.join(c if c.isprintable() or c=='\n' else ' ' for c in value)
+        private[name]=value[:2000]
+    text=' '.join(private.values()).casefold()
+    if (('context' in text and any(w in text for w in ('length','window','limit','exceed')))
+            or ('token' in text and any(w in text for w in ('too many','maximum','exceed','limit')))):
+        diagnostics['category']='context_or_token_limit'
+    elif any(w in text for w in ('insufficient credit','insufficient balance','billing','quota')):
+        diagnostics['category']='account_quota'
+    elif 'rate limit' in text:diagnostics['category']='rate_limit'
+    elif any(w in text for w in ('unauthorized','invalid api key','authentication')):
+        diagnostics['category']='authentication'
+    return diagnostics,private
 
 
 class ResponseValidationError(TypeSafeError):
@@ -322,6 +361,7 @@ class TypeSafeClient:
             }, method="POST")
             status = None
             retry_after = None
+            error_body = b''
             try:
                 with self._open(request, timeout=self.timeout) as response:
                     status = response.status
@@ -329,10 +369,16 @@ class TypeSafeClient:
                         body = response.read(MAX_RESPONSE_BYTES + 1)
                     else:
                         retry_after = response.headers.get("Retry-After")
+                        error_body = response.read(MAX_ERROR_BYTES + 1)
             except HTTPError as error:
                 status = error.code
                 retry_after = error.headers.get("Retry-After") if error.headers else None
-                error.close()
+                try:
+                    error_body = error.read(MAX_ERROR_BYTES + 1)
+                except (OSError,HTTPException):
+                    error_body = b''
+                finally:
+                    error.close()
             except (URLError, OSError, HTTPException):
                 if attempt >= self.max_retries:
                     raise TransportError("TypeSafe request failed after bounded retries.") from None
@@ -384,7 +430,8 @@ class TypeSafeClient:
                     }
                     return result
             if status is not None and (status not in RETRY_STATUSES or attempt >= self.max_retries):
-                raise TransportError(f"TypeSafe request failed (HTTP {status}).") from None
+                diagnostics,private=_http_error_details(error_body,status,self._api_key)
+                raise TransportError(f"TypeSafe request failed (HTTP {status}).",diagnostics,private) from None
             delay = min(0.25 * (2 ** attempt), 2.0)
             try:
                 if retry_after is not None and math.isfinite(float(retry_after)):

@@ -47,6 +47,41 @@ class ObservedTargetTests(unittest.TestCase):
             with self.subTest(alteration=alteration),self.assertRaises(ValueError):ui.select_text(observation,text,**args)
             ui.game.click.assert_not_called()
 
+    def test_post_click_geometry_failure_retains_receipts_but_cannot_confirm(self):
+        for confirm in (False,True):
+            ui,observation=self.fixture()
+            ui.observe.return_value={'sha256':'b'*64,'lines':[],'text':'',
+                                     'ocr':{'unreadable_after_input':True}}
+            with self.subTest(confirm=confirm),mock.patch('civ2.ui.time.sleep'):
+                if confirm:
+                    with self.assertRaisesRegex(ValueError,'cannot authorize') as caught:
+                        ui.select_text(observation,'Rome',exact=True,source_line=3,center=[220,180],confirm=True)
+                    receipt=caught.exception.selection_receipt
+                else:
+                    receipt=ui.select_text(observation,'Rome',exact=True,source_line=3,center=[220,180])
+            self.assertEqual(receipt['inputs'],ui.game.click.return_value)
+            self.assertEqual(receipt['pointer_park'],ui.park_pointer.return_value)
+            self.assertEqual(receipt['selected_frame'],'b'*64)
+            ui.observe.assert_called_once_with(retain_unreadable=True);ui.key.assert_not_called()
+
+    def test_later_errors_attach_only_receipts_that_actually_returned(self):
+        for phase in ('click','park_pointer','observe'):
+            ui,observation=self.fixture();error=RuntimeError('TEST failure')
+            failed={'target':[220,180],'inputs':[],'issued':False,'status':'failed','button_down_attempted':False}
+            if phase=='click':
+                error.cursor_receipt=failed;ui.game.click.side_effect=error
+            elif phase=='park_pointer':ui.park_pointer.side_effect=error
+            else:ui.observe.side_effect=error
+            with self.subTest(phase=phase),mock.patch('civ2.ui.time.sleep'),self.assertRaises(RuntimeError) as caught:
+                ui.select_text(observation,'Rome',exact=True,source_line=3,center=[220,180])
+            receipt=caught.exception.selection_receipt
+            self.assertEqual(caught.exception.selection_phase,phase)
+            self.assertEqual(receipt['before'],observation['sha256']);self.assertNotIn('selected_frame',receipt)
+            self.assertEqual(receipt['inputs'],[] if phase=='click' else ui.game.click.return_value)
+            self.assertEqual('pointer_park' in receipt,phase=='observe')
+            if phase=='click':self.assertEqual(receipt['failed_cursor'],failed)
+            ui.key.assert_not_called()
+
     def test_actual_locator_binds_one_foreground_rome_among_background_copies(self):
         from civ2.observe import recognize
         from civ2.dialogs import classify_dialog

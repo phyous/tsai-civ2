@@ -26,6 +26,17 @@ currently producing worker-role units. Unknown specifications stay explicit.
 These are current native-checkpoint facts, not defense forecasts, completion
 dates, claims that a city is safe, or information about hidden opponents.
 
+Repeated records are submitted as readable tables with explicit column names
+and missing-cell markers. Decoding preserves the supplied game facts, record
+order, historical text and outcomes, including the difference between an absent
+field and an explicit unknown value. Action choices are not pruned. Historical
+audit hashes and wall-clock timestamps remain in the evidence journal instead
+of consuming model context; the submitted compact request itself is retained
+and hashed. Verification checks the decoded notice history against the original
+observed events. This addressed a measured `max_tokens_exceeded` response in
+attempt 010: its next compact planning call retained all 64 choices and used
+23,361 input tokens.
+
 The labor description now reflects the completed twenty-position calibration.
 Only separately offered city actions after a fresh native checkpoint authorize
 labor inputs; specialist-type cycling remains unavailable.

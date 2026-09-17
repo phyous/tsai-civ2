@@ -22,6 +22,7 @@ EVENT_TITLES = {
     'SNEAK': 'defense minister',
     'SURPRISESCROLLS': 'village',
     'SURPRISEMETALS': 'village',
+    'TERMS': 'foreign minister',
     **dict.fromkeys(('STARTWONDER','SWITCHWONDER','ABANDONWONDER','ALMOSTWONDER'), 'travellers report'),
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
@@ -39,11 +40,16 @@ TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
                  # sole OK. Preserve this observed title, not guessed glyphs.
                  # Original011/735: complete Ceremonial Burial discovery and
                  # sole OK; the original pixels show Civilization Advance.
-                 'CIVADVANCE': {'ciadization advance', 'cialization advance', 'cinlization adsance'},
+                 # Original012/663: complete two-line Monarchy discovery;
+                 # this measured title spelling still requires the full body.
+                 'CIVADVANCE': {'ciadization advance', 'cialization advance', 'cinlization adsance', 'cinlization advance'},
                  # Original006/608: complete destruction notice and sole OK.
                  'DESTROYED': {'detense ifinister'},
                  # Original009/570: full sneak-attack body and sole OK.
-                 'SNEAK': {'detense mfinister'}}
+                 'SNEAK': {'detense mfinister'},
+                 # Original011/1245: complete source treaty-withdrawal reminder,
+                 # including its two-square radius, and the sole observed OK.
+                 'TERMS': {'foreign ifinister'}}
 RULE_REJECTIONS = {'ADJACENTCITY': 'Cities cannot be built in adjacent squares.'}
 OBSERVED_EVENT_TITLES = set(EVENT_TITLES.values()) | set().union(*TITLE_ALIASES.values())
 CONTROLS = {'ok', 'cancel', 'yes', 'no', 'help', 'continue', 'back', 'next', 'done', 'close'}

@@ -184,3 +184,26 @@ comparison against the identical original debug save and a five-minute paused
 gap without slow recovery. Its relative mouse motion was measured against the
 actual Windows cursor. Browser integration is being validated separately before
 a fresh no-save campaign; this is not yet a full-playthrough speed measurement.
+
+## Fresh modern campaigns
+
+Attempts 010, 011 and 012 subsequently started independently verified original
+games with the requested settings and native autosave disabled. They retain
+continuous dashboard recordings and compare the native save inventory during
+read-only observations. No between-turn save/load is used in these campaigns.
+They remain unfinished; the repository does not claim a victory.
+
+Attempt 010 reached five cities and Monarchy. Its expanding planning request
+received an explicit `max_tokens_exceeded` API error; this is a harness context
+limit, not a lost battle. Attempt 011 discovered Monarchy, began the original
+revolution, and selected peace with Spain in its native diplomacy dialog.
+Attempt 012 reached a second city after recovering a split production caption.
+These are intermediate observations, not forecasts of success.
+
+Two input-evidence limitations are retained explicitly: 010 lost some cursor
+approach receipts, and 012 lost an informational acknowledgement receipt when
+the following OCR pass failed. Actual surrounding screenshots and observed input
+sequence bounds remain available. The verifier marks their input coverage
+incomplete; it does not reconstruct missing inputs or certify those runs as
+complete release evidence. Post-input OCR failures now retain the captured
+image so actual returned input receipts can still be logged.

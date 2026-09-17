@@ -42,6 +42,7 @@ def controller_context(session):
     session.controller.setdefault('city_controls_reviewed', {})
     session.controller.setdefault('pending_city_control', None)
     session.controller.setdefault('pending_labor_refresh', None)
+    session.controller.setdefault('pending_city_navigation', None)
     session.controller.setdefault('city_labor_ready', None)
     session.controller.setdefault('recent_founding_notices', [])
     session.controller.setdefault('throne_presentation_disabled', False)
@@ -456,9 +457,66 @@ def _await_turn_resolution(session,context,observation,dialog,resources):
     raise AssertionError('Bounded turn-resolution wait exhausted')
 
 
+def navigate_city(session,context,observation,dialog,resources):
+    """Retain each completed locator step; never replay an uncertain navigation."""
+    if context['pending_city_navigation'] is not None:
+        return 'City navigation is incomplete; deliberate reviewed recovery is required.'
+    city=context['pending_city']
+    matches=[option for option in dialog['options'] if option['text'].casefold()==city['name'].casefold()]
+    if len(matches)!=1:return 'Selected city is not uniquely present in the native locator.'
+    pending=dict(city=deepcopy(city),source_hash=observation['sha256'],phase='select_city',
+        receipt=None,zoom_receipt=None,blocked=False)
+    context['pending_city_navigation']=pending
+
+    def failed(reason,error=None):
+        pending['blocked']=True
+        pending['reason']=reason[:500]
+        session.journal.append('city_navigation_incomplete',
+            **{k:deepcopy(pending[k]) for k in ('city','source_hash','phase','receipt','zoom_receipt')},
+            reason=pending['reason'],error_type=type(error).__name__[:80] if error is not None else None)
+        session.game.rpc('pause')
+        return pending['reason']
+
+    failure_reason=None
+    try:
+        session.game.rpc('resume')
+        pending['receipt']=session.ui.select_text(observation,matches[0]['text'],exact=True,
+            source_line=matches[0]['source_line'],center=matches[0]['center'])
+        pending['phase']='observe_selection'
+        # This is a fresh BEFORE-Zoom check and deliberately remains strict.
+        selected=session.ui.observe()
+        selected_dialog=classify_dialog(selected,rules=session.rules,game_text=resources,
+            labels_text=labels_text(),state=classification_state(session))
+        if selected_dialog['kind']!='city_locator' or not selected_dialog['supported']:
+            failure_reason='Native city locator changed during selection.'
+        else:
+            zoom=[button for button in selected_dialog['buttons'] if button['text'].casefold()=='zoom to city']
+            if len(zoom)!=1:
+                failure_reason='Native Zoom To City control is not uniquely observed.'
+            else:
+                pending['phase']='zoom_city'
+                pending['zoom_receipt']=session.ui.select_text(selected,zoom[0]['text'],exact=True,
+                    source_line=zoom[0]['source_line'],center=zoom[0]['center'])
+    except Exception as error:
+        partial=getattr(error,'selection_receipt',None)
+        if isinstance(partial,dict) and pending['phase'] in ('select_city','zoom_city'):
+            pending['receipt' if pending['phase']=='select_city' else 'zoom_receipt']=deepcopy(partial)
+        return failed('Native city navigation failed during '+pending['phase']+'.',error)
+    if failure_reason:return failed(failure_reason)
+    session.journal.append('navigate_selected_city',city=city,
+        receipt=pending['receipt'],zoom_receipt=pending['zoom_receipt'])
+    context['pending_city_navigation']=None
+    if context['pending_labor_refresh'] and context['pending_labor_refresh']['phase']=='await_locator':
+        context['pending_labor_refresh']['phase']='await_reopened'
+    return None
+
+
 def run_steps(session, *, max_decisions=10000):
     resources = game_text()
     context = controller_context(session)
+    if context['pending_city_navigation'] is not None:
+        session.game.rpc('pause')
+        return {'status':'paused','reason':'City navigation is incomplete; deliberate reviewed recovery is required.'}
     housekeeping = 0
     verified_endturn_checkpoint = None
     while (session.decisions < max_decisions or context['pending_labor_refresh'] is not None
@@ -707,25 +765,8 @@ def run_steps(session, *, max_decisions=10000):
                     verified_endturn_checkpoint = _checkpoint_token(session)
             continue
         if kind == 'city_locator' and context['pending_city']:
-            matches = [option for option in dialog['options']
-                       if option['text'].casefold() == context['pending_city']['name'].casefold()]
-            if len(matches) != 1:
-                return {'status':'paused','reason':'Selected city is not uniquely present in the native locator.', 'screen':observation['path']}
-            session.game.rpc('resume')
-            receipt = session.ui.select_text(observation,matches[0]['text'],exact=True,
-                source_line=matches[0]['source_line'],center=matches[0]['center'])
-            selected = session.ui.observe()
-            selected_dialog = classify_dialog(selected,rules=session.rules,game_text=resources, labels_text=labels_text(),state=classification_state(session))
-            if selected_dialog['kind'] != 'city_locator' or not selected_dialog['supported']:
-                return {'status':'paused','reason':'Native city locator changed during selection.', 'screen':selected['path']}
-            zoom = [button for button in selected_dialog['buttons'] if button['text'].casefold() == 'zoom to city']
-            if len(zoom) != 1:
-                return {'status':'paused','reason':'Native Zoom To City control is not uniquely observed.', 'screen':selected['path']}
-            zoom_receipt = session.ui.select_text(selected,zoom[0]['text'],exact=True,
-                source_line=zoom[0]['source_line'],center=zoom[0]['center'])
-            session.journal.append('navigate_selected_city',city=context['pending_city'],receipt=receipt,zoom_receipt=zoom_receipt)
-            if context['pending_labor_refresh'] and context['pending_labor_refresh']['phase']=='await_locator':
-                context['pending_labor_refresh']['phase']='await_reopened'
+            error=navigate_city(session,context,observation,dialog,resources)
+            if error:return {'status':'paused','reason':error,'screen':observation['path']}
             time.sleep(1.2)
             continue
         if kind == 'normal_map':

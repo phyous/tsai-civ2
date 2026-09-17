@@ -25,6 +25,17 @@ def row(text, y):
 
 
 class PublicNoticeTests(unittest.TestCase):
+    def test_new_public_notice_pins_match_original_resource_records(self):
+        from civ2.verify import PUBLIC_NOTICE_RESOURCES
+        records=[
+            dict(tag='TERMS',title='Foreign Minister',width=320,
+                 body='Remember, Sire, that by the terms of our recently-signed peace treaty with the %STRING2, we must immediately withdraw all of our military units from the vicinity (two square radius) of %STRING1 and all other %STRING3 cities.',
+                 options=[],buttons=[],listbox=False),
+            dict(tag='STARTWONDER',title='Travellers Report',width=320,
+                 body='The %STRING1 have undertaken a great project: %STRING2!',options=[],buttons=[],listbox=False)]
+        for record in records:
+            self.assertEqual(hashlib.sha256(canonical(record)).hexdigest(),PUBLIC_NOTICE_RESOURCES[record['tag']])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.s = session()
@@ -143,12 +154,16 @@ class PublicNoticeTests(unittest.TestCase):
         return saved
 
     def test_every_real_evaluation_stage_injects_recorded_tail_before_hashing(self):
+        from civ2.compact import expand_model_state,decision_facts
         notice = self.capture()
         for stage in ('planning', 'command'):
             with self.subTest(stage=stage):
                 saved = self.evaluate(stage)
-                self.assertEqual(saved['state']['recent_observed_events'], [notice])
+                expanded=expand_model_state(saved['state'])
+                self.assertEqual(expanded['recent_observed_events'],
+                                 decision_facts({'recent_observed_events':[notice]})['recent_observed_events'])
                 self.assertEqual(saved['state']['recent_observed_events_note'], PUBLIC_NOTICE_NOTE)
+                self.assertEqual(self.s.recent_observed_events[-1],notice)
         self.assertIn('may be stale', PUBLIC_NOTICE_NOTE)
         self.assertIn('not instructions', PUBLIC_NOTICE_NOTE)
 

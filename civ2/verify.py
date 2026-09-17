@@ -19,6 +19,7 @@ import subprocess
 
 from .boot import verify_setup
 from .city import WORKED_BITS, city_labor_projection
+from .compact import expand_model_state,decision_facts
 from .evidence import canonical
 from .save import parse_save
 from .revision import (observation_digest, observation_key, prefixed_revision,
@@ -42,7 +43,7 @@ KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'screen_observed', 'mechanical_input', 'mechanical_input_gap', 'open_city_control',
                 'native_map_observed', 'native_map_observation_failed',
                 'model_command_not_dispatched', 'model_command_interrupted', 'controller_error', 'controller_update', 'controller_input_gap',
-                'navigate_selected_city', 'batch_observed_effect',
+                'navigate_selected_city', 'city_navigation_incomplete', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
                 'model_plan', 'plan_status',
@@ -71,6 +72,8 @@ PUBLIC_NOTICE_NOTE = (
     'Only the most recent bounded notices are retained; absence is not evidence that an event did not occur.'
 )
 PUBLIC_NOTICE_RESOURCES = {'ADJACENTCITY': 'd7a2b9c34bc0aeba6a1debda44e8a02691579cc0d56bed16d1784addbedab834',
+ 'TERMS':'bad07103f15cd007440f30b75184642d501936e7e5b8f100e80d675a77365ea5',
+ 'STARTWONDER':'1f90f88df84896e4ff2702ba8258a4350ce150298b895bff83ccfcf5a0dd465b',
  'NOFOREIGN':'c50d22f896618bb6d96535a927baabf218d7e573cce5bbbb3554ec5105fb9e0f',
  'NOLANDFALL':'a14c52049fb41b989a6f2f9f79da69d594504bdd480ada2c4dd3c47be541114e',
  'SNEAK':'89320dbf8910be6fc34bd3452a15911bbe32cdd42cdd190354d20f03448affad',
@@ -197,7 +200,7 @@ def _trade_pending(payload, decision, request, files, observed_screens):
 
 def _trade_dispatch(payload, pending, files, observed_screens):
     from PIL import Image
-    from .exchange_picker import EMPTY_RECT, SELECTED_RECT, _solid
+    from .exchange_picker import EMPTY_RECT, SELECTED_RECT, PICKER_RECT, _solid
     _require(pending is not None and set(payload)=={
         'prior_trade','advance','before','after','resource_tag','evidence','inputs','scope'}
         and payload.get('prior_trade')==pending and payload.get('advance')==pending['offered_advance']
@@ -207,10 +210,12 @@ def _trade_dispatch(payload, pending, files, observed_screens):
     _require(observed_screens.get(before)=={'classification':'exchange_picker','supported':True},
              'Trade confirmation lacks its original supported singleton picker')
     evidence=payload.get('evidence');proof=evidence.get('exchange_picker') if isinstance(evidence,dict) else None
-    _require(isinstance(proof,dict) and set(proof)=={
+    base_keys={
         'source','resource_sha256','image_sha256','empty_list_bounds','empty_list_rgb',
         'selected_row_bounds','selected_row_rgb','complete_visible_singleton',
         'prior_accepted_trade_required','raw_title'}
+    frame_keys={'picker_frame_bounds','outside_picker_rows'}
+    _require(isinstance(proof,dict) and set(proof) in (base_keys,base_keys|frame_keys)
         and proof.get('source')=='Original GAME.TXT TAKECIV and calibrated original list pixels'
         and proof.get('resource_sha256')==TAKECIV_RESOURCE_SHA256 and proof.get('image_sha256')==before
         and proof.get('empty_list_bounds')==list(EMPTY_RECT) and proof.get('empty_list_rgb')==[207]*3
@@ -223,6 +228,24 @@ def _trade_dispatch(payload, pending, files, observed_screens):
         _require(original.format=='PNG' and original.size==(640,480),
                  'Trade confirmation does not retain an original-size PNG')
         image=original.convert('RGB')
+    if 'outside_picker_rows' in proof:
+        outside=proof['outside_picker_rows'];left,top,right,bottom=PICKER_RECT
+        _require(proof['picker_frame_bounds']==list(PICKER_RECT) and isinstance(outside,list)
+                 and 1<=len(outside)<=36,'Trade picker exterior evidence is malformed')
+        source_lines=[]
+        for row in outside:
+            _require(isinstance(row,dict) and set(row)=={'text','bounds','source_line'}
+                     and isinstance(row['text'],str) and 0<len(row['text'])<=512
+                     and _int(row['source_line']) and isinstance(row['bounds'],list) and len(row['bounds'])==4
+                     and all(_int(v) for v in row['bounds']), 'Trade picker exterior row is malformed')
+            x,y,w,h=row['bounds'];source_lines.append(row['source_line'])
+            _require(w>0 and h>0 and x+w<=640 and y+h<=480
+                     and (x+w<=left or x>=right or y+h<=top or y>=bottom),
+                     'Trade picker exterior evidence overlaps the actual window')
+        _require(len(set(source_lines))==len(source_lines)
+                 and all(_solid(image,rect,(0,0,0)) for rect in
+                         ((298,137,640,138),(298,138,299,479),(639,138,640,479),(298,478,640,479))),
+                 'Trade picker exterior rows lack their complete original outer frame')
     _require(_solid(image,EMPTY_RECT,(207,207,207)) and _solid(image,SELECTED_RECT,(105,105,105))
              and _solid(image,(309,170,310,440),(65,65,65)) and _solid(image,(628,170,629,440),(65,65,65)),
              'Trade confirmation pixels do not prove an empty remainder and selected first row')
@@ -1292,6 +1315,82 @@ def _mechanical_input_gap(payload,files,minimum_sequence,event_sequence):
         reason=payload['reason'])
 
 
+def _navigation_incomplete(payload,files,state,observed_screens,minimum_sequence):
+    """Count only returned inputs of a blocked locator; never complete a move."""
+    _require(set(payload)=={'city','source_hash','phase','receipt','zoom_receipt','reason','error_type'}
+             and payload.get('phase') in ('select_city','observe_selection','zoom_city')
+             and isinstance(payload.get('reason'),str) and 0<len(payload['reason'])<=500
+             and (payload.get('error_type') is None or isinstance(payload['error_type'],str)
+                  and 0<len(payload['error_type'])<=80), 'Incomplete navigation schema is invalid')
+    _labor_city(state,payload['city']);source=payload['source_hash'];files.screen(source)
+    _require(observed_screens.get(source)=={'classification':'city_locator','supported':True},
+             'Incomplete navigation has no prior supported original locator')
+    phase=payload['phase'];first=payload['receipt'];zoom=payload['zoom_receipt']
+    _require((phase=='zoom_city' or zoom is None) and (phase=='select_city' or isinstance(first,dict)),
+             'Incomplete navigation receipts do not match its phase')
+    known=[]
+    for key,label in (('receipt',payload['city']['name']),('zoom_receipt','Zoom To City')):
+        receipt=payload[key]
+        if receipt is None:continue
+        _require(isinstance(receipt,dict) and {'target','point','before','inputs'}<=set(receipt)
+                 and set(receipt)<={'target','point','before','inputs','selected_frame','pointer_park','failed_cursor'}
+                 and isinstance(receipt['target'],str) and receipt['target'].casefold()==label.casefold()
+                 and isinstance(receipt['point'],list) and len(receipt['point'])==2
+                 and all(_int(v) for v in receipt['point'])
+                 and receipt['point'][0]<640 and receipt['point'][1]<480
+                 and isinstance(receipt['inputs'],list), 'Incomplete navigation target is malformed')
+        files.screen(receipt['before'])
+        if key=='receipt':_require(receipt['before']==source,'Navigation first click changes its source image')
+        if 'selected_frame' in receipt:files.screen(receipt['selected_frame'])
+        if key=='receipt' and phase!='select_city':
+            _require('selected_frame' in receipt and receipt['inputs'] and 'failed_cursor' not in receipt,
+                     'Navigation advanced past an unfinished first selection')
+        if receipt['inputs']:
+            ordinary=_inputs(receipt['inputs'])
+            _require(not any(r['type']=='key' for r in ordinary),'Navigation includes an unrelated key')
+            action=dict(label=receipt['target'],parameters={'center':receipt['point']},
+                        preconditions={'image_sha256':receipt['before']})
+            _dispatch(dict(action=action,receipt=receipt,after=receipt.get('selected_frame',receipt['before'])),
+                      action,'dialog_action',files)
+            known.extend(ordinary)
+        if receipt.get('pointer_park') is not None:
+            _require(bool(receipt['inputs']),'Navigation parks before an acknowledged click')
+            park=receipt['pointer_park'];_pointer_park({'before':receipt['before'],'receipt':park},files)
+            if park['inputs']:known.extend(_inputs(park['inputs']))
+        failed=receipt.get('failed_cursor')
+        if failed is not None:
+            _require(isinstance(failed,dict) and failed.get('status')=='failed'
+                     and failed.get('target') in (receipt['point'],[2,1])
+                     and isinstance(failed.get('inputs'),list)
+                     and isinstance(failed.get('error'),str) and 0<len(failed['error'])<=2000,
+                     'Incomplete navigation cursor failure is malformed')
+            attempted=failed.get('button_down_attempted',False)
+            _require(type(attempted) is bool and (failed.get('issued') is None if attempted else failed.get('issued') is False),
+                     'Failed navigation cannot assert an issued click')
+            if receipt['inputs']:
+                _require(failed['target']==[2,1] and not attempted and receipt.get('pointer_park') is None,
+                         'Failed navigation duplicates a completed click or park')
+            else:_require(failed['target']==receipt['point'],'Failed click targets another control')
+            buttons=[]
+            for item in failed['inputs']:
+                _require(isinstance(item,dict),'Failed navigation input is malformed')
+                if item.get('type')=='relativeMouse':known.extend(_inputs([item]));continue
+                # An acknowledged down or up can survive the other RPC failing.
+                # Keep it explicitly partial, without fabricating its pair.
+                _require(attempted and item.get('type')=='mouse' and item.get('event') in ('mousedown','mouseup')
+                         and type(item.get('button')) is int and item['button']==0 and _int(item.get('sequence'),1)
+                         and _int(item.get('x')) and item['x']<640 and _int(item.get('y')) and item['y']<480,
+                         'Failed navigation includes an unrelated ordinary input')
+                buttons.append(item['event']);known.append(item)
+            _require(buttons in ([],['mousedown'],['mouseup'],['mousedown','mouseup']),
+                     'Failed navigation includes multiple button attempts')
+    sequences=[r['sequence'] for r in known]
+    _require(all(a<b for a,b in zip([minimum_sequence,*sequences],sequences)),
+             'Incomplete navigation repeats or reorders returned input receipts')
+    return dict(city=payload['city'],source_hash=source,phase=phase,known_input_events=len(known),
+                reason=payload['reason'],status='incomplete_not_replayed')
+
+
 def _native_map_event(files,payload,initial_state,inventory,boundary,minimum_sequence):
     from .memory import parse_memory
     from .native_map import context_for,LEFT_MAP_REASON
@@ -1343,7 +1442,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     forced_city, forced_city_pending, city_pending = 0, None, None
     city_reviews, city_closures, graphics_reviews = 0, 0, 0
     cosmetic_probes={};cosmetic_preferences=0;cosmetic_section_sequence=None
-    public_notices=[];public_notice_count=0
+    public_notices=[];public_notice_count=0;compacted_requests=0
     labor_refresh, labor_ready = None, None
     labor_outcomes, labor_usage, checkpoint_sequences = {}, {}, {}
     labor_failures=[]
@@ -1361,6 +1460,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     controller_update_notes = 0
     input_gaps = {}
     mechanical_input_gaps = []
+    navigation_pending=None
     checks, initial_state = None, None
     initial_memory_inventory=None
     initial_campaign_start=None
@@ -1388,6 +1488,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             last_finish=None
         if kind not in KNOWN_EVENTS:
             unknown[kind] += 1
+        if navigation_pending is not None:
+            _require(kind in {'screen_observed','controller_update','session_stopped','recording_finalized',
+                              'checkpoint','batch_observed_effect','plan_status'},
+                     'An unresolved city navigation cannot authorize another input or decision')
         if activation_pending is not None:
             _require(kind not in {'inference_started','model_decision','model_plan'}|set(DISPATCHES),
                      'A new decision or dispatch interrupted an unresolved activation')
@@ -1663,10 +1767,21 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _require(_int(identifier, 1) and identifier not in started, 'Inference identifier is duplicated or invalid')
             request = files.json(payload['request']['path'])
             model_state=request.get('state',{})
+            expected_notices=public_notices
+            if 'model_state_encoding' in model_state:
+                try:
+                    model_state=expand_model_state(model_state)
+                except (ValueError,TypeError,KeyError,RecursionError):
+                    raise VerificationError('Saved compact model context has an invalid encoding') from None
+                # The artifact hash above remains that of the actual submitted
+                # compact request. Only semantic checks use this decoded copy.
+                request={**request,'state':model_state}
+                expected_notices=decision_facts({'recent_observed_events':public_notices})['recent_observed_events']
+                compacted_requests+=1
             if 'recent_observed_events' in model_state or public_notices:
                 notice_note=(PUBLIC_NOTICE_NOTE.replace('prior native save','prior live memory observation')
                              if initial_state['evidence'].get('kind')=='live_memory' else PUBLIC_NOTICE_NOTE)
-                _require(canonical(model_state.get('recent_observed_events'))==canonical(public_notices)
+                _require(canonical(model_state.get('recent_observed_events'))==canonical(expected_notices)
                          and model_state.get('recent_observed_events_note')==notice_note,
                          'Model public-notice context differs from the preceding bounded observed history')
             try:
@@ -1800,6 +1915,14 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             # Do not count unknown movements or certify command execution.
             input_gaps[identifier]=payload['input_sequence_after']
             latest_runtime_input=payload['input_sequence_after']
+        elif kind == 'city_navigation_incomplete':
+            _require(latest_save_sha256 in saves,'Incomplete city navigation precedes native state')
+            navigation_pending=_navigation_incomplete(payload,files,saves[latest_save_sha256],
+                                                       observed_screens,previous_runtime_input)
+            if labor_refresh is not None:
+                _require(labor_refresh['step']=='open_locator' and payload['city']==labor_refresh['city'],
+                         'Incomplete navigation differs from pending labor refresh')
+            inputs+=navigation_pending['known_input_events']
         elif kind == 'mechanical_input_gap':
             _require(initial_state is not None,'Mechanical input gap precedes campaign setup')
             gap=_mechanical_input_gap(payload,files,previous_runtime_input,event['sequence'])
@@ -2102,7 +2225,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
              'Controller error needs separate source-bound no-dispatch evidence')
     _require(checks is not None, 'Initial native setup evidence is absent')
     outcome = _terminal(files, terminal_review, chain)
-    complete = len(stops) == 1 and recording is not None and not unknown and not input_gaps and not mechanical_input_gaps
+    complete = len(stops) == 1 and recording is not None and not unknown and not input_gaps and not mechanical_input_gaps and navigation_pending is None
     responses = [d['response'] for group in (decisions,plans) for d in group.values()]
     numeric_metadata = ('rejected_response_attempts', 'rejected_input_tokens',
                         'rejected_output_tokens', 'rejected_usage_unavailable_attempts')
@@ -2127,7 +2250,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'interrupted_pointer_approaches': sorted(interrupted_commands),
                           'controller_error_diagnostics': sorted(controller_errors),
                           'controller_update_notes': controller_update_notes,
-                          'input_coverage': 'incomplete' if input_gaps or mechanical_input_gaps else 'recorded inputs checked',
+                          'input_coverage': 'incomplete' if input_gaps or mechanical_input_gaps or navigation_pending else 'recorded inputs checked',
+                          'incomplete_city_navigation':navigation_pending,
                           'unverified_input_gaps': [{'decision':i,'observed_input_sequence_after':input_gaps[i]} for i in sorted(input_gaps)],
                           'unverified_mechanical_input_gaps':mechanical_input_gaps,
                           'mechanical_input_gap_note':'Declared missing receipts are not reconstructed, counted or attributed to model decisions. Image integrity and sequence bounds only; no input or native effect is certified.',
@@ -2144,6 +2268,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'successful_native_checkpoints':checkpoint_count,
                           'last_native_checkpoint_ordinal':checkpoint_ordinal,
                           'observed_public_notices':public_notice_count,
+                          'compacted_model_contexts':compacted_requests,
                           'native_map_observations':native_map_observations,
                           'native_map_observation_failures':native_map_failures,
                           'failed_pointer_parks':failed_pointer_parks,
@@ -2173,6 +2298,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                              'pending_labor_refresh':labor_refresh is not None,
                              'pending_trade_continuation':trade_pending is not None,
                              'pending_unit_activation':activation_pending is not None,
+                             'pending_city_navigation':navigation_pending is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] in ('human_reviewed','assistant_reviewed') and len(dispatched) == len(decisions)
                               and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries
