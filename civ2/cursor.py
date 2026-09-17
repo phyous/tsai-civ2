@@ -139,8 +139,12 @@ def _initial_observe(game, inputs, diagnostics=None):
     except CursorError as error:
         if str(error) != 'The original Windows arrow is not fully visible':raise
         data=error.frame
-    with Image.open(BytesIO(data)) as image:
-        clipped = locate_clipped_cursor(image)
+    try:
+        with Image.open(BytesIO(data)) as image:
+            clipped = locate_clipped_cursor(image)
+    except CursorError as error:
+        error.frame=data
+        raise
     delta = (-8 if clipped[0] > 627 else 0, -8 if clipped[1] > 460 else 0)
     inputs.append(game.rpc('moveRelative', *delta))
     time.sleep(.1)
@@ -149,7 +153,7 @@ def _initial_observe(game, inputs, diagnostics=None):
                       'restored_full_cursor':list(restored), 'button_pressed':False}
 
 
-def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: bool = True, timeout: float = 20) -> dict:
+def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: bool = True, timeout: float = 20, _trace=None) -> dict:
     """Position by visual feedback, then press/release without extra motion.
 
     Returns ordinary input receipts plus each observed cursor checkpoint. Raises
@@ -174,7 +178,8 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
     if not 0 <= host_x < 640 or not 0 <= host_y < 480:
         raise CursorError('Current emulator mouse coordinates are outside the canvas')
     gains = [INITIAL_GAIN, INITIAL_GAIN]
-    inputs, checkpoints, repaints = [], [], []
+    trace=_trace if _trace is not None else {'inputs':[],'checkpoints':[],'cursor_repaints':[]}
+    inputs, checkpoints, repaints = trace['inputs'],trace['checkpoints'],trace['cursor_repaints']
     deadline = time.monotonic() + timeout
     cursor, edge_recovery = _initial_observe(game, inputs, repaints)
     for step in range(81):
@@ -237,4 +242,12 @@ def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3,
 
 def move_cursor(game, x: int, y: int, *, tolerance: int = 3) -> dict:
     """Move with original-image feedback; never press a mouse button."""
-    return _move(game,x,y,tolerance=tolerance,press=False)
+    trace={'inputs':[],'checkpoints':[],'cursor_repaints':[]}
+    try:
+        return _move(game,x,y,tolerance=tolerance,press=False,_trace=trace)
+    except CursorError as error:
+        # A failed observation can follow real relative motion. Preserve every
+        # returned input receipt; failure must never be reported as no input.
+        error.cursor_receipt={'issued':False,'status':'failed','target':[x,y],
+            'tolerance':tolerance,'error':str(error),**trace}
+        raise

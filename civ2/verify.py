@@ -447,6 +447,36 @@ def _inputs(value):
     return result
 
 
+def _pointer_park(payload,files):
+    """Account for ordinary motion even when the original cursor was lost."""
+    files.screen(payload.get('before'));receipt=payload.get('receipt')
+    if isinstance(receipt,dict) and set(receipt)=={'issued','error'}:
+        raise VerificationError('Historical failed pointer park omitted its target and input receipts; motion cannot be independently accounted for')
+    _require(isinstance(receipt,dict) and receipt.get('issued') is False
+             and receipt.get('target') in ([620,410],[2,1])
+             and isinstance(receipt.get('inputs'),list),
+             'Observation pointer park lacks a bounded non-click receipt')
+    moves=_inputs(receipt['inputs']) if receipt['inputs'] else []
+    _require(all(item['type']=='relativeMouse' for item in moves),
+             'Observation pointer park contains a gameplay input')
+    failed=receipt.get('status')=='failed'
+    _require(receipt.get('status') in (None,'failed'), 'Pointer park has unknown outcome')
+    if failed:
+        start,end=receipt.get('input_sequence_before'),receipt.get('input_sequence_after')
+        _require(_int(start) and _int(end) and end>=start
+                 and len(moves)==end-start
+                 and [item['sequence'] for item in moves]==list(range(start+1,end+1)),
+                 'Failed pointer park has incomplete ordinary-input sequence accounting')
+        _require(receipt.get('held_keys_before')==receipt.get('held_keys_after')==[]
+                 and type(receipt.get('buttons_before')) is int and receipt['buttons_before']==0
+                 and type(receipt.get('buttons_after')) is int and receipt['buttons_after']==0,
+                 'Failed pointer park did not preserve clear keys and mouse buttons')
+        _require(isinstance(receipt.get('error'),str) and 0<len(receipt['error'])<=500,
+                 'Failed pointer park lacks its observation error')
+        if 'failure_frame_sha256' in receipt:files.screen(receipt['failure_frame_sha256'])
+    return len(moves),failed
+
+
 def _action_binding(action, request, question, saves, *, forced=False):
     _require(isinstance(action, dict) and set(action) ==
              {'id', 'kind', 'label', 'actor', 'preconditions', 'parameters'}, 'Selected action schema is invalid')
@@ -1147,6 +1177,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     initial_memory_inventory=None
     initial_campaign_start=None
     native_map_observations=native_map_failures=0
+    failed_pointer_parks=[]
     latest_runtime_input=0
     native_map_seen=set()
     for event in events:
@@ -1297,16 +1328,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      'Diplomatic follow-up lacks its pending original audience')
             files.screen(payload.get('screen'));diplomatic_followup=None
         elif kind=='pointer_park_for_observation':
-            files.screen(payload.get('before'));receipt=payload.get('receipt')
-            _require(isinstance(receipt,dict) and receipt.get('issued') is False
-                     and receipt.get('target') in ([620,410],[2,1])
-                     and isinstance(receipt.get('inputs'),list),
-                     'Observation pointer park lacks a bounded non-click receipt')
-            if receipt['inputs']:
-                moves=_inputs(receipt['inputs'])
-                _require(all(item['type']=='relativeMouse' for item in moves),
-                         'Observation pointer park contains a gameplay input')
-                inputs+=len(moves)
+            count,failed=_pointer_park(payload,files);inputs+=count
+            if failed:failed_pointer_parks.append({'journal_sequence':event['sequence'],
+                'relative_input_events':count,'error':payload['receipt']['error']})
         elif kind=='observed_public_notice':
             _require(latest_save_sha256 in saves, 'Public notice precedes its original checkpoint')
             notice=_public_notice(payload,files,observed_screens,saves[latest_save_sha256],checkpoint_count,event['elapsed_ms'])
@@ -1728,6 +1752,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'observed_public_notices':public_notice_count,
                           'native_map_observations':native_map_observations,
                           'native_map_observation_failures':native_map_failures,
+                          'failed_pointer_parks':failed_pointer_parks,
                           'native_map_note':'Full source capsule, bracketed original frame, no intervening input and recorded menu/status OCR checked. This allows map artwork only; it is not a gameplay checkpoint or modal acknowledgement.',
                           'accepted_trade_continuations':trade_confirmations,
                           'trade_continuation_note':'Prior actual model offer/action and original frame/list pixels checked; one Enter only. Technology acquisition and OCR semantics are not independently inferred.',

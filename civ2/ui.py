@@ -74,12 +74,24 @@ class UI:
 
     def park_pointer(self):
         from .cursor import move_cursor, CursorError
+        before=self.game.rpc('status')
         try:
             # The old lower-right point obscured the original herald message.
             # This observed title-bar corner keeps the complete arrow visible.
             return move_cursor(self.game,2,1,tolerance=1)
         except CursorError as error:
-            return {'issued':False,'error':str(error)}
+            after=self.game.rpc('status')
+            receipt=dict(error.cursor_receipt)
+            for label,state in (('before',before),('after',after)):
+                receipt['input_sequence_'+label]=state.get('inputSequence')
+                receipt['held_keys_'+label]=state.get('heldKeys')
+                receipt['buttons_'+label]=state.get('buttons')
+            if isinstance(getattr(error,'frame',None),bytes):
+                import hashlib
+                digest=hashlib.sha256(error.frame).hexdigest()
+                (self.directory/('cursor-park-'+digest+'.png')).write_bytes(error.frame)
+                receipt['failure_frame_sha256']=digest
+            return receipt
 
     def select_text(self, observation, text, *, exact=False, confirm=False, timeout=20,
                     source_line=None, center=None):
