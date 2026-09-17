@@ -46,5 +46,28 @@ class GreetingBodyPixels(unittest.TestCase):
         self.assertEqual(o['lines'][2]['text'],'Emperor: Frederick of the Germans ..."')
         self.assertIn('Emperor: Frederick of the Germans.',[x['text'] for x in o['lines'][2]['provenance']])
 
+    def test_original_greetings00_preserves_variable_leader_and_closing_words(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-011/screens/ui-0001162.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original herald absent')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'GREETINGS00')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        self.assertIn('"Greetings from the most exalted Isabella:',[r['text'] for r in o['lines']])
+        tail=next(r for r in o['lines'] if r['text'].startswith('Empress of the Spanish'))
+        self.assertTrue(tail['text'].endswith('..."'))
+        self.assertEqual(tail['provenance'][0]['text'],'Empress of the Spanish..')
+
+    def test_greetings00_requires_two_tail_reads_and_keeps_leader(self):
+        rows=self.rows();rows[1]['text']='"Greetings from the most exalted TEST:'
+        rows[2]=prepared('Empress of the TEST...',308,425,251,16)
+        tail=dict(text='Empress of the TEST ..."',confidence=1,x=.01,y=.06,width=.94,height=.77)
+        with tempfile.TemporaryDirectory() as directory,patch.object(observe,'_crop_text') as crop,patch.object(
+                observe,'_run_ocr',side_effect=[[deepcopy(tail)],[deepcopy(tail)]]):
+            observe._recover_greeting_body(Image.new('RGB',(640,480)),rows,None,directory,{'passes':[]})
+        crop.assert_not_called();self.assertEqual(rows[1]['text'],'"Greetings from the most exalted TEST:')
+        self.assertEqual(rows[2]['text'],tail['text'])
+
 
 if __name__=='__main__':unittest.main()

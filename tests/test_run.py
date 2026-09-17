@@ -308,6 +308,25 @@ class ControllerTests(TestCase):
         self.assertEqual(event['resource_tag'],'THRONE')
         self.assertEqual(event['receipt']['point'],[320,135])
         self.assertEqual(event['receipt']['selected_frame'],unknown['sha256'])
+        self.assertIn(mock.call(retain_unreadable=True),s.ui.observe.call_args_list)
+
+    def test_trade_after_frame_keeps_receipts_without_authorizing_next_input(self):
+        pending={'decision':0,'TEST':'already accepted exchange'}
+        offer=frame(1,'research_choice',mechanical_action='accept_single_trade_advance',
+            prior_trade=pending,advance={'id':1,'name':'TEST'},evidence={'TEST':'source'})
+        unknown=frame(2,'unknown',supported=False)
+        s=session([offer,offer]+[unknown]*30)
+        controller_context(s)['pending_trade']=pending
+        s.ui.key.return_value=[{'TEST':'actual returned receipt'}]
+        self.run_fake(s)
+        s.ui.key.assert_called_once_with('Enter',settle=.15)
+        s.choose_dialog.assert_not_called()
+        self.assertIsNone(controller_context(s)['pending_trade'])
+        event=next(c.kwargs for c in s.journal.append.call_args_list
+                   if c.args[0]=='trade_advance_dispatched')
+        self.assertEqual(event['inputs'],s.ui.key.return_value)
+        self.assertEqual(event['after'],unknown['sha256'])
+        self.assertIn(mock.call(retain_unreadable=True),s.ui.observe.call_args_list)
 
     def test_ambiguous_presentation_prompt_remains_paused(self):
         presentation=frame(1,'presentation',mechanical_action='acknowledge_presentation',

@@ -545,7 +545,7 @@ def run_steps(session, *, max_decisions=10000):
             context['pending_trade']=None
             session.game.rpc('resume')
             inputs=session.ui.key('Enter',settle=.15)
-            after=session.ui.observe()
+            after=session.ui.observe(retain_unreadable=True)
             session.journal.append('trade_advance_dispatched',prior_trade=pending,
                 advance=dialog['advance'],before=observation['sha256'],after=after['sha256'],
                 resource_tag='TAKECIV',evidence=dialog['evidence'],inputs=inputs,
@@ -566,7 +566,7 @@ def run_steps(session, *, max_decisions=10000):
                         'screen':observation['path']}
             session.game.rpc('resume')
             inputs = session.game.click(*point)
-            after = session.ui.observe()
+            after = session.ui.observe(retain_unreadable=True)
             receipt = {'target':buttons[0]['text'], 'point':point, 'before':observation['sha256'],
                 'selected_frame':after['sha256'], 'inputs':inputs,
                 'method':'Original full-screen click-to-continue prompt; clicked observed narrative'}

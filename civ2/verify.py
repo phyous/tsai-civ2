@@ -39,7 +39,7 @@ KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'unit_activation_enabled',
                 'unit_activation_started','unit_activation_step_started','unit_activation_step_dispatched',
                 'unit_activation_failed','unit_activation_observed',
-                'screen_observed', 'mechanical_input', 'open_city_control',
+                'screen_observed', 'mechanical_input', 'mechanical_input_gap', 'open_city_control',
                 'native_map_observed', 'native_map_observation_failed',
                 'model_command_not_dispatched', 'model_command_interrupted', 'controller_error', 'controller_update', 'controller_input_gap',
                 'navigate_selected_city', 'batch_observed_effect',
@@ -1264,6 +1264,34 @@ def _runtime_sequences(value):
         for child in value:yield from _runtime_sequences(child)
 
 
+def _mechanical_input_gap(payload,files,minimum_sequence,event_sequence):
+    """Validate a declared evidence loss without reconstructing any input."""
+    start,end=payload.get('input_sequence_before'),payload.get('input_sequence_after')
+    _require(set(payload)=={'label','before','after','input_sequence_before','input_sequence_after','reason'}
+             and payload.get('label')=='acknowledge_information'
+             and payload.get('reason')=='post_input_ocr_failed_receipts_unavailable'
+             and _int(start) and _int(end) and minimum_sequence<=start<end<=2**53-1,
+             'Mechanical input gap requires an exact bounded declaration and monotonic sequence')
+    images=[]
+    from PIL import Image
+    for key in ('before','after'):
+        descriptor=payload.get(key)
+        _require(isinstance(descriptor,dict) and set(descriptor)=={'path','bytes','sha256'}
+                 and _int(descriptor.get('bytes'),1) and descriptor['bytes']<=4*1024*1024,
+                 'Mechanical input gap requires exact original image descriptors')
+        info=files.descriptor(descriptor)
+        _require(info['path'].startswith('screens/') and info['path'].endswith('.png'),
+                 'Mechanical input gap image is outside original screens')
+        with Image.open(files.path(info['path'])) as image:
+            _require(image.format=='PNG' and image.size==(640,480),
+                     'Mechanical input gap requires original-resolution PNGs')
+            image.load()
+        images.append(info)
+    return dict(event_sequence=event_sequence,label=payload['label'],
+        before=images[0],after=images[1],input_sequence_before=start,input_sequence_after=end,
+        reason=payload['reason'])
+
+
 def _native_map_event(files,payload,initial_state,inventory,boundary,minimum_sequence):
     from .memory import parse_memory
     from .native_map import context_for,LEFT_MAP_REASON
@@ -1332,6 +1360,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     controller_errors = set()
     controller_update_notes = 0
     input_gaps = {}
+    mechanical_input_gaps = []
     checks, initial_state = None, None
     initial_memory_inventory=None
     initial_campaign_start=None
@@ -1347,9 +1376,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
         previous_runtime_input=latest_runtime_input
         latest_runtime_input=max([latest_runtime_input,*_runtime_sequences(payload)])
         if kind not in {'screen_observed','pointer_park_for_observation',
-                        'trade_followup_pending','trade_advance_dispatched','native_map_observed','native_map_observation_failed'}:
+                        'trade_followup_pending','trade_advance_dispatched','native_map_observed','native_map_observation_failed',
+                        'mechanical_input_gap'}:
             trade_pending=None;trade_eligible=None
-        if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted'}:
+        if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted','mechanical_input_gap'}:
             cosmetic_section_sequence=None
         observation_only={'screen_observed','batch_observed_effect','plan_status'}
         if kind not in observation_only|{'checkpoint','checkpoint_reused'}:
@@ -1364,7 +1394,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _require(kind in {'screen_observed','checkpoint','batch_observed_effect','plan_status',
                 'session_stopped','recording_finalized','controller_update','pointer_park_for_observation',
                 'native_map_observed','native_map_observation_failed','unit_activation_step_started',
-                'unit_activation_step_dispatched','unit_activation_failed','unit_activation_observed'},
+                'unit_activation_step_dispatched','unit_activation_failed','unit_activation_observed','mechanical_input_gap'},
                 'An unrelated input or transaction interrupted the selected activation')
         if kind in ('begin', 'checkpoint'):
             live = payload.get('observation_kind') == 'live_memory'
@@ -1770,6 +1800,13 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             # Do not count unknown movements or certify command execution.
             input_gaps[identifier]=payload['input_sequence_after']
             latest_runtime_input=payload['input_sequence_after']
+        elif kind == 'mechanical_input_gap':
+            _require(initial_state is not None,'Mechanical input gap precedes campaign setup')
+            gap=_mechanical_input_gap(payload,files,previous_runtime_input,event['sequence'])
+            mechanical_input_gaps.append(gap)
+            latest_runtime_input=gap['input_sequence_after']
+            # Sequence bounds are not reconstructed receipts, an input count,
+            # a model dispatch, or completion/cancellation of a transaction.
         elif kind == 'controller_update':
             _require(set(payload)=={'reason','scope'} and all(isinstance(payload[k],str)
                      and 0<len(payload[k])<=512 for k in ('reason','scope')),
@@ -2065,7 +2102,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
              'Controller error needs separate source-bound no-dispatch evidence')
     _require(checks is not None, 'Initial native setup evidence is absent')
     outcome = _terminal(files, terminal_review, chain)
-    complete = len(stops) == 1 and recording is not None and not unknown and not input_gaps
+    complete = len(stops) == 1 and recording is not None and not unknown and not input_gaps and not mechanical_input_gaps
     responses = [d['response'] for group in (decisions,plans) for d in group.values()]
     numeric_metadata = ('rejected_response_attempts', 'rejected_input_tokens',
                         'rejected_output_tokens', 'rejected_usage_unavailable_attempts')
@@ -2090,8 +2127,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'interrupted_pointer_approaches': sorted(interrupted_commands),
                           'controller_error_diagnostics': sorted(controller_errors),
                           'controller_update_notes': controller_update_notes,
-                          'input_coverage': 'incomplete' if input_gaps else 'recorded inputs checked',
+                          'input_coverage': 'incomplete' if input_gaps or mechanical_input_gaps else 'recorded inputs checked',
                           'unverified_input_gaps': [{'decision':i,'observed_input_sequence_after':input_gaps[i]} for i in sorted(input_gaps)],
+                          'unverified_mechanical_input_gaps':mechanical_input_gaps,
+                          'mechanical_input_gap_note':'Declared missing receipts are not reconstructed, counted or attributed to model decisions. Image integrity and sequence bounds only; no input or native effect is certified.',
                           'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)),
                           'forced_empire_dispatches': forced,
                           'forced_city_exit_dispatches':forced_city,
@@ -2142,7 +2181,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
                            'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
                            'This verifier performs no OCR, live game calls or automatic victory recognition.',
-                           'Do not publish original saves or game assets merely because their integrity checks pass.']}
+                           'Do not publish original saves or game assets merely because their integrity checks pass.']
+                          + (['Mechanical input receipts are unavailable within the declared sequence bounds; input coverage and release review remain incomplete.']
+                             if mechanical_input_gaps else [])}
 
 
 def verify_run(directory, *, terminal_review=None, ffprobe='auto'):

@@ -19,7 +19,7 @@ const config='[sdl]\nautolock=false\n[dosbox]\nmemsize=16\n[cpu]\ncore=auto\ncyc
  // A nonexistent fsReadFile leaves an occupied path promise in this js-dos
  // release. Inspect fsTree readiness first, then read each existing file once.
  fs.mkdirSync(output,{recursive:true});
- for(const name of ['ATLAS.BMP','GLYPHS.TSV','ATDONE.TXT'])
+ for(const name of ['ATLAS.BMP','GLYPHS.TSV','ATREG.BMP','REGULAR.TSV','ATDONE.TXT'])
   fs.writeFileSync(path.join(output,name.toLowerCase()),await ci.fsReadFile(name));
  }catch(error){console.error(String(error));process.exitCode=1;}
  finally{if(ci)await ci.exit();clearTimeout(timeout);}})();

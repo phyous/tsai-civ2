@@ -24,9 +24,11 @@ from .map_badges import proven_badge
 from .tax_controls import proven_tax_arrows
 from .exchange_picker import classify_exchange_picker
 from .acquisition_notice import classify_acquisition_notice
+from .production_change import classify_production_change
 from .history_notice import classify_history_notice
 from .native_choices import classify_native_choice
 from .native_map import evidence_for as native_map_evidence
+from .gdi_titles import exact_production_title
 
 CDROM_TEMPLATE_SHA256='28a50ae19b7eaf7abf51d1c97ab591c3f03abff2e7a19fc18dcb623914666fd7'
 
@@ -641,6 +643,13 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             result['evidence']['template_sha256']=hashlib.sha256(expected.encode()).hexdigest()
             return finish('presentation_notice','Throne room notice',[button],[button],
                           mechanical='acknowledge_presentation')
+    production_change=classify_production_change(observation,rows,dialog_resources(game_text or ''),rules)
+    if production_change:
+        result['resource_tag']='PRODCHANGE'
+        result['production_change']=production_change['production_change']
+        result['evidence'].update(production_change['evidence'])
+        return finish('production_change_choice',production_change['title'],production_change['options'],
+                      production_change['buttons'],model=True)
     native_choice=classify_native_choice(observation,rows,dialog_resources(game_text or ''),rules)
     if native_choice:
         result['resource_tag']=native_choice['resource_tag']
@@ -871,6 +880,16 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 result['resource_tag']='COUNCILTIME'
                 return finish('high_council',title['text'],[_option(r,'option') for r in options],
                               [_option(r,'button') for r in controls],model=True)
+    # Recover only this local prepared caption from source-bound exact pixels.
+    # The observation's raw OCR stays intact; the regular production branch
+    # below must still prove every offered item, statistic and native control.
+    if isinstance(state,dict) and isinstance(rules,dict) and game_text:
+        caption=exact_production_title(observation,rows,state,dialog_resources(game_text))
+        if caption:
+            previous,recovered,name,proof=caption
+            rows[rows.index(previous)]=recovered
+            result['observed_city_name']=name
+            result['evidence']['exact_production_title']=proof
     patterns={
         'new_city_name':r'what shall we name "?this city',
         'research_choice':r'what discovery shall our .+ pursue',
@@ -1054,11 +1073,12 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             templates=[t for t in dialog_resources(game_text or '') if t['tag'] in ('AUTOMONARCHY','AUTOREV')
                        and _normal(t['title'])=='civ rules: governments' and len(t['options'])==2]
             matches=[]
+            radio=lambda text:re.sub(r'^(?:[o0]\s+|[•○●]\s*)','',text)
             for template in templates:
                 body,button_rows,_=body_rows(title,{'ok','cancel','help'},template['width'] or 440)
                 choices=[];prose=[]
                 for line in body:
-                    text=re.sub(r'^[•○●]\s*','',line['normal'])
+                    text=radio(line['normal'])
                     if any(re.fullmatch(_pattern(option),text) for option in template['options']):choices.append(line)
                     else:prose.append(line)
                 actual=_normal(' '.join(r['text'] for r in prose))
@@ -1069,7 +1089,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 if (len(choices)==2 and all(r['confidence']>=.8 for r in [*body,*button_rows])
                         and len(button_rows)==1 and button_rows[0]['normal']=='ok'
                         and re.fullmatch(_pattern(template['body']),actual)
-                        and all(sum(bool(re.fullmatch(_pattern(option),re.sub(r'^[•○●]\s*','',r['normal'])))
+                        and all(sum(bool(re.fullmatch(_pattern(option),radio(r['normal'])))
                                     for r in choices)==1 for option in template['options'])
                         and prose and min(r['center'][1] for r in choices)>max(r['center'][1] for r in prose)):
                     matches.append((template,choices))
@@ -1352,7 +1372,20 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 # option text and its observed center; only compare the label.
                 return re.sub(r'^(?:o|[○●•])\s+','',row['normal'])
             radios=[r for r in body if radio_label(r) in ('zoom to city','continue')]
-            text_rows=[r for r in body if r not in radios]
+            # A native radio circle can be a separate OCR row. Treat it only
+            # as artwork beside an already complete observed choice label.
+            radio_marks=[];marked_choices=[]
+            if len(radios)==2:
+                for row in body:
+                    if row in radios or row['normal'] not in ('o','○','●','•'):continue
+                    x,y,w,h=row['bounds']
+                    matched=[r for r in radios if 6<=w<=20 and 6<=h<=20
+                             and abs(row['center'][1]-r['center'][1])<=3
+                             and 16<=r['bounds'][0]-row['center'][0]<=28
+                             and 6<=r['bounds'][0]-(x+w)<=20]
+                    if len(matched)==1 and matched[0] not in marked_choices:
+                        radio_marks.append(row);marked_choices.append(matched[0])
+            text_rows=[r for r in body if r not in radios and r not in radio_marks]
             cities={_normal(c['name']) for c in state.get('cities',[]) if isinstance(c,dict) and isinstance(c.get('name'),str)}
             names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[])
                    if isinstance(r,dict) and isinstance(r.get('name'),str)}
@@ -1372,7 +1405,9 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 result['resource_tag']=tag
                 result['evidence']['completion_notice' if tag=='BUILT' else 'support_loss_notice']={'source':f'Original GAME.TXT {tag} and LABELS.TXT Zoom to City/Continue',
                     'observed_body':text_rows[0]['text'],'body_source_line':text_rows[0]['source_line'],
-                    'city_name':combinations[0][0],'item_name':combinations[0][2]}
+                    'city_name':combinations[0][0],'item_name':combinations[0][2],
+                    'separate_radio_artwork':[{'text':r['text'],'bounds':r['bounds'],
+                                               'source_line':r['source_line']} for r in radio_marks]}
                 return finish('production_notice' if tag=='BUILT' else 'support_loss_notice',title['text'],[_option(r,'option') for r in radios],
                               [_option(r,'button') for r in button_rows],model=True)
     if game_text:

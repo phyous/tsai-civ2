@@ -12,7 +12,8 @@ import sys
 from zipfile import ZipFile,ZIP_DEFLATED
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from civ2.gdi_text import Atlas,ATLAS_ID,ATLAS_SHA256,METRICS_SHA256
+from civ2.gdi_text import (Atlas,ATLAS_ID,ATLAS_SHA256,METRICS_SHA256,
+                            REGULAR_ATLAS_ID,REGULAR_ATLAS_SHA256,REGULAR_METRICS_SHA256)
 
 
 def sha(data):return hashlib.sha256(data).hexdigest()
@@ -61,10 +62,12 @@ def main():
     subprocess.run(['node',str(ROOT/'scripts/extract-gdi-atlas.cjs'),str(overlay),
                     str(ROOT/'engine/vendor/modern/emulators.js'),str(extracted)],check=True,timeout=75)
     bitmap=(extracted/'atlas.bmp').read_bytes();metrics=(extracted/'glyphs.tsv').read_bytes();Atlas(bitmap,metrics)
+    regular=(extracted/'atreg.bmp').read_bytes();regular_metrics=(extracted/'regular.tsv').read_bytes();Atlas(regular,regular_metrics,'regular')
     destination=ROOT/'engine/game/gdi-fonts';destination.mkdir(parents=True,exist_ok=True)
-    for name,value in [('times-bold-16.bmp',bitmap),('times-bold-16.tsv',metrics)]:
+    for name,value in [('times-bold-16.bmp',bitmap),('times-bold-16.tsv',metrics),('times-regular-16.bmp',regular),('times-regular-16.tsv',regular_metrics)]:
         temporary=destination/(name+'.tmp');temporary.write_bytes(value);temporary.replace(destination/name)
     report={'atlas_id':ATLAS_ID,'atlas_sha256':ATLAS_SHA256,'metrics_sha256':METRICS_SHA256,
+        'regular_atlas':{'id':REGULAR_ATLAS_ID,'sha256':REGULAR_ATLAS_SHA256,'metrics_sha256':REGULAR_METRICS_SHA256},
         'original_archive_sha256':entry['sha256'],'original_exe_sha256':sha(original_exe),
         'source_sha256':sha(source.read_bytes()),'probe_sha256':sha((work/'fontprb.exe').read_bytes()),
         'compiler_sha256':builder.COMPILER_SHA256,'container':builder.IMAGE,

@@ -19,6 +19,7 @@ class CityPrefixPixels(unittest.TestCase):
             rows=[copy.deepcopy(original)]
             readings=[[],[],[],[],[good],[good],[good],[good]]
             readings += [[],[],[],[]] if case=='single_scale' else [[final],[final],[],[]]
+            readings += [[],[]]  # Extra bounded wide2x framing still has no supporting pixels.
             with patch.object(observe,'_crop_text',side_effect=readings):
                 observe._recover_city_and_production_rows(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
             self.assertEqual(rows[0]['text'],good['text'] if case=='valid' else original['text'],case)

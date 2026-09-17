@@ -19,6 +19,9 @@ ROOT=Path(__file__).resolve().parents[1]
 ATLAS_ID='original-win31-times-new-roman-bold-16-v1'
 ATLAS_SHA256='ae5c588fd813391b31109ab0e0b4e23925df12a0e86243667beac84a54994cad'
 METRICS_SHA256='ff4431e8b04cebd3c0de1f5f7f61a655b3dc8d73067221d82fd51739f4db4c84'
+REGULAR_ATLAS_ID='original-win31-times-new-roman-regular-16-v1'
+REGULAR_ATLAS_SHA256='62a741e9ab28117a6ba4aae13dfc9f9579f2c465b8a84ab50352b6fabc9f2b78'
+REGULAR_METRICS_SHA256='2c200fde46f055ef5d20da36873a478ce0f256a078449254b949fe19c11180f6'
 SOURCE_PINS={
  'EXCHANGE0':'8fbbf07b8214d9afe08754c3eab0b05744430da1130230e8176b51931c977887',
  'EXCHANGE1':'3662cf980a23d2480897856c6483bdf78525ef439b771dc7cc1fa1abac583dc2',
@@ -39,8 +42,10 @@ def _words(text):return re.findall(r'[A-Za-z0-9]+',text)
 
 class Atlas:
     """95 original ASCII masks, exact advances; TextOut origin is (4,4)."""
-    def __init__(self,bitmap,metrics):
-        if _sha(bitmap)!=ATLAS_SHA256 or _sha(metrics)!=METRICS_SHA256:
+    def __init__(self,bitmap,metrics,style='bold'):
+        pins={'bold':(ATLAS_SHA256,METRICS_SHA256),'regular':(REGULAR_ATLAS_SHA256,REGULAR_METRICS_SHA256)}
+        if style not in pins:raise ValueError('Uncalibrated font style')
+        if (_sha(bitmap),_sha(metrics))!=pins[style]:
             raise ValueError('Original GDI atlas bytes differ')
         image=Image.open(io.BytesIO(bitmap));image.load()
         if image.size!=(512,240):raise ValueError('Original GDI atlas dimensions differ')
@@ -64,17 +69,18 @@ class Atlas:
         return result
 
 
-def load_atlas(directory=None):
+def load_atlas(directory=None,*,style='bold'):
     directory=Path(directory) if directory is not None else ROOT/'engine/game/gdi-fonts'
+    if style not in ('bold','regular'):return None
     try:
-        bitmap=(directory/'times-bold-16.bmp').read_bytes();metrics=(directory/'times-bold-16.tsv').read_bytes()
-        if len(bitmap)!=15422 or len(metrics)!=2298:return None
-        return _cached_atlas(bitmap,metrics)
+        bitmap=(directory/f'times-{style}-16.bmp').read_bytes();metrics=(directory/f'times-{style}-16.tsv').read_bytes()
+        if len(bitmap)!=15422 or not 2000<=len(metrics)<=2500:return None
+        return _cached_atlas(bitmap,metrics,style)
     except (OSError,ValueError,UnicodeError):return None
 
 
 @lru_cache(maxsize=2)
-def _cached_atlas(bitmap,metrics):return Atlas(bitmap,metrics)
+def _cached_atlas(bitmap,metrics,style):return Atlas(bitmap,metrics,style)
 
 
 @lru_cache(maxsize=1)

@@ -34,7 +34,7 @@ class UI:
         self.latest = None
         self._recognition_cache = OrderedDict()
 
-    def observe(self):
+    def observe(self, *, retain_unreadable=False):
         self.counter += 1
         path = self.directory / f'ui-{self.counter:07d}.png'
         self.game.capture(path)
@@ -52,7 +52,31 @@ class UI:
             observation = deepcopy(cache[key])
             cache.move_to_end(key)
         else:
-            observation = recognize(path)
+            try:
+                observation = recognize(path)
+            except ValueError as error:
+                if not retain_unreadable or str(error) != 'Invalid normalized OCR geometry':
+                    raise
+                # An input may already have happened. Retain its actual after
+                # frame so the caller can journal the returned input receipts;
+                # unreadable pixels supply no text, controls or cursor target.
+                captured = path.read_bytes()
+                if hashlib.sha256(captured).hexdigest() != digest:
+                    raise ValueError('Recognized image differs from captured screen') from error
+                from io import BytesIO
+                from PIL import Image
+                with Image.open(BytesIO(captured)) as image:
+                    if image.format != 'PNG':
+                        raise ValueError('Captured screen is not a PNG') from error
+                    image.load()
+                    width, height = image.size
+                observation = dict(width=width, height=height, sha256=digest,
+                    path=str(path), lines=[], text='', ocr=dict(
+                        unreadable_after_input=True, passes=[], conflicts=[],
+                        fallback_errors=[dict(pass_name='recognize', error='ValueError',
+                                              message=str(error))]))
+                self.latest = observation
+                return observation
             if observation.get('sha256') != digest:
                 raise ValueError('Recognized image differs from captured screen')
             if not observation.get('ocr', {}).get('fallback_errors'):

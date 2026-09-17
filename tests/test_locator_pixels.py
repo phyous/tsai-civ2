@@ -18,7 +18,7 @@ class LocatorPixels(unittest.TestCase):
             if case=='far_name':candidate['text']=candidate['text'].replace('Neapolis','Alexandria')
             readings=([[],[],[],[],[candidate],[candidate],[candidate],[candidate]] if case=='same_scale'
                       else [[candidate]]*8)
-            with patch.object(observe,'_crop_text',side_effect=readings+[[],[],[],[]]):
+            with patch.object(observe,'_crop_text',side_effect=readings+[[],[],[],[],[],[]]):
                 observe._recover_city_and_production_rows(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
             self.assertEqual(rows[0]['text'],candidate['text'] if case=='valid' else original['text'],case)
 
@@ -34,6 +34,18 @@ class LocatorPixels(unittest.TestCase):
         self.assertTrue({'city_caption_3x','city_caption_gray_3x','city_caption_4x_wide','city_caption_gray_4x_wide'}
                         <={p['preprocessing'] for p in r['provenance']})
 
+    def test_optional_second_neapolis_caption_needs_wider_two_scale_agreement(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-010/screens/ui-0001367.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original Neapolis frame unavailable')
+        from civ2.run import observed_city_identity
+        o=observe.recognize(p);d=classify_dialog(o)
+        self.assertEqual(observed_city_identity(d),('Neapolis','900BC'))
+        r=next(x for x in o['lines'] if x['text']==d['title'])
+        self.assertTrue(r['provenance'][0]['text'].startswith('Cisy of Heapolis'))
+        self.assertEqual(r['caption_identity_consensus']['independent_scales'],2)
+        self.assertTrue({'city_caption_2x_wide','city_caption_gray_2x_wide','city_caption_4x','city_caption_gray_4x'}
+                        <={p['preprocessing'] for p in r['provenance']})
+
     def test_optional_original_save_confirmation_after_small_crops_fail_geometry(self):
         root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0001651.png'
         if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original save notice unavailable')
@@ -41,7 +53,9 @@ class LocatorPixels(unittest.TestCase):
         o=observe.recognize(p);self.assertTrue(saved_notice(o))
         r=next(r for r in o['lines'] if r['text']=='Game samed!')
         self.assertEqual(r['provenance'][0]['text'],'Game seved!')
-        self.assertTrue({'saved_caption_6_3x','saved_caption_gray_6_3x'}<={p['preprocessing'] for p in r['provenance']})
+        passes={p['preprocessing'] for p in r['provenance']}
+        self.assertTrue(any({f'saved_caption_{padding}_3x',f'saved_caption_gray_{padding}_3x'}<=passes
+                            for padding in (3,6)))
 
     def test_optional_original_mixed_script_map_label(self):
         import json

@@ -656,7 +656,7 @@ class Session:
         self.game.rpc('resume')
         before = self.ui.observe()
         inputs = self.ui.key(action['parameters']['key'], settle=.4)
-        after = self.ui.observe()
+        after = self.ui.observe(retain_unreadable=True)
         self.journal.append('command_dispatched', decision=self.decisions, action=action,
                             before=before['sha256'],after=after['sha256'],inputs=inputs)
         self._mark_dispatched(decision_id, 'unit_action', action, inputs)
@@ -708,7 +708,7 @@ class Session:
             inputs += self.ui.key('Enter')
         receipt = {'target':action['parameters']['observed_text'],
                    'point':action['parameters']['center'],'before':current['sha256'],'inputs':inputs}
-        after = self.ui.observe()
+        after = self.ui.observe(retain_unreadable=True)
         self.journal.append('dialog_dispatched',decision=self.decisions,action=action,receipt=receipt,
                             after=after['sha256'])
         self._mark_dispatched(decision_id, 'dialog_action', action, inputs)
@@ -741,7 +741,7 @@ class Session:
             time.sleep(.3)
         else:
             inputs = self.ui.key(parameters['key'],settle=.4)
-        after = self.ui.observe()
+        after = self.ui.observe(retain_unreadable=True)
         self.journal.append('empire_command_dispatched',decision=decision_id,action=action,inputs=inputs,
                              before=current['sha256'],after=after['sha256'])
         if decision_id is not None:
@@ -811,7 +811,7 @@ class Session:
         self.game.rpc('resume')
         inputs = self.game.click(*action['parameters']['center'])
         time.sleep(.4)
-        after = self.ui.observe()
+        after = self.ui.observe(retain_unreadable=True)
         self.journal.append('city_control_dispatched', decision=decision_id, action=action,
             reviewed=deepcopy(reviewed), before=current['sha256'], after=after['sha256'], inputs=inputs)
         if decision_id is not None:
@@ -859,7 +859,7 @@ class Session:
         self.game.rpc('resume')
         before = self.ui.observe()
         inputs = self.ui.key(code, settle=.4)
-        after = self.ui.observe()
+        after = self.ui.observe(retain_unreadable=True)
         self.journal.append('mechanical_input', label=label, before=before['sha256'],
                             after=after['sha256'],inputs=inputs)
         return after

@@ -781,6 +781,11 @@ class DialogTests(unittest.TestCase):
         self.assertTrue(r['supported']);self.assertEqual(r['resource_tag'],'AUTOMONARCHY')
         self.assertTrue(r['requires_model']);self.assertIsNone(r['mechanical_action'])
         self.assertEqual(r['options'][0]['text'],'• Not just yet.')
+        for marker in ('O','0'):
+            marked=copy.deepcopy(o);marked['lines'][2]['text']=marker+' Not just yet.'
+            result=classify_dialog(marked,game_text=source)
+            self.assertTrue(result['supported'],result)
+            self.assertEqual(result['options'][0]['text'],marker+' Not just yet.')
         for text in ('TEST Rome avoids all Anarchy.','To switch governments TEST Rome must endure.'):
             changed=copy.deepcopy(o);changed['lines'][1]['text']=text
             self.assertFalse(classify_dialog(changed,game_text=source)['supported'])
@@ -795,6 +800,17 @@ class DialogTests(unittest.TestCase):
         r=classify_dialog(recognize(path),game_text=game_text())
         self.assertTrue(r['supported']);self.assertEqual(r['kind'],'revolution_offer')
         self.assertEqual([c['text'] for c in r['options']],['• Not just yet.','• Begin revolution.'])
+
+    def test_optional_original_monarchy_offer_retains_open_radio_reading(self):
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        path=Path('runs/attempt-011/screens/ui-0001117.png')
+        if not path.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original government offer unavailable')
+        r=classify_dialog(recognize(path),game_text=game_text())
+        self.assertTrue(r['supported'],r);self.assertTrue(r['requires_model'])
+        self.assertEqual(r['resource_tag'],'AUTOMONARCHY')
+        self.assertEqual([c['text'] for c in r['options']],['O Not just yet.','• Begin revolution.'])
+        self.assertIsNone(r['mechanical_action'])
 
     def test_original_history_report_requires_complete_catalogued_body_and_sole_ok(self):
         source="@HISTORY\n@width=480\n@title=Civilization II\n^^%STRING1 completes his epic history:\n^^'The %STRING2 Civilizations in the World'\n@HISTORIANS\n1\nTEST Historian\n@HISTORIES\nTEST WEALTHIEST\n@HISTORYRANK\nGlorious\nGreat\nFine\nMediocre\nPuny\nPathetic\nHopeless\n"
