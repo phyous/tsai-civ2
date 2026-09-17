@@ -3,10 +3,11 @@
 Planning and execution are separate model calls. A plan is context for later
 ordinary unit choices, never an instruction for the harness to execute a path.
 """
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from copy import deepcopy
 
 from .revision import RevisionError, prefixed_revision, revision_key, revision_digest
+from .save import TERRAINS
 
 from .policy import (DIRECTIONS, PolicyError, _destination, _grid_distance, _map,
                      _revision, _rules, _specification, _technologies, _unit,
@@ -142,7 +143,7 @@ def make_plan(candidate, state, rules=None, limit=64, max_turns=8):
         expires_turn=state['turn']+max_turns, observations=0, status='active', reason='Jev-selected task; no input executed')
 
 
-def target_geometry(plan, state, actions):
+def target_geometry(plan, state, actions, rules=None):
     """Compare offered destinations with the prior model target, without routing."""
     actor = _unit(state)
     if (not actor or plan.get('status') != 'active' or plan.get('actor') != _actor(actor)
@@ -152,6 +153,22 @@ def target_geometry(plan, state, actions):
     if any(type(target.get(key)) is not int for key in ('x','y')):
         return None
     distance = _grid_distance(state, actor, target)
+    land_steps = None
+    if _specification(actor, _rules(rules)).get('domain') == 0:
+        _, _, tiles = _map(state)
+        land = {point for point,tile in tiles.items() if tile.get('terrain') in TERRAINS[:-1]}
+        target_point = (target['x'],target['y'])
+        land_steps = {}
+        if target_point in land:
+            land_steps[target_point] = 0
+            queue = deque([target_point])
+            while queue:
+                point = queue.popleft()
+                for neighbor in _neighbors(state, dict(x=point[0],y=point[1])):
+                    next_point = (neighbor['x'],neighbor['y'])
+                    if next_point in land and next_point not in land_steps:
+                        land_steps[next_point] = land_steps[point]+1
+                        queue.append(next_point)
     destinations = {}
     for identifier, action in actions.items():
         if action.get('kind') != 'move':
@@ -160,8 +177,14 @@ def target_geometry(plan, state, actions):
         after = _grid_distance(state, point, target)
         destinations[identifier] = dict(destination=deepcopy(point),
             geometric_steps_to_target=after, change_in_geometric_steps=after-distance)
-    return dict(current_geometric_steps_to_target=distance, offered_moves=destinations,
+        if land_steps is not None:
+            destinations[identifier]['fewest_observed_land_edges_to_target'] = land_steps.get((point['x'],point['y']))
+    result = dict(current_geometric_steps_to_target=distance, offered_moves=destinations,
         note='Arithmetic for the prior Jev-selected target only, in the original wrapped grid. Negative change means geometrically closer. This is not a route, movement cost, safety assessment or command ranking. Terrain, blockers and exploration can justify moving farther away; Jev chooses every command.')
+    if land_steps is not None:
+        result['current_fewest_observed_land_edges_to_target'] = land_steps.get((actor['x'],actor['y']))
+        result['observed_land_note'] = 'Fewest adjacent land-tile edges through currently supplied explored terrain only. This can expose a detour around known water that geometric distance misses. It ignores movement costs, roads, units, zones of control, treaties, safety and transport. Null means no connection through this known land graph, not that travel is impossible; unexplored terrain may connect it. No path is executed or command filtered.'
+    return result
 
 
 def advance_plan(plan, before, after, action=None, rules=None):

@@ -146,3 +146,9 @@ the doubled-x coordinates. Distances respect horizontal world wrapping. The
 harness does not sort commands by distance, supply a route, or force progress:
 terrain and tactical circumstances can justify a detour. Hold plans and actors
 whose current fingerprint differs from the plan receive no distance context.
+
+For ground units, it also reports the fewest adjacent edges through observed
+land to the target. This makes known-water detours visible. Unknown tiles are
+excluded; a missing connection is not a claim that a route is impossible.
+The calculation ignores roads, movement costs, units, zones of control,
+treaties and transport. All original actions remain available to Jev.

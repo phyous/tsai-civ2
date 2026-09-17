@@ -643,7 +643,7 @@ class Session:
                 'actor':deepcopy(plan['actor']), 'status':plan['status'],
                 'created_turn':plan['created_turn'], 'expires_turn':plan['expires_turn'],
                 'note':'A prior independent Jev task choice; context only. This call alone chooses the next native command.'}
-            geometry = target_geometry(plan, self.state, actions)
+            geometry = target_geometry(plan, self.state, actions, self.rules)
             if geometry is not None:
                 request['state']['persistent_plan']['target_geometry'] = geometry
             request['questions']['unit_action']['instructions'] += (
