@@ -676,6 +676,25 @@ def _recover_acquisition_line(image,rows,executable,directory,evidence):
         if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
 
 
+def _recover_gape_boundary(image,rows,executable,directory,evidence):
+    """Recover only an independently read sentence boundary in GAPE prose."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if r['text'].endswith(' Emissary') and r['confidence']>=.8]
+    controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help')]
+    if len(titles)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    for index,row in enumerate(rows):
+        match=re.fullmatch(r'wonders of (.{1,80}) Absolutely no',row['text'])
+        if (not match or row['confidence']<.8 or row['bounds'][0]<300
+                or not titles[0]['center'][1]<row['center'][1]<controls[0]['center'][1]):continue
+        expected='wonders of '+match[1]+'. Absolutely no'
+        a=_crop_text(image,row,'gape_boundary_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
+        b=_crop_text(image,row,'gape_boundary_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
+        if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']==expected
+                and min(a[0]['confidence'],b[0]['confidence'])>=.8
+                and _same_location(row,b[0]) and _same_location(a[0],b[0])):
+            if _replace_crop_row(rows,index,a,lambda old,new:True):rows[index]['provenance']+=b[0]['provenance']
+
+
 def _recover_support_notice(image,rows,executable,directory,evidence):
     """Two real crops restore an observed support-loss report, not an action."""
     if image.size!=(640,480):return
@@ -1278,7 +1297,7 @@ def recognize(path: str | Path) -> dict:
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
             for recover in (_recover_history_rows,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
