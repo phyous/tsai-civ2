@@ -47,6 +47,12 @@ def controller_context(session):
     session.controller.setdefault('throne_presentation_disabled', False)
     session.controller.setdefault('pending_diplomatic_followup', None)
     session.controller.setdefault('pending_trade', None)
+    if 'pending_turn' not in session.controller:
+        # Also recover this guard when a paused development controller reloads.
+        finishes=[r for r in getattr(session,'history',[]) if r.get('action',{}).get('kind')=='finish_turn']
+        last=finishes[-1] if finishes else None
+        session.controller['pending_turn']=(dict(decision=last.get('decision'),source_turn=last['turn'])
+            if last and type(last.get('turn')) is int and last['turn']>=session.state['turn'] else None)
     return session.controller
 
 
@@ -411,6 +417,36 @@ def _checkpoint_token(session):
                 year=state['year_raw'], journal_sequence=sequence)
 
 
+def _await_turn_resolution(session,context,observation,dialog,resources):
+    """FinishTurn stays pending through combat, diplomacy and production.
+
+    A stale End of Turn caption during enemy movement cannot authorize another
+    command. Let the original game run, handling real modal choices in the
+    ordinary controller, until a later native turn reaches a supported map.
+    """
+    pending=context['pending_turn']
+    if pending is None:return observation,dialog,None
+    for attempt in range(41):
+        if not dialog.get('supported') or dialog.get('kind') not in ('normal_map','end_turn'):
+            return observation,dialog,None
+        session.checkpoint()
+        turn=session.state['turn']
+        if turn>pending['source_turn']:
+            observation,dialog=observe_ready(session,resources)
+            if dialog.get('supported') and dialog.get('kind') in ('normal_map','end_turn'):
+                context['pending_turn']=None
+            return observation,dialog,None
+        if turn<pending['source_turn']:
+            return observation,dialog,'Native turn moved backward while resolving FinishTurn.'
+        if attempt==40:
+            return observation,dialog,'Original turn is still resolving; no further map command issued.'
+        session.game.rpc('resume')
+        try:time.sleep(.25)
+        finally:session.game.rpc('pause')
+        observation,dialog=observe_ready(session,resources)
+    raise AssertionError('Bounded turn-resolution wait exhausted')
+
+
 def run_steps(session, *, max_decisions=10000):
     resources = game_text()
     context = controller_context(session)
@@ -425,6 +461,7 @@ def run_steps(session, *, max_decisions=10000):
                             and _checkpoint_token(session) == verified_endturn_checkpoint)
         observation, dialog = observe_ready(session, resources)
         observation,dialog,audience_wait_error=_await_diplomatic_followup(session,context,observation,dialog,resources)
+        observation,dialog,turn_wait_error=_await_turn_resolution(session,context,observation,dialog,resources)
         # Pointer movement is harmless to strategy but still an ordinary input.
         # Its observation-recovery event invalidates the strict no-input token.
         reuse_checkpoint = reuse_checkpoint and _checkpoint_token(session) == verified_endturn_checkpoint
@@ -436,6 +473,8 @@ def run_steps(session, *, max_decisions=10000):
                                 **({'quote':dialog['quote'],'resource_tag':dialog.get('resource_tag')} if dialog.get('quote') else {}))
         if audience_wait_error:
             return {'status':'paused','reason':audience_wait_error,'screen':observation['path']}
+        if turn_wait_error:
+            return {'status':'paused','reason':turn_wait_error,'screen':observation['path']}
         if not dialog['supported']:
             return {'status':'paused','reason':'Original screen requires a controller update.',
                     'screen':observation['path'],'classification':dialog}
@@ -630,6 +669,8 @@ def run_steps(session, *, max_decisions=10000):
                 return {'status':'paused','reason':'End-turn checkpoint changed the observed screen.', 'screen':observation['path']}
             previous_turn = session.state['turn']
             action,next_screen = session.choose_empire(dialog,context['reviewed'])
+            if action['id']=='finish_turn':
+                context['pending_turn']=dict(decision=session.decisions,source_turn=previous_turn)
             if action['id'] != 'finish_turn':
                 context['pending_empire'] = action
                 context['pending_empire_confirmed'] = False
@@ -640,9 +681,9 @@ def run_steps(session, *, max_decisions=10000):
                 # original save rather than treating an unchanged kind as a
                 # failed turn or blindly sending Enter again.
                 session.checkpoint()
-                if session.state['turn'] <= previous_turn:
-                    return {'status':'paused','reason':'End-turn input had no confirmed transition.', 'screen':next_screen['path']}
-                verified_endturn_checkpoint = _checkpoint_token(session)
+                if session.state['turn'] > previous_turn:
+                    context['pending_turn']=None
+                    verified_endturn_checkpoint = _checkpoint_token(session)
             continue
         if kind == 'city_locator' and context['pending_city']:
             matches = [option for option in dialog['options']

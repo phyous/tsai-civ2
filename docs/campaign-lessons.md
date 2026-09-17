@@ -41,3 +41,36 @@ describes population and support changes on worker completion, and exposes
 conservative current support arithmetic. It does not forecast unobserved future
 tile yields or force a production, labor, government or unit choice. The guides
 and their limitations are documented in [strategy sources](strategy-sources.md).
+
+## First completed loss
+
+Attempt 009 ended in defeat after 96 model responses. The original game displayed
+the message about archeologists discovering the remains of the civilization.
+Its full recording and terminal screenshot are retained. American Horsemen had
+attacked Rome; the earlier production and support problems left this campaign
+with one city. This is a confirmed loss, not a successful full-game run.
+
+A read during combat also contained a zero-HP owned unit and a selected enemy
+unit while the status panel still said End of Turn. That intermediate state
+cannot establish final casualties or show that the following command caused the
+loss. Turn-resolution handling needs to distinguish an unfinished battle from a
+new opportunity for the player to act.
+
+## Current campaign and remaining evidence limitation
+
+Attempt 010 began with strategy guide v5 and reached two cities by turn nine.
+Autosave was disabled before model play; observations do not save the game.
+There is no verified victory yet.
+
+Decision 37 encountered a cursor-positioning failure before a mouse-button
+press. Its partial motion receipts were lost. The journal explicitly records
+that gap; the verifier reports incomplete input coverage and does not certify
+it as a fully audited release. Decision 38 encountered another positioning
+failure, but its three actual relative motions were retained and recorded as
+an interrupted command. Neither failed attempt is reported as an executed city
+command. The campaign continues with this limitation disclosed.
+
+Edge-directed movement now uses smaller steps to accommodate the original
+mouse acceleration. Text recognition can reuse analysis of an identical PNG,
+but the harness still captures the current screen and checks its full hash
+before using that analysis. Neither change supplies a strategic game action.

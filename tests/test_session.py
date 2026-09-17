@@ -49,7 +49,7 @@ class SessionTests(unittest.TestCase):
             'observation_sha256':hashlib.sha256(data).hexdigest()}
         s.observer=mock.Mock()
         s.observer.read.return_value={'state':after,'data':data,'receipt':{'nonce':'TEST'}}
-        s._archive_observer_frames=mock.Mock(side_effect=lambda receipt:receipt)
+        s._archive_observer_frames=mock.Mock(side_effect=lambda receipt,**kwargs:receipt)
         with mock.patch('civ2.session.parse_save') as parser:
             self.assertEqual(s.checkpoint(),after)
         s.observer.read.assert_called_once_with(rules_text=s.rules_text)

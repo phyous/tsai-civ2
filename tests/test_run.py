@@ -176,7 +176,7 @@ class ControllerTests(TestCase):
             s.choose_empire=mock.Mock(side_effect=choose)
             result=self.run_fake(s)
             self.assertEqual(s.checkpoint.call_count,2)
-            self.assertEqual('no confirmed transition' in result['reason'],not advances)
+            self.assertEqual(controller_context(s)['pending_turn'] is None,advances)
             s.choose_empire.assert_called_once()
 
     def observe_fake(self,s):

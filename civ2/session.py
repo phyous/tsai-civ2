@@ -316,13 +316,13 @@ class Session:
             raise ValueError('Live observation is not bound to its recorded snapshot')
         return state, data, receipt
 
-    def _archive_observer_frames(self, receipt):
+    def _archive_observer_frames(self, receipt, *, checkpoint_index=None):
         receipt = deepcopy(receipt)
         paths = receipt.get('source_images')
         hashes = receipt.get('proof', {}).get('image_sha256')
         if not isinstance(paths, list) or not isinstance(hashes, list) or len(paths)!=3 or len(hashes)!=3:
             raise ValueError('Live observation requires three recorded original frames')
-        images = []
+        frames = []
         for index, (source, digest) in enumerate(zip(paths, hashes)):
             path = Path(source)
             if path.stat().st_size > 4 * 1024 * 1024:
@@ -330,15 +330,20 @@ class Session:
             frame = path.read_bytes()
             if not frame.startswith(b'\x89PNG\r\n\x1a\n') or hashlib.sha256(frame).hexdigest()!=digest:
                 raise ValueError('Observer frame differs from its snapshot proof')
-            images.append(self.journal.artifact(f'screens/memory-{self.checkpoints:06d}-{index}.png', frame))
+            frames.append(frame)
+        # Validate every source before creating any retained image. A rejected
+        # reader result must not consume the next successful checkpoint number.
+        ordinal=self.checkpoints if checkpoint_index is None else checkpoint_index
+        images=[self.journal.artifact(f'screens/memory-{ordinal:06d}-{index}.png',frame)
+                for index,frame in enumerate(frames)]
         receipt['source_images'] = [item['path'] for item in images]
         receipt['images'] = images
         return receipt
 
     def checkpoint(self):
-        self.checkpoints += 1
+        checkpoint_index=self.checkpoints+1
         if getattr(self, 'observer', None) is None:
-            name = f'd{self.checkpoints:06d}.sav'
+            name = f'd{checkpoint_index:06d}.sav'
             data, receipt = self.ui.save_native(name)
             self.game.rpc('pause')
             state = parse_save(data, rules_text=self.rules_text)
@@ -346,17 +351,19 @@ class Session:
             provenance = {}
         else:
             state, data, receipt = self._live_read(self.observer.read(rules_text=self.rules_text))
-            receipt = self._archive_observer_frames(receipt)
-            path = f'observations/d{self.checkpoints:06d}.json'
+            path = f'observations/d{checkpoint_index:06d}.json'
             provenance = {'observation_kind':'live_memory'}
         for key in ('difficulty','barbarians','bloodlust','simplified_combat','round_world','scenario','restart_eliminated'):
             if state['settings'][key] != self.initial_settings[key]:
                 raise RuntimeError('Campaign settings changed unexpectedly')
         if (state['map']['width'],state['map']['height']) != (40,50):
             raise RuntimeError('Campaign map changed unexpectedly')
+        if getattr(self, 'observer', None) is not None:
+            receipt=self._archive_observer_frames(receipt,checkpoint_index=checkpoint_index)
         artifact = self.journal.artifact(path, data)
         self.journal.append('checkpoint', artifact=artifact, receipt=receipt,
-                            turn=state['turn'],year=state['year_raw'], **provenance)
+                            checkpoint=checkpoint_index,turn=state['turn'],year=state['year_raw'], **provenance)
+        self.checkpoints=checkpoint_index
         if self.pending_decisions:
             fields = ('turn','selected_unit_id','units','cities','player','diplomacy')
             changed = [key for key in fields if self.state[key] != state[key]]
@@ -556,6 +563,57 @@ class Session:
             input_sequence_after=input_sequence_after)
         self.pending_decisions[:] = [value for value in self.pending_decisions if value != identifier]
         self.decision = {**decision, 'receipt':'not_dispatched'}
+
+    def note_interrupted(self, action, *, before, after, receipt,
+                         input_sequence_before, input_sequence_after):
+        """Retain a failed pointer approach; no button or game command occurred.
+
+        This consumes the decision for audit purposes. A subsequent attempt
+        must obtain a fresh choice; prior successful pending orders stay intact.
+        """
+        decision = getattr(self, 'decision', None)
+        ordinary = receipt.get('inputs') if isinstance(receipt, dict) else None
+        if (not isinstance(decision, dict) or decision.get('stage', 'command') != 'command'
+                or decision.get('receipt') != 'pending'
+                or decision.get('selected_question') not in ('dialog_action','city_action')
+                or decision.get('answers', {}).get(decision['selected_question'], {}).get('choice') != action.get('id')
+                or any(row.get('decision') == decision['id'] for row in self.history)
+                or type(input_sequence_before) is not int or input_sequence_before < 0
+                or type(input_sequence_after) is not int or input_sequence_after <= input_sequence_before
+                or not isinstance(ordinary, list) or len(ordinary) > 128
+                or receipt.get('issued') is not False or receipt.get('status') != 'failed'
+                or receipt.get('button_down_attempted') is not False
+                or receipt.get('target') != action.get('parameters', {}).get('center')
+                or not isinstance(receipt.get('error'), str) or not 0 < len(receipt['error']) <= 1000
+                or [r.get('sequence') for r in ordinary] != list(range(input_sequence_before+1,input_sequence_after+1))
+                or any(not isinstance(r,dict) or r.get('type') != 'relativeMouse' or r.get('dispatched') is not True
+                       or r.get('emulate') is not True or r.get('via') != 'DOSBox Mouse_CursorMoved'
+                       or any(type(r.get(k)) is not int or abs(r[k]) > 32 for k in ('dx','dy'))
+                       or not (r.get('dx') or r.get('dy')) for r in ordinary)):
+            raise ValueError('Interrupted command needs exact relative-only receipts and no button attempt')
+        descriptors=[]
+        directory=self.journal.directory.resolve()
+        for observation in (before,after):
+            path=Path(observation['path'])
+            if path.is_symlink() or not path.is_file() or path.stat().st_size>4*1024*1024:
+                raise ValueError('Interrupted command needs retained original frames')
+            relative=path.resolve().relative_to(directory).as_posix();data=path.read_bytes()
+            if (not relative.startswith('screens/') or not data.startswith(b'\x89PNG\r\n\x1a\n')
+                    or data[16:24] != b'\x00\x00\x02\x80\x00\x00\x01\xe0'
+                    or hashlib.sha256(data).hexdigest()!=observation['sha256']):
+                raise ValueError('Interrupted command frame differs from retained evidence')
+            descriptors.append(dict(path=relative,bytes=len(data),sha256=observation['sha256']))
+        if before['sha256'] != action.get('preconditions',{}).get('image_sha256'):
+            raise ValueError('Interrupted command source differs from its choice')
+        status=self.game.rpc('status')
+        if (status.get('paused') is not True or status.get('heldKeys')!=[] or status.get('buttons')!=0
+                or status.get('inputSequence')!=input_sequence_after):
+            raise RuntimeError('Original input state changed after interrupted positioning')
+        self.journal.append('model_command_interrupted',decision=decision['id'],action=deepcopy(action),
+            before=descriptors[0],after=descriptors[1],receipt=deepcopy(receipt),
+            input_sequence_before=input_sequence_before,input_sequence_after=input_sequence_after)
+        self.pending_decisions[:]=[value for value in self.pending_decisions if value!=decision['id']]
+        self.decision={**decision,'receipt':'not_dispatched'}
 
     def choose_unit(self):
         actions = unit_candidates(self.state, rules=self.rules)

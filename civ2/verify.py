@@ -38,7 +38,7 @@ DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_
 KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'screen_observed', 'mechanical_input', 'open_city_control',
                 'native_map_observed', 'native_map_observation_failed',
-                'model_command_not_dispatched', 'controller_error', 'controller_update', 'controller_input_gap',
+                'model_command_not_dispatched', 'model_command_interrupted', 'controller_error', 'controller_update', 'controller_input_gap',
                 'navigate_selected_city', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
@@ -1170,11 +1170,13 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     latest_save_sha256=None
     observed_screens={}
     checkpoint_count,checkpoint_reuses,presentation_acknowledgments=0,0,0
+    checkpoint_ordinal=0
     last_finish,reusable_checkpoint=None,None
     diplomatic_followup=None
     trade_pending=None;trade_eligible=None;trade_seen=set();trade_confirmations=0
     stops, recoveries, unknown = [], [], Counter()
     refused_commands = set()
+    interrupted_commands = set()
     controller_errors = set()
     controller_update_notes = 0
     input_gaps = {}
@@ -1188,6 +1190,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     for event in events:
         kind, payload = event['kind'], event['payload']
         files.references(payload)
+        previous_runtime_input=latest_runtime_input
         latest_runtime_input=max([latest_runtime_input,*_runtime_sequences(payload)])
         if kind not in {'screen_observed','pointer_park_for_observation',
                         'trade_followup_pending','trade_advance_dispatched','native_map_observed','native_map_observation_failed'}:
@@ -1276,7 +1279,19 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             latest_save_sha256=info['sha256']
             if kind=='checkpoint':
                 checkpoint_count+=1
-                reusable_checkpoint=(dict(checkpoint=checkpoint_count,**prefixed_revision(state),
+                # Early readers consumed an ordinal before a failed read. The
+                # retained artifact supplies that ordinal, while the count
+                # records only successful checkpoint events. Never invent the
+                # missing observations or renumber historical evidence.
+                pattern=r'observations/d([0-9]{6})\.json' if live else r'saves/d([0-9]{6})\.sav'
+                match=re.fullmatch(pattern,info['path'])
+                ordinal=int(match[1]) if match else checkpoint_ordinal+1
+                _require((not live or match is not None) and ordinal>checkpoint_ordinal
+                         and ('checkpoint' not in payload or type(payload['checkpoint']) is int
+                              and payload['checkpoint']==ordinal),
+                         'Checkpoint ordinal is repeated, reversed or differs from its retained artifact')
+                checkpoint_ordinal=ordinal
+                reusable_checkpoint=(dict(checkpoint=checkpoint_ordinal,**prefixed_revision(state),
                                           turn=state['turn'],year=state['year_raw'])
                                      if last_finish is not None and state['turn']>last_finish['turn'] else None)
             last_finish=None
@@ -1338,7 +1353,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                 'relative_input_events':count,'error':payload['receipt']['error']})
         elif kind=='observed_public_notice':
             _require(latest_save_sha256 in saves, 'Public notice precedes its original checkpoint')
-            notice=_public_notice(payload,files,observed_screens,saves[latest_save_sha256],checkpoint_count,event['elapsed_ms'])
+            notice=_public_notice(payload,files,observed_screens,saves[latest_save_sha256],checkpoint_ordinal,event['elapsed_ms'])
             key=lambda n:(n['kind'],n['resource_tag'],n['observed_text'],_revision_digest(n['last_checkpoint']))
             _require(all(key(n)!=key(notice) for n in public_notices), 'Public notice duplicates retained history')
             public_notices.append(notice);public_notices=public_notices[-16:]
@@ -1445,11 +1460,39 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                          and _revision_digest(plan,'current_') == _revision_digest(action['preconditions']),
                          'Command planning context differs from the current observed model plan')
             decisions[identifier] = {'action': action, 'question': question, 'response': response}
+        elif kind == 'model_command_interrupted':
+            identifier=payload.get('decision');receipt=payload.get('receipt')
+            start,end=payload.get('input_sequence_before'),payload.get('input_sequence_after')
+            _require(set(payload)=={'decision','action','before','after','receipt','input_sequence_before','input_sequence_after'}
+                     and type(identifier) is int and identifier in decisions
+                     and identifier not in dispatched|refused_commands|interrupted_commands|set(input_gaps)
+                     and decisions[identifier]['question'] in ('dialog_action','city_action')
+                     and payload.get('action')==decisions[identifier]['action']
+                     and _int(start) and _int(end) and start==previous_runtime_input and end>start
+                     and isinstance(receipt,dict) and receipt.get('issued') is False
+                     and receipt.get('status')=='failed' and receipt.get('button_down_attempted') is False
+                     and receipt.get('target')==decisions[identifier]['action']['parameters'].get('center')
+                     and isinstance(receipt.get('error'),str) and 0<len(receipt['error'])<=1000,
+                     'Interrupted command must bind an unused choice and a contiguous failed pointer approach')
+            ordinary=_inputs(receipt.get('inputs'))
+            _require(len(ordinary)<=128 and all(r['type']=='relativeMouse' and r.get('dispatched') is True for r in ordinary)
+                     and [r['sequence'] for r in ordinary]==list(range(start+1,end+1)),
+                     'Interrupted command includes a button, key, missing or repeated input')
+            before,after=files.descriptor(payload['before']),files.descriptor(payload['after'])
+            _require(before['path'].startswith('screens/') and after['path'].startswith('screens/')
+                     and before['sha256']==decisions[identifier]['action']['preconditions'].get('image_sha256'),
+                     'Interrupted command lacks its exact selected source image')
+            from PIL import Image
+            for descriptor in (before,after):
+                with Image.open(files.root/descriptor['path']) as image:
+                    _require(image.format=='PNG' and image.size==(640,480),'Invalid interrupted-command image')
+            inputs+=len(ordinary);interrupted_commands.add(identifier)
+            latest_runtime_input=end
         elif kind == 'controller_input_gap':
             identifier=payload.get('decision')
             _require(set(payload)=={'decision','action','before','after','input_sequence_after','reason'}
                      and type(identifier) is int and identifier in decisions
-                     and identifier not in dispatched and identifier not in input_gaps
+                     and identifier not in dispatched|refused_commands|interrupted_commands|set(input_gaps)
                      and payload.get('action')==decisions[identifier]['action']
                      and payload.get('reason')=='cursor_positioning_failed_partial_receipts_unavailable'
                      and _int(payload.get('input_sequence_after')) and payload['input_sequence_after']>=latest_runtime_input,
@@ -1485,7 +1528,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             from PIL import Image
             identifier = payload.get('decision')
             sequence = payload.get('input_sequence_before')
-            _require(identifier in decisions and identifier not in dispatched and identifier not in refused_commands
+            _require(identifier in decisions and identifier not in dispatched|refused_commands|interrupted_commands|set(input_gaps)
                      and decisions[identifier]['question'] in ('dialog_action','empire_action','city_action')
                      and payload.get('action') == decisions[identifier]['action']
                      and payload.get('executes_input') is False
@@ -1535,7 +1578,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     forced_city += 1; forced_city_pending = None
                     continue
             if identifier is None and question == 'empire_action':
-                matches = [i for i, d in decisions.items() if i not in dispatched and i not in refused_commands and i not in input_gaps
+                matches = [i for i, d in decisions.items() if i not in dispatched and i not in refused_commands and i not in input_gaps and i not in interrupted_commands
                            and d['action'] == payload.get('action') and d['question'] == question]
                 if len(matches) == 1:
                     identifier = matches[0]
@@ -1544,7 +1587,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     last_finish={'turn':forced_pending['preconditions']['turn']}
                     forced += 1; forced_pending = None
                     continue
-            _require(identifier in decisions and identifier not in dispatched and identifier not in refused_commands and identifier not in input_gaps
+            _require(identifier in decisions and identifier not in dispatched and identifier not in refused_commands and identifier not in input_gaps and identifier not in interrupted_commands
                      and decisions[identifier]['question'] == question,
                      'Dispatch has no unique prior selected model decision')
             selected=decisions[identifier]['action']
@@ -1782,6 +1825,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'model_dispatches': len(dispatched), 'ordinary_input_events': inputs,
                           'undispatched_decisions': sorted(set(decisions)-dispatched),
                           'source_image_refusals': sorted(refused_commands),
+                          'interrupted_pointer_approaches': sorted(interrupted_commands),
                           'controller_error_diagnostics': sorted(controller_errors),
                           'controller_update_notes': controller_update_notes,
                           'input_coverage': 'incomplete' if input_gaps else 'recorded inputs checked',
@@ -1796,6 +1840,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'cosmetic_presentation_preferences':cosmetic_preferences,
                           'cosmetic_input_note':'Separately declared operator presentation inputs, not Jev choices. Original image/crop and ordinary-input bindings checked; semantic visual review, success and gameplay effects are not independently established.',
                           'reused_native_checkpoints':checkpoint_reuses,
+                          'successful_native_checkpoints':checkpoint_count,
+                          'last_native_checkpoint_ordinal':checkpoint_ordinal,
                           'observed_public_notices':public_notice_count,
                           'native_map_observations':native_map_observations,
                           'native_map_observation_failures':native_map_failures,
