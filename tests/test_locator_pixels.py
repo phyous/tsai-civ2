@@ -18,7 +18,7 @@ class LocatorPixels(unittest.TestCase):
             if case=='far_name':candidate['text']=candidate['text'].replace('Neapolis','Alexandria')
             readings=([[],[],[],[],[candidate],[candidate],[candidate],[candidate]] if case=='same_scale'
                       else [[candidate]]*8)
-            with patch.object(observe,'_crop_text',side_effect=readings):
+            with patch.object(observe,'_crop_text',side_effect=readings+[[],[],[],[]]):
                 observe._recover_city_and_production_rows(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
             self.assertEqual(rows[0]['text'],candidate['text'] if case=='valid' else original['text'],case)
 

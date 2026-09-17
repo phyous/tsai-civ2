@@ -58,6 +58,8 @@ an explicitly selected private env file. Credentials never enter the page or run
 evidence. Do not commit `.env`, downloaded games, profiles, or private files.
 
 The current controller is experimental and pauses at unsupported native screens.
+Current runtime, strategy and recording limitations are tracked in
+[campaign lessons](docs/campaign-lessons.md).
 After building the OCR adapter, a debugging session can use native saves:
 
 ```sh

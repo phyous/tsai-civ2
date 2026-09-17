@@ -964,7 +964,14 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
                     and _near_text(previous[2],fresh[2],1)
                     and re.sub(r'[^a-z]','',previous[3].casefold())==re.sub(r'[^a-z]','',fresh[3].casefold()))
             readings=[]
-            for scale,padding in ((2,(3,3)),(3,(6,6)),(4,(6,6)),(4,(8,6))):
+            framings=[(2,(3,3)),(3,(6,6)),(4,(6,6)),(4,(8,6))]
+            # A damaged "City" prefix can remain wrong at one framing while
+            # both 4x reads agree. Two further bounded framings still require
+            # agreement at distinct scales; neither the city nor date comes
+            # from state. Original 010/172 needs the wider 2x crop.
+            if not row['text'].casefold().startswith('city of '):
+                framings += [(2,(6,6)),(3,(3,3))]
+            for scale,padding in framings:
                 suffix='_wide' if padding==(8,6) else ''
                 first=_crop_text(image,row,f'city_caption_{scale}x{suffix}',executable,directory,evidence,padding=padding,scale=scale)
                 second=_crop_text(image,row,f'city_caption_gray_{scale}x{suffix}',executable,directory,evidence,padding=padding,scale=scale,grayscale=True)
