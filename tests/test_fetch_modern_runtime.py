@@ -40,12 +40,27 @@ class ModernFetchTests(unittest.TestCase):
         raw,m=self.fixture();m['files'][0]['path']='../escape'
         with tempfile.TemporaryDirectory() as t,self.assertRaises(ValueError):fetch.install(raw,Path(t),m)
 
+    def test_scheduler_derivative_rejects_wrong_source_and_result(self):
+        root=Path(__file__).resolve().parents[1]/'engine'
+        m=json.loads((root/'modern-manifest.json').read_text())
+        entry=next(e for e in m['files'] if 'derived' in e)
+        p=root/entry['path']
+        if not p.exists():self.skipTest('Optional runtime has not been fetched')
+        patch=json.loads((root/entry['patch']).read_text())
+        derived=p.read_bytes()
+        original=derived.replace(patch['replace'].encode(),patch['search'].encode())
+        self.assertTrue(fetch.checked(original,entry))
+        self.assertEqual(fetch.derive(original,entry,root),derived)
+        with self.assertRaises(ValueError):fetch.derive(original+b'changed',entry,root)
+        with self.assertRaises(ValueError):fetch.derive(original,{**entry,'derived':dict(bytes=1,sha256='a'*64)},root)
+        with self.assertRaises(ValueError):fetch.derive(original,{**entry,'path':'game/CIV2.EXE'},root)
+
     def test_checked_manifest_matches_actual_optional_download(self):
         root=Path(__file__).resolve().parents[1];m=json.loads((root/'engine/modern-manifest.json').read_text())
         self.assertEqual(m['version'],'8.4.2');self.assertEqual(m['license'],'GPL-2.0')
         for entry in m['files']:
             p=root/'engine'/entry['path']
             if not p.exists():self.skipTest('Optional runtime has not been fetched')
-            self.assertTrue(fetch.checked(p.read_bytes(),entry))
+            self.assertTrue(fetch.checked(p.read_bytes(),fetch.installed_record(entry)))
 
 if __name__=='__main__':unittest.main()

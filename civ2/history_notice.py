@@ -5,8 +5,8 @@ import re
 import unicodedata
 
 SOURCE = 'Original HISTORY, HISTORIANS, HISTORIES and HISTORYRANK resources'
-# Measured original headings in005/430,004/988 and006/1040. Keep raw OCR.
-TITLE_ALIASES = {'ciadization i', 'crnlization i', 'cindivationl'}
+# Measured original headings in005/430,004/988,006/1040,008/165,009/207. Keep raw OCR.
+TITLE_ALIASES = {'ciadization i', 'crnlization i', 'cindivationl', 'civlivaition i', 'cimlivation'}
 
 
 def _normal(text):

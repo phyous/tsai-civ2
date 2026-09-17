@@ -1,0 +1,15 @@
+{
+  "id": "civ2-modern-host-pause-v1",
+  "license": "GPL-2.0",
+  "scope": "Only js-dos worker host wake-up scheduling; original game, Windows and WASM bytes unchanged",
+  "source": {
+    "bytes": 112002,
+    "sha256": "4fdff4523283ca15a42d977a3c26d39486ee1dcc5b769791609ecb6294526dbb"
+  },
+  "derived": {
+    "bytes": 112283,
+    "sha256": "fb0084e27eac2fdd347e0931abf07f49d53d9c6b8b1a51b1f337f8a289329cf0"
+  },
+  "search": "if(ev.data.name===\"wc-sync-sleep\"&&Module.sessionId===ev.data.props.sessionId){if(Module.wakeUpAt!==undefined",
+  "replace": "if(ev.data.name===\"wc-sync-sleep\"&&Module.sessionId===ev.data.props.sessionId){if(Module.paused===true){if(Module.civ2PauseWakeTimer===undefined){Module.civ2PauseWakeTimer=setInterval(function(){if(!Module.alive||Module.paused===false){clearInterval(Module.civ2PauseWakeTimer);delete Module.civ2PauseWakeTimer;if(Module.alive){Module.receive(ev)}}},16)}return}if(Module.wakeUpAt!==undefined"
+}

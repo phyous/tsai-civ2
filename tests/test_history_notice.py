@@ -13,7 +13,7 @@ class HistoryNoticeTests(unittest.TestCase):
         return o
 
     def test_actual_reports_only_acknowledge_visible_rows(self):
-        for run,n in [('004',988),('006',1040)]:
+        for run,n in [('004',988),('006',1040),('008',165),('009',207)]:
             o=self.actual(run,n);d=classify_dialog(o,game_text=game_text())
             self.assertTrue(d['supported'],d)
             self.assertEqual(d['resource_tag'],'HISTORY')
@@ -53,6 +53,19 @@ class HistoryBindingTests(unittest.TestCase):
                            (0,'TEST warning')):
             o=self.fixture();o['lines'][index]['text']=text
             self.assertFalse(classify_dialog(o,game_text=self.SOURCE)['supported'])
+
+    def test_measured_tiny_heading_still_requires_source_body_and_unique_control(self):
+        from tests.test_dialogs import row
+        o=self.fixture();o['lines'][0]['text']='Cimlivation !'
+        d=classify_dialog(o,game_text=self.SOURCE)
+        self.assertTrue(d['supported']);self.assertEqual(d['title'],'Cimlivation !')
+        for mode in ('body','rank','category','control'):
+            z=deepcopy(o)
+            if mode=='body':z['lines'][1]['text']='TEST Historian demands tribute:'
+            elif mode=='rank':z['lines'][3]['text']='3. The Great Civilization of the TEST Romans'
+            elif mode=='category':z['lines'][2]['text']='The TEST unknown civilizations'
+            else:z['lines'].append(row('Cancel',y=296,w=50))
+            self.assertFalse(classify_dialog(z,game_text=self.SOURCE)['supported'],mode)
 
     def test_actual_history_template_is_required_not_only_catalogs(self):
         for source in (self.SOURCE[self.SOURCE.index('@HISTORIANS'):],

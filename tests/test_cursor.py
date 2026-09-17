@@ -1,5 +1,7 @@
 from io import BytesIO
 from pathlib import Path
+import hashlib
+import tempfile
 import unittest
 from unittest.mock import patch
 from PIL import Image
@@ -69,6 +71,56 @@ class MeasuredEdgeGame(FakeGame):
 
 
 class CursorTests(unittest.TestCase):
+    def test_transient_two_arrows_retry_without_input_until_unique(self):
+        class RepaintGame(FakeGame):
+            def __init__(self):super().__init__();self.captures=[]
+            def request(self,path,binary=False):
+                self.captures.append(len(self.inputs))
+                if len(self.captures)==1:
+                    out=BytesIO();picture(self.cursor,(200,200)).save(out,format='PNG');return out.getvalue()
+                return super().request(path,binary)
+        game=RepaintGame()
+        with tempfile.TemporaryDirectory() as directory,patch('civ2.cursor.REPAINT_DIRECTORY',Path(directory)),patch('civ2.cursor.time.sleep'):
+            receipt=move_and_click(game,*game.cursor)
+            self.assertEqual(game.captures,[0,0])
+            self.assertEqual([r['status'] for r in receipt['cursor_repaints']],['ambiguous','unique'])
+            for frame in receipt['cursor_repaints']:
+                data=(Path(directory)/(frame['frame_digest']+'.png')).read_bytes()
+                self.assertEqual(hashlib.sha256(data).hexdigest(),frame['frame_digest'])
+            self.assertEqual([i['type'] for i in game.inputs],['mousedown','mouseup'])
+
+    def test_persistent_two_arrows_stop_before_any_click(self):
+        class RepaintGame(FakeGame):
+            def request(self,path,binary=False):
+                out=BytesIO();picture(self.cursor,(200,200)).save(out,format='PNG');return out.getvalue()
+        game=RepaintGame()
+        with tempfile.TemporaryDirectory() as directory,patch('civ2.cursor.REPAINT_DIRECTORY',Path(directory)),patch('civ2.cursor.time.sleep') as sleep:
+            with self.assertRaisesRegex(CursorError,'More than one') as error:move_and_click(game,200,200)
+            self.assertEqual(len(error.exception.repaint_frames),4)
+            self.assertEqual(sleep.call_count,3)
+            self.assertEqual(game.inputs,[])
+
+    def test_moving_cursor_waits_for_old_arrow_erasure_without_duplicate_motion(self):
+        class RepaintGame(FakeGame):
+            def __init__(self):super().__init__();self.previous=None;self.reads=[]
+            def rpc(self,cmd,*args):
+                previous=self.cursor;value=super().rpc(cmd,*args)
+                if cmd=='moveRelative':self.previous=previous
+                return value
+            def request(self,path,binary=False):
+                self.reads.append(len(self.inputs))
+                if self.previous is not None:
+                    old=self.previous;self.previous=None
+                    out=BytesIO();picture(self.cursor,old).save(out,format='PNG');return out.getvalue()
+                return super().request(path,binary)
+        game=RepaintGame()
+        with tempfile.TemporaryDirectory() as directory,patch('civ2.cursor.REPAINT_DIRECTORY',Path(directory)),patch('civ2.cursor.time.sleep'):
+            receipt=move_and_click(game,420,340)
+        self.assertTrue(receipt['issued'])
+        self.assertLessEqual(max(abs(a-b) for a,b in zip(receipt['observed_cursor'],[420,340])),3)
+        self.assertTrue(any(a==b and a>0 for a,b in zip(game.reads,game.reads[1:])))
+        self.assertEqual([i['type'] for i in game.inputs if i['type']!='mousemove'],['mousedown','mouseup'])
+
     def test_modern_host_bookkeeping_still_requires_actual_cursor_feedback(self):
         class ModernFake(FakeGame):
             def rpc(self,cmd,*args):

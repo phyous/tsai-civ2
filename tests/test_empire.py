@@ -20,6 +20,32 @@ def inputs():
 
 
 class EmpireTests(unittest.TestCase):
+    def test_repeated_unit_build_and_missing_worker_pipeline_are_actionable_facts(self):
+        s,screen,r=inputs()
+        r['units']=[dict(id=2,name='Warriors',role=1,attack=1),dict(id=0,name='Settlers',role=5,attack=0)]
+        s['cities'][0]['production']=dict(id=2,kind='unit',name='Warriors')
+        s['units']=[dict(id=i,owner=1,type_id=2,type='Warriors',x=2,y=2,order=2) for i in range(5)]
+        for case in ('none','existing_worker','worker_build','unknown','foreign_worker'):
+            ss=deepcopy(s)
+            if case in ('existing_worker','foreign_worker'):
+                ss['units'].append(dict(id=10,owner=1 if case=='existing_worker' else 2,type_id=0,type='Settlers',x=4,y=4))
+            if case=='worker_build':ss['cities'][0]['production']=dict(id=0,kind='unit',name='Settlers')
+            if case=='unknown':ss['units'].append(dict(id=10,owner=1,type_id=99,x=4,y=4))
+            actions=empire_candidates(ss,screen,rules=r)
+            request=empire_request_for(ss,screen,actions,rules=r)
+            context=request['state']['end_of_turn_review']['production_review']
+            self.assertEqual(context['no_observed_worker_or_worker_build'],case in ('none','foreign_worker'))
+            self.assertEqual(context['cities'][0]['armed_units_here'],5)
+            self.assertTrue(context['cities'][0]['unit_production_repeats'])
+            self.assertIn('completed unit types repeat',actions['finish_turn']['label'])
+            self.assertIn('5 armed units here',actions['inspect_city_0']['label'])
+            self.assertEqual('empire has no worker and no worker build' in actions['inspect_city_0']['label'],case in ('none','foreign_worker'))
+            self.assertIn('automatically repeats',request['questions']['empire_action']['instructions'])
+            self.assertEqual(set(actions),{'finish_turn','inspect_city_0','open_tax','open_research'})
+            self.assertEqual(actions['inspect_city_0']['parameters']['key'],'KeyC')
+            self.assertTrue(actions['inspect_city_0']['parameters']['only_open_menu'])
+            self.assertEqual(request['questions']['empire_action']['criteria'],{k:a['label'] for k,a in actions.items()})
+
     def test_concrete_only_open_commands_and_finish_turn(self):
         s,screen,r=inputs();actions=makeempire_candidates(s,screen,rules=r)
         self.assertEqual(set(actions),{'finish_turn','inspect_city_0','open_tax','open_research'})

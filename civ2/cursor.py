@@ -7,7 +7,9 @@ click below verifies the actual original arrow in a fresh game screenshot first.
 from __future__ import annotations
 
 from io import BytesIO
+import hashlib
 import math
+from pathlib import Path
 import time
 from PIL import Image
 
@@ -39,6 +41,8 @@ MAP_CONSTRAINTS = tuple((x,y,(0,0,0) if char=='B' else (255,255,255))
 # calibrates each axis. Starting at 1 made the observed Windows vertical gain 2
 # overshoot near bottom controls and clip the cursor before any readback.
 INITIAL_GAIN = 8.0
+REPAINT_DELAYS = (.055, .11, .19)
+REPAINT_DIRECTORY = Path(__file__).resolve().parents[1]/'.runtime/cursor-repaints'
 
 
 class CursorError(RuntimeError):
@@ -66,10 +70,40 @@ def locate_cursor(image: Image.Image) -> tuple[int, int]:
     return candidates[0]
 
 
-def _observe(game):
-    data = game.request('/bridge/capture/game', binary=True)
-    with Image.open(BytesIO(data)) as image:
-        return locate_cursor(image)
+def _repaint_frame(data, status):
+    """Keep original diagnostic pixels privately; these are not model evidence."""
+    digest=hashlib.sha256(data).hexdigest()
+    REPAINT_DIRECTORY.mkdir(parents=True,exist_ok=True)
+    path=REPAINT_DIRECTORY/(digest+'.png')
+    if not path.exists():path.write_bytes(data)
+    return {'frame_digest':digest,'status':status}
+
+
+def _observe(game, *, diagnostics=None):
+    """Wait briefly for a unique exact arrow when dirty rectangles overlap.
+
+    A modern frame can briefly contain both old and new cursor pixels. No
+    additional input is issued here; persistent ambiguity still fails closed.
+    """
+    frames=[]
+    for attempt in range(len(REPAINT_DELAYS)+1):
+        data=game.request('/bridge/capture/game',binary=True)
+        try:
+            with Image.open(BytesIO(data)) as image:cursor=locate_cursor(image)
+        except CursorError as error:
+            ambiguous=str(error)=='More than one original Windows arrow is visible'
+            if ambiguous or frames:
+                frames.append(_repaint_frame(data,'ambiguous' if ambiguous else 'unresolved'))
+            if ambiguous and attempt<len(REPAINT_DELAYS):
+                time.sleep(REPAINT_DELAYS[attempt]);continue
+            error.frame=data
+            error.repaint_frames=frames
+            if diagnostics is not None:diagnostics.extend(frames)
+            raise
+        if frames:
+            frames.append(_repaint_frame(data,'unique'))
+            if diagnostics is not None:diagnostics.extend(frames)
+        return cursor
 
 
 def locate_clipped_cursor(image: Image.Image) -> tuple[int, int]:
@@ -99,19 +133,18 @@ def locate_clipped_cursor(image: Image.Image) -> tuple[int, int]:
     return candidates[0]
 
 
-def _initial_observe(game, inputs):
-    data = game.request('/bridge/capture/game', binary=True)
+def _initial_observe(game, inputs, diagnostics=None):
+    try:
+        return _observe(game,diagnostics=diagnostics),None
+    except CursorError as error:
+        if str(error) != 'The original Windows arrow is not fully visible':raise
+        data=error.frame
     with Image.open(BytesIO(data)) as image:
-        try:
-            return locate_cursor(image), None
-        except CursorError as error:
-            if str(error) != 'The original Windows arrow is not fully visible':
-                raise
         clipped = locate_clipped_cursor(image)
     delta = (-8 if clipped[0] > 627 else 0, -8 if clipped[1] > 460 else 0)
     inputs.append(game.rpc('moveRelative', *delta))
     time.sleep(.1)
-    restored = _observe(game)  # Full arrow is mandatory before any click.
+    restored = _observe(game,diagnostics=diagnostics)  # Full arrow is mandatory before any click.
     return restored, {'clipped_cursor':list(clipped), 'delta':list(delta),
                       'restored_full_cursor':list(restored), 'button_pressed':False}
 
@@ -141,9 +174,9 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
     if not 0 <= host_x < 640 or not 0 <= host_y < 480:
         raise CursorError('Current emulator mouse coordinates are outside the canvas')
     gains = [INITIAL_GAIN, INITIAL_GAIN]
-    inputs, checkpoints = [], []
+    inputs, checkpoints, repaints = [], [], []
     deadline = time.monotonic() + timeout
-    cursor, edge_recovery = _initial_observe(game, inputs)
+    cursor, edge_recovery = _initial_observe(game, inputs, repaints)
     for step in range(81):
         checkpoints.append({'cursor': list(cursor), 'host': [host_x, host_y]})
         error = (x - cursor[0], y - cursor[1])
@@ -164,13 +197,13 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
             raise CursorError('Cursor movement is below the supported resolution')
         inputs.append(game.rpc('moveRelative', *actual_delta))
         time.sleep(.045)
-        after = _observe(game)
+        after = _observe(game,diagnostics=repaints)
         # Permit a slow original frame, with no second input until it is observed.
         for _ in range(3):
             if after != cursor:
                 break
             time.sleep(.065)
-            after = _observe(game)
+            after = _observe(game,diagnostics=repaints)
         if after == cursor:
             raise CursorError('Original guest cursor did not acknowledge mouse movement')
         for index in range(2):
@@ -194,6 +227,7 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
     return {'issued': press, 'target':[x,y], 'observed_cursor':list(cursor),
             'tolerance':tolerance,'movement_steps':len(checkpoints)-1,
             'checkpoints':checkpoints, 'inputs':inputs,
+            **({'cursor_repaints':repaints} if repaints else {}),
             **({'edge_recovery':edge_recovery} if edge_recovery else {})}
 
 

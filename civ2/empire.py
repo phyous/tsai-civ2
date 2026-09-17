@@ -75,6 +75,34 @@ def _context(state,screen,reviewed):
         end_turn_text=screen['title'],reviewed_action_ids=sorted(seen))
 
 
+def _production_context(state,rules):
+    """Observed production/roster arithmetic, never a claim of adequate defense."""
+    player=state['player']['id']
+    units=[u for u in state.get('units',[]) if isinstance(u,dict) and u.get('owner')==player]
+    cities=state.get('cities',[])
+    def spec(identifier):
+        matches=[s for s in rules.get('units',[]) if s.get('id')==identifier]
+        return matches[0] if len(matches)==1 else {}
+    workers=[u for u in units if spec(u.get('type_id')).get('role')==5]
+    unknown=sum(type(spec(u.get('type_id')).get('role')) is not int for u in units)
+    builds=[];unknown_builds=0;city_facts=[]
+    for city in cities:
+        production=city.get('production',{});build=spec(production.get('id')) if production.get('kind')=='unit' else {}
+        if production.get('kind')=='unit' and type(build.get('role')) is not int:unknown_builds+=1
+        if production.get('kind') not in ('unit','improvement','wonder'):unknown_builds+=1
+        if build.get('role')==5:builds.append(city['id'])
+        here=[u for u in units if (u.get('x'),u.get('y'))==(city.get('x'),city.get('y'))]
+        armed=sum(spec(u.get('type_id')).get('attack',0)>0 for u in here)
+        city_facts.append(dict(city_id=city['id'],name=city['name'],owned_units_here=len(here),
+            armed_units_here=armed,unknown_unit_specifications_here=sum(type(spec(u.get('type_id')).get('attack')) is not int for u in here),
+            production=deepcopy(production),unit_production_repeats=production.get('kind')=='unit'))
+    return dict(owned_worker_units=len(workers),worker_producing_city_ids=builds,
+        unknown_unit_specifications=unknown,unknown_production_specifications=unknown_builds,
+        no_observed_worker_or_worker_build=(not workers and not builds and unknown==unknown_builds==0),
+        cities=city_facts,
+        note='Only owned records and original unit roles/base attack are counted. Garrison counts do not establish safety, sufficiency or a required build. Unit production repeats after completion until changed; this is not a completion forecast.')
+
+
 def empire_candidates(state,screen,reviewed=None,rules=None):
     """Current-turn choices. Reviewed menus are omitted; Finish Turn remains.
 
@@ -104,9 +132,11 @@ def empire_candidates(state,screen,reviewed=None,rules=None):
         if identifier in seen:return
         actions[identifier]=dict(id=identifier,kind=kind,label=label,actor=deepcopy(actor),
             preconditions=deepcopy(preconditions),parameters=dict(key=key,modifiers=list(modifiers),**parameters))
+    production_context=_production_context(state,rules)
+    city_context={c['city_id']:c for c in production_context['cities']}
     disorder=sum(c.get('disorder') is True for c in cities)
     note=f' ({disorder} owned cities currently in disorder)' if disorder else ''
-    add('finish_turn','finish_turn','Finish this turn and let the original game advance production, research and other civilizations'+note,
+    add('finish_turn','finish_turn','Finish this turn: advance current production, research and other civilizations; completed unit types repeat until changed'+note,
         dict(kind='empire',player_id=player),'Enter',only_open_menu=False,expected_screen='native_turn_progress')
     for city in sorted(cities,key=lambda c:c['id']):
         actor={key:city[key] for key in ('id','owner','name','x','y')};actor['kind']='city'
@@ -114,7 +144,10 @@ def empire_candidates(state,screen,reviewed=None,rules=None):
         if city.get('disorder') is True:details.append('in disorder')
         production=city.get('production',{}).get('name')
         if isinstance(production,str) and production:details.append('producing '+production)
-        add('inspect_city_'+str(city['id']),'inspect_city',f"Inspect {city['name']} ({', '.join(details)}) before finishing the turn",
+        fact=city_context[city['id']]
+        if fact['unknown_unit_specifications_here']==0:details.append(f"{fact['armed_units_here']} armed units here")
+        if production_context['no_observed_worker_or_worker_build']:details.append('empire has no worker and no worker build')
+        add('inspect_city_'+str(city['id']),'inspect_city',f"Review or change {city['name']} production in its city screen ({', '.join(details)}); the actual change needs a separate choice",
             actor,'KeyC',('ShiftLeft',),only_open_menu=True,expected_screen='city_locator',
             target_city={key:city[key] for key in ('id','owner','name','x','y')},
             navigation_requires_fresh_locator=True)
@@ -147,9 +180,11 @@ def empire_request_for(state,screen,actions=None,reviewed=None,rules=None,recent
     if actions!=expected:raise EmpireError('Empire candidates differ from the current observation/review ledger')
     if len(actions)<2:raise ForcedEmpireAction('Only Finish Turn remains after reviewed menus; record a forced native action, not a fabricated Jev probability')
     projection=model_state(state,rules,recent_actions)
+    production_context=_production_context(state,_rules(rules))
     _,seen,_=_context(state,screen,reviewed)
     projection['end_of_turn_review']=dict(
         observed_cue=screen.get('title','End of Turn'),
+        production_review=production_context,
         reviewed_action_ids=sorted(seen),
         remaining_options={identifier:action['label'] for identifier,action in actions.items()},
         review_policy='Menus/cities already completed this turn are omitted. This does not claim their settings were changed or optimized. The ledger must reset on the next observed turn.',
@@ -158,9 +193,12 @@ def empire_request_for(state,screen,actions=None,reviewed=None,rules=None,recent
     return dict(state=projection,questions={
         'empire_action':dict(type='choice',instructions=(
             'The original game is at End of Turn. Choose exactly one actual action. '
+            'Unit production automatically repeats after completion: a city still producing Warriors can already have made several. '
+            'Check current garrisons and the worker pipeline before continuing that repeated build. '
+            'If no worker exists and no city is building one, further military production alone cannot expand the empire or improve terrain; consider a concrete production change when food and defense permit. '
             'The supplied current city records already show builds, stored resources, output and happiness; '
             'opening a city is not needed merely to learn those facts. Production and research progress by advancing turns. '
-            'If an appropriate build is underway, ordinarily let it finish instead of reopening the city and selecting it again. '
+            'Let a still-appropriate build progress; do not interpret a completed unit followed by the same build as an unfinished first unit. '
             'Review useful unresolved city production, happiness, income, science or diplomatic matters before finishing; '
             'finish when further review is not useful. Menu actions do not themselves choose a new setting or promise an improvement. '
             'Previously reviewed menus are explicitly listed and omitted to prevent repeated interface loops. '

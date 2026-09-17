@@ -406,7 +406,6 @@ class Session:
             self.command_decisions = getattr(self, 'command_decisions', 0)+1
             self.journal.append('model_decision', decision=decision_id, response=output_artifact,
                                 selected_question=question, action=action)
-            self.pending_decisions.append(decision_id)
         self.decision = {'id':decision_id,'model':result['model'],
             'latency_ms':result['metadata']['latency_ms'],'observed_turn':self.state['turn'],
             'observed_revision':observation_digest(self.state),
@@ -501,6 +500,7 @@ class Session:
         decision = getattr(self, 'decision', None)
         if (not isinstance(decision, dict) or decision.get('id') != decision_id
                 or decision.get('stage', 'command') != 'command'
+                or decision.get('receipt') not in ('pending','dispatched')
                 or decision.get('authorizes_input') is False
                 or decision.get('selected_question') != question
                 or decision.get('answers', {}).get(question, {}).get('choice') != action['id']
@@ -508,6 +508,54 @@ class Session:
                 or any(not isinstance(item, dict) or item.get('issued') is False for item in inputs)):
             return
         self.decision = {**decision, 'receipt':'dispatched'}
+        # A returned Choice alone never belongs to an observed-effect batch.
+        # Canonical validation and fresh-image checks may still refuse it.
+        if decision_id not in self.pending_decisions:
+            self.pending_decisions.append(decision_id)
+
+    def note_undispatched(self, action, *, before, after, input_sequence_before, input_sequence_after):
+        """Record a stale-image refusal without reusing its model choice.
+
+        Also removes this one choice from older development sessions whose
+        pending list was populated at inference time. No runtime input is sent.
+        """
+        decision = getattr(self, 'decision', None)
+        if (not isinstance(decision, dict) or decision.get('stage', 'command') != 'command'
+                or decision.get('receipt') != 'pending'
+                or decision.get('answers', {}).get(decision.get('selected_question'), {}).get('choice') != action.get('id')
+                or decision.get('selected_question') not in ('dialog_action','empire_action','city_action')
+                or type(input_sequence_before) is not int or input_sequence_before < 0
+                or type(input_sequence_after) is not int
+                or input_sequence_before != input_sequence_after
+                or any(row.get('decision') == decision['id'] for row in self.history)):
+            raise ValueError('A stale-image refusal needs an undispatched current choice and unchanged input sequence')
+        descriptors = []
+        directory = self.journal.directory.resolve()
+        for observation in (before, after):
+            path = Path(observation['path'])
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 4*1024*1024:
+                raise ValueError('Refusal needs retained original screen evidence')
+            relative = path.resolve().relative_to(directory).as_posix()
+            data = path.read_bytes()
+            if (not relative.startswith('screens/') or not data.startswith(b'\x89PNG\r\n\x1a\n')
+                    or data[16:24] != b'\x00\x00\x02\x80\x00\x00\x01\xe0'
+                    or hashlib.sha256(data).hexdigest() != observation['sha256']):
+                raise ValueError('Refusal screen differs from the retained original image')
+            descriptors.append(dict(path=relative,bytes=len(data),sha256=observation['sha256']))
+        if (before['sha256'] != action.get('preconditions',{}).get('image_sha256')
+                or before['sha256'] == after['sha256']):
+            raise ValueError('Refusal is not a changed image for this selected action')
+        status = self.game.rpc('status')
+        if (status.get('paused') is not True or status.get('heldKeys') != [] or status.get('buttons') != 0
+                or status.get('inputSequence') != input_sequence_after):
+            raise RuntimeError('Original input state changed after the refused choice')
+        identifier = decision['id']
+        self.journal.append('model_command_not_dispatched', decision=identifier, action=deepcopy(action),
+            before=descriptors[0], after=descriptors[1], executes_input=False,
+            reason='source_image_changed_before_input', input_sequence_before=input_sequence_before,
+            input_sequence_after=input_sequence_after)
+        self.pending_decisions[:] = [value for value in self.pending_decisions if value != identifier]
+        self.decision = {**decision, 'receipt':'not_dispatched'}
 
     def choose_unit(self):
         actions = unit_candidates(self.state, rules=self.rules)
@@ -616,7 +664,7 @@ class Session:
         else:
             inputs = self.ui.key(parameters['key'],settle=.4)
         after = self.ui.observe()
-        self.journal.append('empire_command_dispatched',action=action,inputs=inputs,
+        self.journal.append('empire_command_dispatched',decision=decision_id,action=action,inputs=inputs,
                              before=current['sha256'],after=after['sha256'])
         if decision_id is not None:
             self._mark_dispatched(decision_id, 'empire_action', action, inputs)

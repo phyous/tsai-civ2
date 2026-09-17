@@ -27,6 +27,21 @@ test('boots pinned worker once, seeds only helper mailboxes, pause fences are id
   assert.equal(calls.filter(x=>x[0]==='pause').length,1);assert.equal(calls.filter(x=>x[0]==='resume').length,1);
   assert.equal(api.status().paused,false);assert.equal(api.status().runtime,'js-dos/8.4.2/Win3.1');
 });
+test('pause waits for the original late frame from an already queued worker wake-up',async()=>{
+  const {api,ci,events}=await setup();let replies=0,releaseFirst,releaseSecond;
+  ci.fsTree=()=>new Promise(resolve=>{replies++;if(replies===1)releaseFirst=resolve;else releaseSecond=resolve;});
+  let completed=false;const waiting=api.pause().then(value=>{completed=true;return value;});
+  assert.equal(replies,1);assert.equal(api.status().paused,false);
+  // ws-sync-sleep was posted before wc-pause. Its wc-sync-sleep reply can sit
+  // behind the first tree request, so that response alone is not a frame fence.
+  releaseFirst({});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(completed,false);assert.equal(replies,2);
+  const before=api.status().frames;events.frame(new Uint8Array(640*480*3).fill(17),null);
+  releaseSecond({});const fenced=await waiting;
+  assert.equal(fenced.frames,before+1);assert.equal(fenced.paused,true);
+  assert.equal(fenced.pauseFence,'worker-two-roundtrips-v1');
+  await api.pause();assert.equal(replies,2,'a completed fence stays idempotent');
+});
 test('physical code mapping and chord cleanup use actual modern enum',async()=>{
   const {api,calls,ci}=await setup();await api.chord(['ControlLeft','KeyS'],{holdMs:1});
   assert.deepEqual(calls.filter(x=>x[0]==='key'),[['key',341,true],['key',83,true],['key',83,false],['key',341,false]]);
@@ -60,7 +75,7 @@ test('native inventory detects same-size edits with actual digest, imports never
   const {api,files}=await setup();const before=await api.listSaves();assert.equal(before[0].modifiedAt,null);
   files.set('civ2/TUTORIAL.SAV',new Uint8Array([9,2,3]));assert.notEqual((await api.listSaves())[0].sha256,before[0].sha256);
   await assert.rejects(api.importSave('tutorial.sav',new Uint8Array([3])));await assert.rejects(api.importSave('../x.sav',new Uint8Array([3])));
-  const r=await api.importSave('RESTORE.SAV',new Uint8Array([4,5,6]));assert.equal(r.loaded,false);assert.equal(r.verified,true);
+  const r=await api.importSave('restore.sav',new Uint8Array([4,5,6]));assert.equal(r.loaded,false);assert.equal(r.verified,true);assert.equal(r.name,'RESTORE.SAV');assert.equal(files.has('civ2/RESTORE.SAV'),true);
   assert.deepEqual([...await api.readSave('restore.sav')],[4,5,6]);
   files.set('civ2/restore.sav',new Uint8Array([8]));await assert.rejects(api.listSaves(),/invalid/);
 });

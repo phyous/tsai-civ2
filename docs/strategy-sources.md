@@ -26,3 +26,11 @@ Settler queues with no army needs a better production mix; researching Monarchy
 does not adopt it; irrigation on ordinary Grassland does not improve its food
 yield under Despotism. These are recommendations tied to observed facts, not
 automatic production changes or a hard-coded opening script.
+
+Revision v4 also explains that completed unit builds repeat automatically.
+A city still producing Warriors may already have finished several; with no
+Settlers/Engineers and no worker in production, ending turns cannot create an
+expansion pipeline. The empire review reports observed garrisons and current
+worker builds, and labels the city route as an opportunity to change production.
+Jev decides whether that intervention is worthwhile; the harness does not switch
+the queue or impose a garrison target.

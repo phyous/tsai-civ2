@@ -112,8 +112,22 @@
       return bootPromise;
     },
     status() {return {started,paused,width:canvas.width,height:canvas.height,inputSequence:sequence,
-      version:'1.06 27-Mar-96',runtime:'js-dos/8.4.2/Win3.1',heldKeys:[...heldKeys],buttons,pauseBackend:'js-dos-worker',frames};},
-    async pause() {ready();if (!paused) {ci.pause();await ci.fsTree();paused=true;}return api.status();},
+      version:'1.06 27-Mar-96',runtime:'js-dos/8.4.2/Win3.1',heldKeys:[...heldKeys],buttons,pauseBackend:'js-dos-worker',pauseFence:'worker-two-roundtrips-v1',frames};},
+    async pause() {
+      ready();
+      if (!paused) {
+        ci.pause();
+        // js-dos 8.4.2 can already have posted ws-sync-sleep before pause.
+        // Its main-thread reply wakes the worker once even when paused. The
+        // first FIFO round trip drains that reply; the second drains the final
+        // iteration and its original frame messages before capture can proceed.
+        // ci.screenshot() only copies cached pixels and cannot provide this fence.
+        await ci.fsTree();
+        await ci.fsTree();
+        paused=true;
+      }
+      return api.status();
+    },
     async resume() {ready();if (paused) {ci.resume();await ci.fsTree();paused=false;}return api.status();},
     inputDiagnostics() {ready();return {paused,lastMouse,lastHostError,sdlMouse:null,
       hostMouse:{x:mouseX,y:mouseY,buttons,source:'js-dos adapter input bookkeeping'},
@@ -182,7 +196,7 @@
       return {original_exe_sha256:await digest(['civ2'],'CIV2.EXE',MAX_SAVE),helper_sha256:await digest([],'CIV2OBS.EXE',524288)};
     },
     async importSave(name,bytes) {
-      ready();saveName(name);if(!(bytes instanceof Uint8Array)||!int(bytes.length,1,MAX_SAVE))throw Error('Expected a bounded Uint8Array save');
+      ready();name=saveName(name).toUpperCase();if(!(bytes instanceof Uint8Array)||!int(bytes.length,1,MAX_SAVE))throw Error('Expected a bounded Uint8Array save');
       const {directory:dir,files}=await entries();if(files.some(n=>n.name.toLowerCase()===name.toLowerCase()))throw Error('Save import will not overwrite an existing file');
       const path=dir+'/'+name;
       try {await ci.fsWriteFile(path,new Uint8Array(bytes));const actual=await readFile(path,bytes.length,MAX_SAVE);

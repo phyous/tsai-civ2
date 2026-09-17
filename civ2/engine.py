@@ -38,7 +38,22 @@ class Game:
         if command in ('pause', 'resume'):
             state = self.rpc('status')
             if state.get('paused') == (command == 'pause'):
-                return state
+                result = state
+            else:
+                result = self.request('/bridge/rpc', {'command': command, 'args': list(args)})['result']
+            # Existing recorded modern sessions cannot reload their worker.
+            # Older adapters acknowledge pause before a queued sleep reply has
+            # drained. Two read-only worker round trips drain queued replies;
+            # future wake timers still require the strict source-image check.
+            # Native save bytes are neither created nor modified.
+            if (command == 'pause' and result.get('pauseBackend') == 'js-dos-worker'
+                    and result.get('pauseFence') != 'worker-two-roundtrips-v1'):
+                self.rpc('listSaves')
+                self.rpc('listSaves')
+                result = self.rpc('status')
+                if result.get('paused') is not True:
+                    raise RuntimeError('Modern runtime did not remain paused')
+            return result
         return self.request('/bridge/rpc', {'command': command, 'args': list(args)})['result']
 
     def capture(self, path, dashboard=False):

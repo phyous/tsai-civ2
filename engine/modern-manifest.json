@@ -19,7 +19,12 @@
       "member": "package/dist/wdosbox.js",
       "path": "vendor/modern/wdosbox.js",
       "bytes": 112002,
-      "sha256": "4fdff4523283ca15a42d977a3c26d39486ee1dcc5b769791609ecb6294526dbb"
+      "sha256": "4fdff4523283ca15a42d977a3c26d39486ee1dcc5b769791609ecb6294526dbb",
+      "derived": {
+        "bytes": 112283,
+        "sha256": "fb0084e27eac2fdd347e0931abf07f49d53d9c6b8b1a51b1f337f8a289329cf0"
+      },
+      "patch": "modern-scheduler-patch.json"
     },
     {
       "member": "package/dist/wdosbox.wasm",

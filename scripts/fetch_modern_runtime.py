@@ -16,6 +16,27 @@ def checked(data: bytes, entry: dict) -> bool:
     return len(data) == entry['bytes'] and hashlib.sha256(data).hexdigest() == entry['sha256']
 
 
+def installed_record(entry: dict) -> dict:
+    return entry.get('derived', entry)
+
+
+def derive(data: bytes, entry: dict, engine: Path) -> bytes:
+    if 'derived' not in entry:
+        return data
+    if entry['path'] != 'vendor/modern/wdosbox.js' or entry.get('patch') != 'modern-scheduler-patch.json':
+        raise ValueError('Only the pinned modern host scheduler derivative is supported')
+    patch = json.loads((engine / 'modern-scheduler-patch.json').read_text())
+    if patch['id'] != 'civ2-modern-host-pause-v1' or not checked(data, patch['source']):
+        raise ValueError('Modern host scheduler source differs')
+    before, after = patch['search'].encode(), patch['replace'].encode()
+    if not before or data.count(before) != 1:
+        raise ValueError('Modern host scheduler patch anchor differs')
+    result = data.replace(before, after)
+    if not checked(result, patch['derived']) or not checked(result, entry['derived']):
+        raise ValueError('Modern host scheduler derivative differs')
+    return result
+
+
 def install(archive: bytes, engine: Path, manifest: dict) -> None:
     if not checked(archive, manifest['archive']):
         raise ValueError('Modern runtime archive checksum or size differs')
@@ -32,6 +53,7 @@ def install(archive: bytes, engine: Path, manifest: dict) -> None:
             data = source.read(entry['bytes'] + 1)
             if not checked(data, entry):
                 raise ValueError('Modern runtime member checksum differs')
+            data = derive(data, entry, engine)
             dest = engine / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=dest.parent, prefix='.modern-', delete=False) as out:
@@ -46,7 +68,7 @@ def install(archive: bytes, engine: Path, manifest: dict) -> None:
 def main() -> None:
     engine = ROOT / 'engine'
     manifest = json.loads((engine / 'modern-manifest.json').read_text())
-    if all((engine / item['path']).is_file() and checked((engine / item['path']).read_bytes(), item)
+    if all((engine / item['path']).is_file() and checked((engine / item['path']).read_bytes(), installed_record(item))
            for item in manifest['files']):
         print('Verified optional js-dos 8.4.2 assets')
         return

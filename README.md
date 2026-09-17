@@ -34,6 +34,18 @@ It gives each parallel game its own local server and isolated browser profile,
 with background page throttling disabled. The game remains embedded in the same
 spectator dashboard; `/web/watch.html` provides the read-only browser view.
 
+For the faster optional WebAssembly backend, fetch its pinned assets and start
+a fresh runtime:
+
+```sh
+python3 scripts/fetch_modern_runtime.py
+python3 -m civ2.launcher start --name campaign-modern --port 3930 --backend modern
+```
+
+The [modern runtime notes](engine/modern-runtime.md) describe the verified asset
+hashes and host pause fix. This changes the emulator host, while retaining the
+original game and the same observation, input and recording interfaces.
+
 For the macOS OCR adapter:
 
 ```sh

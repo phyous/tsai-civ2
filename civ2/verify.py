@@ -38,6 +38,7 @@ DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_
 KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'screen_observed', 'mechanical_input', 'open_city_control',
                 'native_map_observed', 'native_map_observation_failed',
+                'model_command_not_dispatched',
                 'navigate_selected_city', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
@@ -1141,6 +1142,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     diplomatic_followup=None
     trade_pending=None;trade_eligible=None;trade_seen=set();trade_confirmations=0
     stops, recoveries, unknown = [], [], Counter()
+    refused_commands = set()
     checks, initial_state = None, None
     initial_memory_inventory=None
     initial_campaign_start=None
@@ -1414,6 +1416,29 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                          and _revision_digest(plan,'current_') == _revision_digest(action['preconditions']),
                          'Command planning context differs from the current observed model plan')
             decisions[identifier] = {'action': action, 'question': question, 'response': response}
+        elif kind == 'model_command_not_dispatched':
+            from PIL import Image
+            identifier = payload.get('decision')
+            sequence = payload.get('input_sequence_before')
+            _require(identifier in decisions and identifier not in dispatched and identifier not in refused_commands
+                     and decisions[identifier]['question'] in ('dialog_action','empire_action','city_action')
+                     and payload.get('action') == decisions[identifier]['action']
+                     and payload.get('executes_input') is False
+                     and payload.get('reason') == 'source_image_changed_before_input'
+                     and _int(sequence) and _int(payload.get('input_sequence_after'))
+                     and sequence == payload.get('input_sequence_after')
+                     and sequence >= latest_runtime_input,
+                     'Non-dispatch refusal is not bound to an unused choice and unchanged input sequence')
+            before, after = files.descriptor(payload.get('before')), files.descriptor(payload.get('after'))
+            _require(before['path'].startswith('screens/') and after['path'].startswith('screens/')
+                     and before['sha256'] == decisions[identifier]['action']['preconditions'].get('image_sha256')
+                     and before['sha256'] != after['sha256'],
+                     'Non-dispatch refusal has no changed original image for its selected action')
+            for descriptor in (before,after):
+                with Image.open(files.root/descriptor['path']) as image:
+                    _require(image.format == 'PNG' and image.size == (640,480), 'Invalid refusal screen')
+            refused_commands.add(identifier)
+            latest_runtime_input = sequence
         elif kind == 'forced_empire_command':
             _require(forced_pending is None and payload.get('action', {}).get('id') == 'finish_turn',
                      'Only explicit forced Finish Turn is supported')
@@ -1445,7 +1470,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     forced_city += 1; forced_city_pending = None
                     continue
             if identifier is None and question == 'empire_action':
-                matches = [i for i, d in decisions.items() if i not in dispatched
+                matches = [i for i, d in decisions.items() if i not in dispatched and i not in refused_commands
                            and d['action'] == payload.get('action') and d['question'] == question]
                 if len(matches) == 1:
                     identifier = matches[0]
@@ -1454,7 +1479,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     last_finish={'turn':forced_pending['preconditions']['turn']}
                     forced += 1; forced_pending = None
                     continue
-            _require(identifier in decisions and identifier not in dispatched
+            _require(identifier in decisions and identifier not in dispatched and identifier not in refused_commands
                      and decisions[identifier]['question'] == question,
                      'Dispatch has no unique prior selected model decision')
             selected=decisions[identifier]['action']
@@ -1662,8 +1687,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             stops.append(payload)
         elif kind == 'batch_observed_effect':
             identifiers = payload.get('decisions')
-            _require(isinstance(identifiers,list) and all(i in decisions for i in identifiers),
-                     'Native effect batch includes a non-command planning decision')
+            _require(isinstance(identifiers,list) and identifiers
+                     and all(type(i) is int and i in dispatched for i in identifiers)
+                     and len(set(identifiers)) == len(identifiers),
+                     'Native effect batch includes an undispatched or non-command planning decision')
     _require(checks is not None, 'Initial native setup evidence is absent')
     outcome = _terminal(files, terminal_review, chain)
     complete = len(stops) == 1 and recording is not None and not unknown
@@ -1687,6 +1714,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'planning_note':'Planning choices and observed plan-status changes are context only, not commands or native effects.',
                           'model_dispatches': len(dispatched), 'ordinary_input_events': inputs,
                           'undispatched_decisions': sorted(set(decisions)-dispatched),
+                          'source_image_refusals': sorted(refused_commands),
                           'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)),
                           'forced_empire_dispatches': forced,
                           'forced_city_exit_dispatches':forced_city,

@@ -26,6 +26,27 @@ def image_and_rows():
     return image,rows
 
 class TaxControlsTests(unittest.TestCase):
+    def test_title_recovery_requires_paired_pixels_and_preserves_rates(self):
+        from civ2 import observe
+        from tests.test_herald import prepared
+        original=prepared('Fow Shall We Dictmbote The Wealth',208,102,226,16)
+        good=prepared('How Shall We Distribote The Wealth',208,102,226,16)
+        for case in ('good','different','weak','extra','missing_rate','wrong_geometry'):
+            rows=[copy.deepcopy(original),prepared('Taxes: 40%',264,228,70,16),
+                  prepared('Science: 60%',250,270,85,16),prepared('Luxuries: 0%',250,312,85,16),
+                  prepared('OK',308,355,24,16)]
+            b=copy.deepcopy(good)
+            if case=='different':b['text']='How Shall We Destroy The Wealth'
+            if case=='weak':b['confidence']=.5
+            if case=='extra':rows.append(prepared('Cancel',400,355,50,16))
+            if case=='missing_rate':rows.pop(2)
+            if case=='wrong_geometry':b=prepared(good['text'],208,150,226,16)
+            with patch.object(observe,'_crop_text',side_effect=[[good],[b]]):
+                observe._recover_tax_context(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],good['text'] if case=='good' else original['text'],case)
+            self.assertIn('Taxes: 40%',[r['text'] for r in rows])
+            if case=='good':self.assertEqual(rows[0]['provenance'][0]['text'],original['text'])
+
     def test_split_rate_joins_only_unique_adjacent_actual_number(self):
         from civ2 import observe
         from tests.test_herald import prepared
@@ -78,7 +99,8 @@ class TaxControlsTests(unittest.TestCase):
             self.assertFalse(classify_dialog(o,labels_text=LABELS)['supported'],case)
     def test_optional_actual_two_original_panels(self):
         root=Path(__file__).resolve().parents[1]
-        paths=[root/'runs/attempt-004/screens/ui-0000789.png',root/'runs/attempt-005/screens/ui-0001240.png']
+        paths=[root/'runs/attempt-004/screens/ui-0000789.png',root/'runs/attempt-005/screens/ui-0001240.png',
+               root/'runs/attempt-006/screens/ui-0001133.png']
         if not all(p.exists() for p in paths) or not(root/'.runtime/ocr').exists():self.skipTest('Private original panels unavailable')
         from civ2.observe import recognize
         from civ2.run import labels_text
