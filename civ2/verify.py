@@ -36,7 +36,7 @@ SCREEN_KEYS = {'screen', 'before', 'after', 'dialog', 'typed', 'saved',
                'selected_frame', 'source_image', 'image_sha256', 'completion_screen', 'opening', 'verified_image'}
 DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_action',
               'empire_command_dispatched': 'empire_action', 'city_control_dispatched':'city_action'}
-KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
+KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'inference_failed', 'model_decision',
                 'unit_activation_enabled',
                 'unit_activation_started','unit_activation_step_started','unit_activation_step_dispatched',
                 'unit_activation_failed','unit_activation_observed',
@@ -1438,6 +1438,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     files = Files(directory)
     events, chain = _journal(files)
     saves, started, stages, decisions, plans, plan_statuses, dispatched = {}, {}, {}, {}, {}, {}, set()
+    started_hashes, started_sequences, failed_inferences = {}, {}, {}
     inputs, forced, forced_pending, recording = 0, 0, None, None
     forced_city, forced_city_pending, city_pending = 0, None, None
     city_reviews, city_closures, graphics_reviews = 0, 0, 0
@@ -1477,9 +1478,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
         latest_runtime_input=max([latest_runtime_input,*_runtime_sequences(payload)])
         if kind not in {'screen_observed','pointer_park_for_observation',
                         'trade_followup_pending','trade_advance_dispatched','native_map_observed','native_map_observation_failed',
-                        'mechanical_input_gap'}:
+                        'mechanical_input_gap','inference_failed'}:
             trade_pending=None;trade_eligible=None
-        if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted','mechanical_input_gap'}:
+        if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted','mechanical_input_gap','inference_failed'}:
             cosmetic_section_sequence=None
         observation_only={'screen_observed','batch_observed_effect','plan_status'}
         if kind not in observation_only|{'checkpoint','checkpoint_reused'}:
@@ -1490,7 +1491,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             unknown[kind] += 1
         if navigation_pending is not None:
             _require(kind in {'screen_observed','controller_update','session_stopped','recording_finalized',
-                              'checkpoint','batch_observed_effect','plan_status'},
+                              'checkpoint','batch_observed_effect','plan_status','inference_failed'},
                      'An unresolved city navigation cannot authorize another input or decision')
         if activation_pending is not None:
             _require(kind not in {'inference_started','model_decision','model_plan'}|set(DISPATCHES),
@@ -1498,7 +1499,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _require(kind in {'screen_observed','checkpoint','batch_observed_effect','plan_status',
                 'session_stopped','recording_finalized','controller_update','pointer_park_for_observation',
                 'native_map_observed','native_map_observation_failed','unit_activation_step_started',
-                'unit_activation_step_dispatched','unit_activation_failed','unit_activation_observed','mechanical_input_gap'},
+                'unit_activation_step_dispatched','unit_activation_failed','unit_activation_observed','mechanical_input_gap','inference_failed'},
                 'An unrelated input or transaction interrupted the selected activation')
         if kind in ('begin', 'checkpoint'):
             live = payload.get('observation_kind') == 'live_memory'
@@ -1789,12 +1790,31 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             except (ValueError, RuntimeError, KeyError, TypeError):
                 raise VerificationError('Saved model request is invalid') from None
             started[identifier] = request
+            started_hashes[identifier] = files.descriptor(payload['request'])['sha256']
+            started_sequences[identifier] = event['sequence']
             stage = payload.get('stage','command')
             _require(stage in ('command','planning'), 'Inference stage is invalid')
             stages[identifier] = stage
+        elif kind == 'inference_failed':
+            _require(set(payload)=={'decision','request_sha256','http_status','category','error_type','usage','recorded_late'},
+                     'Failed inference has an unsupported evidence schema')
+            identifier=payload.get('decision');status=payload.get('http_status');category=payload.get('category')
+            _require(_int(identifier,1) and identifier in started and identifier not in failed_inferences
+                     and identifier not in decisions and identifier not in plans and identifier not in dispatched,
+                     'Failed inference has no unique unresolved request')
+            _require(payload.get('request_sha256')==started_hashes[identifier]
+                     and payload.get('error_type')=='TransportError' and payload.get('usage')=='unavailable'
+                     and (status is None or type(status) is int and 400<=status<=599)
+                     and isinstance(category,str) and category in
+                         {'unclassified','context_or_token_limit','account_quota','rate_limit','authentication'}
+                     and type(payload.get('recorded_late')) is bool,
+                     'Failed inference diagnostics or request binding are invalid')
+            _require(payload['recorded_late'] or event['sequence']==started_sequences[identifier]+1,
+                     'Delayed inference failure must be explicitly declared late')
+            failed_inferences[identifier]=dict(payload)
         elif kind == 'model_plan':
             identifier = payload.get('decision')
-            _require(identifier in started and identifier not in plans and identifier not in decisions
+            _require(identifier in started and identifier not in plans and identifier not in decisions and identifier not in failed_inferences
                      and stages[identifier] == 'planning' and payload.get('executes_input') is False
                      and payload.get('selected_question') == 'task_choice'
                      and events[0]['payload'].get('planning_enabled') is True,
@@ -1832,7 +1852,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             plan_statuses[identifier] = plan
         elif kind == 'model_decision':
             identifier, question = payload.get('decision'), payload.get('selected_question')
-            _require(identifier in started and identifier not in decisions and identifier not in plans
+            _require(identifier in started and identifier not in decisions and identifier not in plans and identifier not in failed_inferences
                      and stages[identifier] == 'command', 'Model decision has no unique prior command inference')
             request = started[identifier]; response = files.json(payload['response']['path'])
             try:
@@ -2255,7 +2275,12 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'unverified_input_gaps': [{'decision':i,'observed_input_sequence_after':input_gaps[i]} for i in sorted(input_gaps)],
                           'unverified_mechanical_input_gaps':mechanical_input_gaps,
                           'mechanical_input_gap_note':'Declared missing receipts are not reconstructed, counted or attributed to model decisions. Image integrity and sequence bounds only; no input or native effect is certified.',
-                          'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)),
+                          'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)-set(failed_inferences)),
+                          'failed_calls':len(failed_inferences),
+                          'failed_inferences':[failed_inferences[i] for i in sorted(failed_inferences)],
+                          'failed_call_usage':{'calls_with_unavailable_usage':len(failed_inferences),
+                                               'input_tokens':None,'output_tokens':None},
+                          'failed_call_note':'Declared transport failures have no retained response or authorized input. Their token usage is unavailable and is not included in accepted-response totals; unresolved requests remain separate.',
                           'forced_empire_dispatches': forced,
                           'forced_city_exit_dispatches':forced_city,
                           'completed_city_reviews':city_reviews, 'closed_city_controls':city_closures,
@@ -2301,7 +2326,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                              'pending_city_navigation':navigation_pending is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] in ('human_reviewed','assistant_reviewed') and len(dispatched) == len(decisions)
-                              and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries
+                              and len(started) == len(decisions)+len(plans)+len(failed_inferences) and forced_pending is None and not recoveries
                               and city_pending is None and forced_city_pending is None and labor_refresh is None and trade_pending is None
                               and activation_pending is None},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',

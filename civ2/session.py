@@ -18,7 +18,7 @@ from .planning import advance_plan, make_plan, request_for as planning_request_f
 from .recording import Recorder
 from .save import parse_save, parse_rules
 from .revision import observation_digest, prefixed_revision, revision_digest
-from .typesafe import TypeSafeClient
+from .typesafe import TypeSafeClient, TransportError
 from .ui import UI
 
 
@@ -420,7 +420,23 @@ class Session:
         decision_id = self.decisions
         input_artifact = self.journal.artifact(f'decisions/{decision_id:06d}-request.json', request)
         self.journal.append('inference_started', decision=decision_id, request=input_artifact, stage=stage)
-        result = self.client.evaluate(request['state'], request['questions'])
+        try:
+            result = self.client.evaluate(request['state'], request['questions'])
+        except TransportError as error:
+            # Only fixed public diagnostic fields are evidence. Never copy the
+            # exception string, private remote body, or inferred token usage.
+            diagnostics = getattr(error, 'diagnostics', {})
+            if not isinstance(diagnostics, dict):diagnostics = {}
+            status = diagnostics.get('http_status')
+            if type(status) is not int or not 400 <= status <= 599:status = None
+            category = diagnostics.get('category')
+            if not isinstance(category, str) or category not in (
+                    'unclassified', 'context_or_token_limit', 'account_quota', 'rate_limit', 'authentication'):
+                category = 'unclassified'
+            self.journal.append('inference_failed', decision=decision_id,
+                request_sha256=input_artifact['sha256'], http_status=status, category=category,
+                error_type='TransportError', usage='unavailable', recorded_late=False)
+            raise
         output_artifact = self.journal.artifact(f'decisions/{decision_id:06d}-response.json', result)
         choice = result['answers'][question]['choice']
         action = actions[choice]
