@@ -3,7 +3,8 @@
 The two retained original frames differ in this crop only at 484 pixels:
 white (255,255,255) becomes gray (134,134,134). Both lines remain present.
 Only the complete unmodified gray RGB crops below are recognized. A second
-original layout has the same484 glyph pixels four pixels higher. No game asset
+original layout has the same484 glyph pixels four pixels higher, and another
+has them two pixels lower. No game asset
 or bitmap is shipped; these are hashes and observed text/bounds.
 """
 from copy import deepcopy
@@ -19,13 +20,18 @@ UPPER_GRAY_CROP_SHA256='b3915ba35950564261b5ec4470c3939361eaf79cdef35a11ef633439
 UPPER_WHITE_CROP_SHA256='076b13aa2d44628216a65516163be69f3a7df17ae4bc6999ec43a16b1549782a'
 UPPER_GRAY_SOURCE_SHA256='a4bad2f24613550ca0f87aa6bb09c6d4c3f1c42aa59d4ea7523adcbc2147781c'
 UPPER_WHITE_SOURCE_SHA256='e562ac74c7c31bf73e72775c42084b3071ec845cab335110e2277d327930d24f'
+LOWER_GRAY_CROP_SHA256='f4471ef79e70f122083dddb33caf4826be2b1fc6d504f278b4fa92f650ca6f67'
+LOWER_WHITE_CROP_SHA256='b0f0223f7d73eac968e8cf1b41f1997aa884097051a756dcc77de4710e466110'
+LOWER_GRAY_SOURCE_SHA256='1ba9f24c49066273a989bb046ed15a4cf583d94538487d967da6db92c6e91a1b'
+LOWER_WHITE_SOURCE_SHA256='f6ec6d1a96ff50312f810bcba3ea682d81201bbc1aba10d53942dfa40d01cba7'
 
 
 def annotate_footer(image,rows,source_hash):
     if image.size!=(640,480):return False
     digest=hashlib.sha256(image.convert('RGB').crop(CROP).tobytes()).hexdigest()
     variants={GRAY_CROP_SHA256:(GRAY_SOURCE_SHA256,WHITE_SOURCE_SHA256,WHITE_CROP_SHA256,0),
-              UPPER_GRAY_CROP_SHA256:(UPPER_GRAY_SOURCE_SHA256,UPPER_WHITE_SOURCE_SHA256,UPPER_WHITE_CROP_SHA256,-4)}
+              UPPER_GRAY_CROP_SHA256:(UPPER_GRAY_SOURCE_SHA256,UPPER_WHITE_SOURCE_SHA256,UPPER_WHITE_CROP_SHA256,-4),
+              LOWER_GRAY_CROP_SHA256:(LOWER_GRAY_SOURCE_SHA256,LOWER_WHITE_SOURCE_SHA256,LOWER_WHITE_CROP_SHA256,2)}
     if digest not in variants:return False
     gray_source,white_source,white_crop,dy=variants[digest]
     inside=[]

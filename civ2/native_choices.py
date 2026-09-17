@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from .dates import DATE_PATTERN,date_parts
 
 
 SOURCES = {
@@ -20,11 +21,14 @@ SOURCES = {
     'NOFOREIGN':dict(tag='NOFOREIGN',title='Foreign Minister',width=320,
         body='We have not yet made contact with other civilizations.',
         options=[],buttons=[],listbox=False),
+    'COUNCILTIME':dict(tag='COUNCILTIME',title='The High Council: %STRING2',width=320,
+        body='The High Council of the %STRING0 is meeting in %STRING1. If you wish, you may take this opportunity to consult your advisors and hear their views on the state of your realm.',
+        options=['Consult High Council.','No thanks, too busy.'],buttons=[],listbox=False),
     'ANNOYPEACE':dict(tag='ANNOYPEACE',title='Foreign Minister',width=320,
         body='We have signed a peace treaty with the %STRING1! Our reputation will be damaged if we break it!',
         options=['Cancel action.','Break treaty.'],buttons=[],listbox=False),
 }
-KINDS={'LANDFALL':'landfall_choice','ANNOYPEACE':'treaty_break_choice','NOLANDFALL':'information','NOFOREIGN':'information'}
+KINDS={'COUNCILTIME':'council_choice','LANDFALL':'landfall_choice','ANNOYPEACE':'treaty_break_choice','NOLANDFALL':'information','NOFOREIGN':'information'}
 CONTROL_WORDS={'ok','cancel','yes','no','help','continue','close','exit','done','back','next'}
 
 
@@ -52,14 +56,17 @@ def classify_native_choice(observation,rows,resources,rules=None):
         if tag=='NOFOREIGN':title_names.add('foreign ifinister') # actual isolated3950/48
         if tag=='ANNOYPEACE':title_names.add('foreign mfinister') # actual011/1596
         headings=[r for r in rows if _normal(r['text']) in title_names]
+        if tag=='COUNCILTIME':
+            headings=[r for r in rows if (m:=re.fullmatch(rf'the (?:high council|figh comcl):? ({DATE_PATTERN})',_normal(r['text']),re.I))
+                      and date_parts(m[1]) is not None]
         if len(headings)!=1:continue
         title=headings[0];cx,cy=title['center']
-        if title['confidence']<.8 or not 80<=cx<=560 or not 45<=cy<=360:continue
+        if title['confidence']<.8 or not 80<=cx<=560 or not (8<=cy<=35 if tag=='COUNCILTIME' else 45<=cy<=360):continue
         # Source widths bound the foreground; default-width dialogs receive a
         # conservative440px text region. This is a guard, not a measured border.
         # The original ANNOYPEACE illustration adds horizontal space outside
         # its @width=320 text block: actual011/1596 panel x118..522.
-        half=204 if tag=='ANNOYPEACE' else (source['width'] or 440)/2+8
+        half=204 if tag in ('ANNOYPEACE','COUNCILTIME') else (source['width'] or 440)/2+8
         controls=[r for r in rows if _normal(r['text']) in CONTROL_WORDS]
         if len(controls)!=1 or _normal(controls[0]['text'])!='ok':continue
         ok=controls[0]
@@ -75,7 +82,8 @@ def classify_native_choice(observation,rows,resources,rules=None):
         alternatives=panel[-count:] if count else []
         if not body:continue
         if count:
-            if [_normal(r['text']) for r in alternatives]!=[_normal(t) for t in source['options']]:continue
+            normalized=[re.sub(r'^[•○●]\s*','',_normal(r['text'])) if tag=='COUNCILTIME' else _normal(r['text']) for r in alternatives]
+            if normalized!=[_normal(t) for t in source['options']]:continue
             if (not 14<=alternatives[1]['center'][1]-alternatives[0]['center'][1]<=50
                     or abs(alternatives[0]['bounds'][0]-alternatives[1]['bounds'][0])>24
                     or alternatives[0]['bounds'][1]<body[-1]['bounds'][1]+body[-1]['bounds'][3]
@@ -88,6 +96,9 @@ def classify_native_choice(observation,rows,resources,rules=None):
                    and text==_normal(expected.replace('%STRING1',name))]
             if len(named)!=1:continue
             counterparty=named[0]
+        elif tag=='COUNCILTIME':
+            pattern=re.escape(_normal(expected)).replace(re.escape('%string0'),r'[a-z -]{2,40}').replace(re.escape('%string1'),r'[a-z -]{2,60}')
+            if not re.fullmatch(pattern,text):continue
         elif text!=_normal(expected):continue
         # Any competing title or option text outside this foreground cannot
         # masquerade as a complete second modal behind the proposed control.
@@ -105,8 +116,11 @@ def classify_native_choice(observation,rows,resources,rules=None):
             match='Complete original title and body, all ordered alternatives and sole observed OK',
             calibration=('Original isolated3950 F3 no-contact notice, frame48' if tag=='NOFOREIGN' else
                          'Original attempt011 treaty-break warning, frame1596' if tag=='ANNOYPEACE' else
+                         'Original attempt012 council prompt, frame1496' if tag=='COUNCILTIME' else
                          'Source and synthetic-layout validation; no original live modal capture yet'))
-        if _normal(title['text'])!=_normal(source['title']):
+        if tag=='COUNCILTIME':
+            evidence['title_recovery']=dict(raw=title['text'],source='Original012/1496 measured title; complete council body and both options required; observed date remains raw')
+        elif _normal(title['text'])!=_normal(source['title']):
             evidence['title_recovery']=dict(raw=title['text'],original_title=source['title'],
                 source=('Measured original3950 F3 Foreign Ifinister OCR; complete no-contact body independently required'
                         if tag=='NOFOREIGN' else

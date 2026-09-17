@@ -19,6 +19,14 @@ class CaptionYear(unittest.TestCase):
         self.assertEqual(old['text'],'City of Comae, 825 B.C., TEST unchanged')
         self.assertEqual(old['caption_year_consensus']['independent_scales'],2)
         self.assertEqual(len(old['provenance']),3)
+    def test_prefix_ad_only_changes_the_two_read_date_digits(self):
+        old,a,b=self.fixture()
+        old['text']='City of Comae, A.D. 325, TEST unchanged'
+        a['text']='City of Cumae, A.D. 825, P';b['text']='City of Comoe, 825 A.D., P'
+        self.recover(old,a,b)
+        self.assertEqual(old['text'],'City of Comae, A.D. 825, TEST unchanged')
+        self.assertEqual(old['caption_year_consensus']['old_year'],'325')
+        self.assertEqual(old['caption_year_consensus']['observed_year'],'825')
     def test_no_guessing_city_era_digits_or_geometry(self):
         for key,value in [('text','City of Comoe, 725 B.C., P'),('text','City of Other, 825 B.C., P'),
                           ('text','City of Comoe, 825 A.D., P'),('text','City of Comoe, 1825 B.C., P'),

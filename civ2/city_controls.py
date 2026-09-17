@@ -10,6 +10,7 @@ review only after its native transaction completes. A newly founded city absent
 from the save needs a fresh checkpoint before this module can bind its actor.
 """
 from copy import deepcopy
+from .dates import city_date_match,date_year
 import math
 import re
 
@@ -59,11 +60,10 @@ def _context(state, screen, reviewed, rules):
     if screen.get('supported') is not True or screen.get('kind') != 'city_screen':
         raise CityControlError('Only a complete supported native city screen enables city controls')
     title = screen.get('title')
-    match = re.match(r'^City of (.+?),\s*(\d{1,5})\s*(B\.?\s*C\.?|A\.?\s*D\.?)\b',
-                     title, re.I) if isinstance(title, str) else None
+    match = city_date_match(title)
     if not match:
         raise CityControlError('The native city name and displayed year must be readable')
-    year = int(match[2]) * (-1 if match[3][0].casefold() == 'b' else 1)
+    year = date_year(match[2])
     if type(state.get('year_raw')) is not int or state['year_raw'] != year:
         raise CityControlError('Displayed city year differs from the bound native save')
     player = state.get('player', {}).get('id')

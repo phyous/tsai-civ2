@@ -11,6 +11,7 @@ import re
 from PIL import Image,ImageChops
 from .gdi_text import (load_atlas,REGULAR_ATLAS_ID,REGULAR_ATLAS_SHA256,REGULAR_METRICS_SHA256)
 from .revision import prefixed_revision
+from .dates import city_date_match,date_key
 
 TITLE_TEMPLATE={'tag':'PRODUCTION','title':'What shall we build in %STRING0?',
                 'width':440,'body':'','options':[],'buttons':['Auto','Help'],'listbox':True}
@@ -21,7 +22,7 @@ PROOF_KIND='original-production-caption-pixels-v1'
 
 def _sha(value):return hashlib.sha256(value).hexdigest()
 def _canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
-def _year(text):return re.sub('[^a-z0-9]','',text.casefold())
+def _year(text):return date_key(text)
 
 
 def _controls(rows):
@@ -96,9 +97,9 @@ def _names(state,rows):
             if name in candidates:ambiguous.add(name)
             candidates[name]={'kind':'owned_native_city',**source_revision,
                               'city':{k:city[k] for k in ('id','owner','name','x','y')}}
-    headers=[re.match(r'city of .+?,\s*(\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',r['text'],re.I)
+    headers=[city_date_match(r['text'])
              for r in rows if r.get('confidence',0)>=.8 and 32<=r['bounds'][1]<=56]
-    years={_year(m[1]) for m in headers if m};notices=state.get('recent_founding_notices',[])
+    years={_year(m[2]) for m in headers if m};notices=state.get('recent_founding_notices',[])
     if len(years)==1 and isinstance(notices,list) and len(notices)<=4:
         for notice in notices:
             if (not isinstance(notice,dict) or notice.get('source_tag')!='FOUNDED'

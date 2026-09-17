@@ -229,3 +229,26 @@ without invented token counts or remote error text. Historical known failures
 can be declared late without rewriting their original requests. These changes
 improve accounting; they do not repair previously missing input receipts or
 constitute a completed victory.
+
+## Calendar transition and outbound diplomacy
+
+All three modern campaigns reached five cities. Attempt 012 crossed into AD 1
+and then AD 20. Original captions change from number-first BC dates to
+era-first AD dates; shared parsing now handles both while retaining the raw
+observed text and comparing explicit dates for city bindings. Damaged status
+glyphs require two agreeing pixel reads, never a date copied from native state.
+
+Attempt 010 opened the original Foreign Minister report and sent an emissary
+after selecting Check Intelligence repeatedly. The report currently supports
+the measured single-contact, no-embassy layout. Every button requires a model
+choice; an unchanged screen does not establish that a button is disabled.
+Multiple-contact and embassy reports still need coverage.
+
+Additional original map artwork and gray end-turn footer variants now have
+bounded pixel proofs, reducing unnecessary observation retries. The native
+observer also pauses immediately after its final capture. This improved one
+live verification from roughly 30 seconds to 1.5 seconds, but later blink
+phases still caused retries; it is not a general full-game speedup claim.
+
+These remain unfinished campaigns with continuous recordings, no between-turn
+saves, and the previously disclosed evidence gaps unchanged.

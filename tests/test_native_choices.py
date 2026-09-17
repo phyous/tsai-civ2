@@ -21,6 +21,9 @@ RULES={'leaders':[{'id':7,'tribe':'TEST Greeks'}]}
 
 
 def screen(tag):
+    if tag=='COUNCILTIME':
+        from tests.test_council_choice import observation as council_observation
+        return council_observation()
     resource=SOURCES[tag]
     body={
         'LANDFALL':['Shall we disembark, Sire, and leave the ships behind?'],
@@ -93,7 +96,7 @@ class NativeChoiceTests(unittest.TestCase):
             for case in ('partial','extra','low_confidence','moved'):
                 image=screen(tag)
                 if case=='partial':image['lines'][1]['text']=image['lines'][1]['text'][8:]
-                elif case=='extra':image['lines'].insert(2,row('Instead declare war now.',x=320,y=200,w=150,h=14))
+                elif case=='extra':image['lines'].insert(2,row('Instead declare war now.',x=320,y=116 if tag=='COUNCILTIME' else 200,w=150,h=14))
                 elif case=='low_confidence':image['lines'][1]['confidence']=.4
                 else:image['lines'][1]['center'][0]+=130;image['lines'][1]['bounds'][0]+=130
                 with self.subTest(tag=tag,case=case):self.assertFalse(self.classify(tag,image)['supported'])

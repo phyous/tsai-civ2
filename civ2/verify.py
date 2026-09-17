@@ -14,6 +14,7 @@ import json
 import math
 from pathlib import Path, PurePosixPath
 import re
+from .dates import city_date_match,date_year
 import shutil
 import subprocess
 
@@ -623,9 +624,9 @@ def _action_binding(action, request, question, saves, *, forced=False):
                  and set(pre['reviewed_action_ids']) <= {'change_production','open_buy_quote'}
                  and identifier not in pre['reviewed_action_ids'], 'City control observation binding is invalid')
         title = pre.get('observed_city_title')
-        match = re.match(r'^City of (.+?),\s*(\d{1,5})\s*(B\.?\s*C\.?|A\.?\s*D\.?)\b',title,re.I) if isinstance(title,str) else None
+        match = city_date_match(title)
         _require(match is not None
-                 and int(match[2])*(-1 if match[3][0].casefold()=='b' else 1) == state['year_raw'],
+                 and date_year(match[2]) == state['year_raw'],
                  'City control title differs from its native city and year')
         normalized=lambda value:' '.join(value.casefold().split())
         if normalized(match[1])!=normalized(actor['name']):

@@ -20,6 +20,7 @@ import math
 import re
 import unicodedata
 from .native_events import EVENT_TITLES, classify_information
+from .dates import DATE_PATTERN,city_date_match,date_key,date_parts
 from .map_badges import proven_badge
 from .tax_controls import proven_tax_arrows
 from .exchange_picker import classify_exchange_picker
@@ -27,6 +28,7 @@ from .acquisition_notice import classify_acquisition_notice
 from .production_change import classify_production_change
 from .history_notice import classify_history_notice
 from .native_choices import classify_native_choice
+from .foreign_report import classify_foreign_report
 from .native_map import evidence_for as native_map_evidence
 from .gdi_titles import exact_production_title
 
@@ -190,16 +192,16 @@ def _saved_city_name(raw_name,state):
 def _recent_founded_name(raw_name,year_text,state):
     """A same-year native founding notice binds a label, never a SAV actor."""
     if not isinstance(state,dict) or not isinstance(raw_name,str) or len(_normal(raw_name))<3:return None
-    if not isinstance(year_text,str) or not re.fullmatch(r'\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?)',year_text,re.I):return None
+    if date_parts(year_text) is None:return None
     notices=state.get('recent_founding_notices',[])
     if not isinstance(notices,list) or len(notices)>4:return None
-    year=re.sub(r'[^a-z0-9]','',year_text.casefold());matches=[]
+    year=date_key(year_text);matches=[]
     for notice in notices:
         if (not isinstance(notice,dict) or notice.get('source_tag')!='FOUNDED'
                 or not re.fullmatch('[a-f0-9]{64}',str(notice.get('image_sha256','')))
                 or not isinstance(notice.get('name'),str) or not 3<=len(notice['name'])<=60
                 or not isinstance(notice.get('year_text'),str)
-                or re.sub(r'[^a-z0-9]','',notice['year_text'].casefold())!=year):continue
+                or date_key(notice['year_text'])!=year):continue
         if _edit_distance(_normal(raw_name),_normal(notice['name']))<=1:matches.append(notice)
     return matches[0] if len(matches)==1 else None
 
@@ -347,7 +349,7 @@ def _native_map_kind(rows, observation, state, native_map_context=None):
         return None, 'Native map and world pane titles are incomplete'
     status=[r for r in rows if r['bounds'][0]>=466 and 175<=r['center'][1]<=246]
     people=[r for r in status if re.fullmatch(r'[0-9,]+\s+people',r['normal'])]
-    years=[r for r in status if re.fullmatch(r'\d{1,5}\s*(?:b\.?\s*c\.?|a\.?\s*d\.?)',r['normal'])]
+    years=[r for r in status if date_parts(r['normal']) is not None]
     # Original narrow status-font 1 is observed as I/l and 5 as E. This is only a pane
     # layout marker, never an OCR-derived treasury value; economy comes from SAV.
     gold=[r for r in status if re.fullmatch(r'[0-9ile,]{1,16}\s+(?:gold|cold)(?:\s+[0-9.]+)?',r['normal'])]
@@ -474,7 +476,7 @@ def _city_layout_without_unit_captions(rows, observation, missing):
            and r['normal'] not in ('units supported','units present') for r in rows):
         return None  # A clipped caption can be an occluded background window.
     titles=[r for r in rows if 32<=r['bounds'][1]<=56 and r['confidence']>=.8
-            and re.match(r'^City of .+?,\s*\d{1,5}\s*(?:B\.?\s*C\.?|A\.?\s*D\.?)',r['text'],re.I)]
+            and city_date_match(r['text'])]
     if len(titles)!=1:
         return None
     # Native 640x480 pane regions, corroborated by the actual original labels.
@@ -650,6 +652,12 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         result['evidence'].update(production_change['evidence'])
         return finish('production_change_choice',production_change['title'],production_change['options'],
                       production_change['buttons'],model=True)
+    foreign_report=classify_foreign_report(observation,rows,dialog_resources(game_text or ''),rules,labels_text)
+    if foreign_report:
+        result['resource_tag']=foreign_report['resource_tag']
+        result['evidence'].update(foreign_report['evidence'])
+        return finish(foreign_report['kind'],foreign_report['title'],foreign_report['options'],
+                      foreign_report['buttons'],model=True)
     native_choice=classify_native_choice(observation,rows,dialog_resources(game_text or ''),rules)
     if native_choice:
         result['resource_tag']=native_choice['resource_tag']
@@ -843,15 +851,15 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         # The illustrated notice can expose unrelated map labels outside its
         # horizontal body band. Only the single actual founding line establishes
         # the notice; other text inside that band would be an unknown modal.
-        matching=[(r,re.fullmatch(r'(.+?)\s+founded\s*:\s*(\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',r['normal'])) for r in body]
-        matching=[(r,m) for r,m in matching if m]
+        matching=[(r,re.fullmatch(rf'(.+?)\s+founded\s*:\s*({DATE_PATTERN})',r['normal'],re.I)) for r in body]
+        matching=[(r,m) for r,m in matching if m and date_parts(m[2]) is not None]
         if len(matching)!=1 or len(body)!=1 or matching[0][0]['confidence']<.8:
             return unknown('Founding notice lacks one complete original founded-city line','founding_notice',title['text'])
         if len(button_rows)!=1 or button_rows[0]['normal']!='ok' or button_rows[0]['confidence']<.8:
             return unknown('Founding notice requires one observed OK button','founding_notice',title['text'])
         result['resource_tag']='FOUNDED'
         result['founded_city']={'name':re.split(r'\s+founded\s*:',matching[0][0]['text'],maxsplit=1,flags=re.I)[0].strip(),
-                                'year_text':matching[0][1].group(2),'source':'Original founding notice text'}
+                                'year_text':re.split(r'\s+founded\s*:',matching[0][0]['text'],maxsplit=1,flags=re.I)[1].strip(),'source':'Original founding notice text'}
         result['observed_city_name']=result['founded_city']['name']
         ok=_option(button_rows[0],'button')
         return finish('information',title['text'],[ok],[ok],mechanical='acknowledge_information',
@@ -864,8 +872,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                  and t['title']=='The High Council: %STRING2' and t['width']==320
                  and t['options']==['Consult High Council.','No thanks, too busy.']
                  and not t['buttons'] and not t['listbox']]
-        titles=[r for r in rows if (m:=re.fullmatch(r'(.+?):\s*(\d{1,5}\s*(?:b\.?\s*c\.?|a\.?\s*d\.?))',r['normal']))
-                and _edit_distance(m[1],'the high council')<=4 and r['confidence']>=.8]
+        titles=[r for r in rows if (m:=re.fullmatch(rf'(.+?):\s*({DATE_PATTERN})',r['normal'],re.I))
+                and date_parts(m[2]) is not None and _edit_distance(m[1],'the high council')<=4 and r['confidence']>=.8]
         if len(council)==len(titles)==1:
             title=titles[0];body,controls,_=body_rows(title,{'ok','cancel','yes','no','help'},320)
             expected={_normal(t) for t in council[0]['options']}
@@ -978,9 +986,9 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         # A provisional OCR name can coexist with its later native-save name.
         # Fold only uniquely corroborated aliases instead of making that single
         # city appear to be two competing identities.
-        headers=[re.match(r'city of .+?,\s*(\d{1,5}\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',r['text'],re.I)
+        headers=[city_date_match(r['text'])
                  for r in rows if r['confidence']>=.8 and 32<=r['bounds'][1]<=56]
-        header_years={m[1] for m in headers if m};header_year=next(iter(header_years)) if len(header_years)==1 else None
+        header_years={m[2] for m in headers if m};header_year=next(iter(header_years)) if len(header_years)==1 else None
         city_names={(_saved_city_name(name,state) or _recent_founded_name(name,header_year,state) or {}).get('name',name) for name in city_names}
         rule_names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[]) if r.get('name') and r['name']!='Nothing'}
         approximate=[]
@@ -1480,10 +1488,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             result['evidence']['city_resource_map']={key:{field:matches[0][field]
                 for field in ('center','bounds','source_line')} for key,matches in anchors.items()}
         titles=[r for r in rows if 32<=r['bounds'][1]<=56 and r['confidence']>=.8
-                and re.match(r'^City of .+?,\s*\d{1,5}\s*(?:B\.?\s*C\.?|A\.?\s*D\.?)',r['text'],re.I)]
+                and city_date_match(r['text'])]
         title=titles[0]['text'] if len(titles)==1 else 'Original city screen'
         if len(titles)==1:
-            match=re.match(r'city of (.+?),\s*(\d+\s+(?:b\.?\s*c\.?|a\.?\s*d\.?))',titles[0]['text'],re.I)
+            match=city_date_match(titles[0]['text'])
             if match:
                 raw_name=match[1].strip()
                 result['observed_city_name']=raw_name

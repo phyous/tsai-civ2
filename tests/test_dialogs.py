@@ -684,9 +684,9 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(classify_dialog(recognize(p),state=state)['kind'],'normal_map')
 
     def test_map_status_year_allows_no_separator_but_requires_complete_era(self):
-        for text in ('1650B.C.','1650 B.C.','AD1650','1650','1650C','1650BC warning'):
+        for text in ('1650B.C.','1650 B.C.','AD1650','A.D. 1','AD0','AD1650BC','1650','1650C','1650BC warning'):
             o=native_map();o['lines'][5]['text']=text
-            expected=text in ('1650B.C.','1650 B.C.')
+            expected=text in ('1650B.C.','1650 B.C.','AD1650','A.D. 1')
             self.assertEqual(classify_dialog(o,state=ROMAN_STATE)['supported'],expected,text)
 
     def test_menu_and_government_text_alone_do_not_identify_native_map(self):

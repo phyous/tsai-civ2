@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 import zipfile
 from copy import deepcopy
+from .dates import city_date_match,date_key
 from functools import lru_cache
 from .city_controls import CityControlError, city_control_candidates, city_labor_result
 from .dialogs import classify_dialog
@@ -72,7 +73,7 @@ def classification_state(session):
 def observed_city_identity(dialog):
     # Identity includes the visible year so two cities or later turns cannot
     # share a production-review flag. OCR body resources remain separate.
-    match = re.match(r'City of (.+?),\s*(\d+\s*(?:B\.?\s*C\.?|A\.?\s*D\.?))', dialog.get('title',''), re.I)
+    match = city_date_match(dialog.get('title',''))
     if not match:
         return None
     name = dialog.get('observed_city_name', match[1])
@@ -83,7 +84,7 @@ def observed_city_identity(dialog):
         if not isinstance(proof,dict) or proof.get('ocr_text') != match[1] or proof.get('canonical_name') != name:
             return None
         if proof.get('source') == 'Unique same-year original founding notice label; no native actor binding':
-            year=lambda value:re.sub(r'[^0-9A-Z]','',value.upper())
+            year=date_key
             if (not isinstance(proof.get('year_text'),str) or year(proof['year_text'])!=year(match[2])
                     or not re.fullmatch(r'[a-f0-9]{64}',str(proof.get('notice_image_sha256','')))
                     or type(proof.get('source_line')) is not int or proof['source_line']<0):
@@ -91,7 +92,7 @@ def observed_city_identity(dialog):
         elif proof.get('source') not in ('Unique one-edit match to owned city in original save',
                                          'Unique one-edit match to owned city in live memory observation'):
             return None
-    return name,re.sub(r'[^0-9A-Z]','',match[2].upper())
+    return name,date_key(match[2])
 
 
 def city_control_transition(session, context, observation, dialog):

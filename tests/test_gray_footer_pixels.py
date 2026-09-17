@@ -78,3 +78,30 @@ class FooterPixelsTests(TestCase):
             self.assertEqual([r['bounds'][1] for r in rows],[441,453])
             image.putpixel((480,450),(0,0,0))
             self.assertFalse(footer.annotate_footer(image,[],'a'*64))
+
+    def test_lower_layout_exact_pair_preserves_all484_glyphs(self):
+        paths=[Path('runs/attempt-011/screens/ui-0001896.png'),Path('runs/attempt-011/screens/ui-0001917.png'),
+               Path('runs/attempt-011/screens/ui-0000503.png')]
+        if not all(p.exists() for p in paths):self.skipTest('Private original calibration unavailable')
+        white,gray,prior=[Image.open(p).convert('RGB').crop(footer.CROP) for p in paths]
+        self.assertEqual(hashlib.sha256(paths[0].read_bytes()).hexdigest(),footer.LOWER_WHITE_SOURCE_SHA256)
+        self.assertEqual(hashlib.sha256(paths[1].read_bytes()).hexdigest(),footer.LOWER_GRAY_SOURCE_SHA256)
+        self.assertEqual(hashlib.sha256(white.tobytes()).hexdigest(),footer.LOWER_WHITE_CROP_SHA256)
+        self.assertEqual(hashlib.sha256(gray.tobytes()).hexdigest(),footer.LOWER_GRAY_CROP_SHA256)
+        self.assertEqual([(a,b)for a,b in zip(white.getdata(),gray.getdata())if a!=b],
+                         [((255,255,255),(134,134,134))]*484)
+        glyphs=lambda im:{(i%im.width,i//im.width)for i,p in enumerate(im.getdata())if p==(255,255,255)}
+        self.assertEqual(glyphs(white),{(x,y+2)for x,y in glyphs(prior)})
+        o=recognize(paths[1]);lines=[r for r in o['lines'] if r['bounds'][0]>=466 and r['center'][1]>440]
+        self.assertEqual([r['text']for r in lines],['End of Turn','(Press ENTER)'])
+        self.assertEqual([r['bounds'][1]for r in lines],[447,459])
+
+    def test_lower_variant_rejects_changed_pixels_and_crossing_rows(self):
+        image=Image.new('RGB',(640,480),(91,92,93));digest=hashlib.sha256(image.crop(footer.CROP).tobytes()).hexdigest()
+        with mock.patch.object(footer,'LOWER_GRAY_CROP_SHA256',digest):
+            rows=[];self.assertTrue(footer.annotate_footer(image,rows,'a'*64))
+            self.assertEqual([r['bounds'][1]for r in rows],[447,459])
+            crossing=[dict(text='TEST crosses crop',bounds=[450,445,60,12],confidence=1.)]
+            self.assertFalse(footer.annotate_footer(image,crossing,'a'*64))
+            image.putpixel((480,450),(0,0,0))
+            self.assertFalse(footer.annotate_footer(image,[],'a'*64))

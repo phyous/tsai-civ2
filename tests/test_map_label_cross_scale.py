@@ -81,14 +81,16 @@ class MapLabelCrossScale(unittest.TestCase):
         self.assertEqual(label['provenance'][0]['text'],'Antumn')
         self.assertEqual(o['sha256'],hashlib.sha256(before).hexdigest())
         self.assertEqual(path.read_bytes(),before)
-        # The actual paused footer is a separate imperfect blink phase. The
-        # recovered name removes only the playfield-text blocker.
+        footer=next(r for r in o['lines'] if r['text']=='End of Turn')
+        self.assertEqual(footer['provenance'][0]['preprocessing'],'exact_original_gray_footer_rgb_sha256')
+        # The name and the separate exact-pixel gray footer proof together
+        # establish this original end-turn frame.
         from civ2.memory import parse_memory
         from civ2.run import game_text,labels_text
         state=parse_memory((root/'runs/attempt-012/observations/d000133.json').read_bytes())
         d=classify_dialog(o,state=state,game_text=game_text(),labels_text=labels_text())
-        self.assertEqual(d['reason'],'Native moving-unit or end-of-turn status is not uniquely observed')
-        self.assertFalse(d['supported'])
+        self.assertTrue(d['supported'],d)
+        self.assertEqual(d['kind'],'end_turn')
 
 
 if __name__=='__main__':unittest.main()

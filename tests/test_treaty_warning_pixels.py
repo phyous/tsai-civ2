@@ -22,6 +22,24 @@ def fixture():
 
 
 class TreatyWarningTests(unittest.TestCase):
+    def test_period_requires_paired_pixels_and_unchanged_warning_and_options(self):
+        for mode in ('valid','disagreement','different_option','missing_warning'):
+            o=fixture();rows=o['lines'];rows[1]['text']='We have signed a peace treaty with the'
+            rows[5]['text']='Break treaty';rows[5]['provenance']=[{'preprocessing':'native','text':'Break treaty'}]
+            a=deepcopy(rows[5]);a['text']='Break treaty.';a['provenance']=[{'preprocessing':'rgb2','text':a['text']}]
+            b=deepcopy(a)
+            if mode=='disagreement':b['text']='Break treaty'
+            elif mode=='different_option':a['text']=b['text']='Cancel action.'
+            elif mode=='missing_warning':rows[3]['text']='Different words!'
+            before=deepcopy(rows)
+            with self.subTest(mode=mode),patch('civ2.observe._crop_text',side_effect=[[a],[b]]):
+                _recover_treaty_warning(Image.new('RGB',(640,480)),rows,None,None,{})
+            if mode=='valid':
+                self.assertEqual(rows[5]['text'],'Break treaty.')
+                self.assertEqual(rows[5]['provenance'][0]['text'],'Break treaty')
+                self.assertEqual(len(rows[5]['provenance']),3)
+            else:self.assertEqual(rows,before)
+
     def test_recovery_needs_paired_pixels_and_every_warning_and_option(self):
         for mode in ('valid','disagreement','weak','location','missing_warning','missing_option','other_nation'):
             o=fixture();rows=o['lines'];before=deepcopy(rows)
@@ -65,6 +83,18 @@ class TreatyWarningTests(unittest.TestCase):
         self.assertIn('reputation will be damaged',d['visible_text'])
         self.assertEqual([x['text'] for x in d['options']],['Cancel action.','Break treaty.'])
         self.assertEqual(p.read_bytes(),data)
+
+    def test_actual_german_warning_option_final_period(self):
+        p=Path('runs/attempt-010/screens/ui-0001905.png');bundle=Path('engine/game/civ2-win31.zip')
+        if not p.exists() or not bundle.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original assets absent')
+        with zipfile.ZipFile(bundle) as z:
+            rules=parse_rules(z.read('civ2/RULES.TXT').decode('cp1252'));game=z.read('civ2/GAME.TXT').decode('cp1252')
+        o=recognize(p);d=classify_dialog(o,game_text=game,rules=rules)
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model']);self.assertIsNone(d['mechanical_action'])
+        self.assertEqual(d['resource_tag'],'ANNOYPEACE')
+        self.assertEqual([x['text'] for x in d['options']],['Cancel action.','Break treaty.'])
+        recovered=next(r for r in o['lines'] if r['text']=='Break treaty.')
+        self.assertEqual([r['text'] for r in recovered['provenance']],['Break treaty','Break treaty.','Break treaty.'])
 
 
 if __name__=='__main__':unittest.main()

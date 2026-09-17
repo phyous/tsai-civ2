@@ -16,7 +16,7 @@ class ProductionArtworkTests(unittest.TestCase):
         for peer,accepted in ((good,True),(prepared('What shall me buokd in ELSE?',226,96,188,16),False)):
             rows=[copy.deepcopy(original),prepared('Auto',150,370,30,16),
                   prepared('Help',300,370,30,16),prepared('OK',465,370,24,16)]
-            with patch.object(observe,'_crop_text',side_effect=[[good],[peer],[good],[peer],[good],[peer]]):
+            with patch.object(observe,'_crop_text',side_effect=[[good],[peer]]*4):
                 observe._recover_city_and_production_rows(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
             self.assertEqual(rows[0]['text'],good['text'] if accepted else original['text'])
 

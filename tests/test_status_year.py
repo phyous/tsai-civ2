@@ -13,6 +13,39 @@ def row(text='1250 В.C.',x=475,y=216):
 
 
 class StatusYearTests(unittest.TestCase):
+    def test_damaged_prefix_era_still_requires_exact_digits_and_two_reads(self):
+        for first,second in (('A.D. 20','A.D. 20'),('A.D. 20','A.D. 21'),('B.C. 20','B.C. 20'),('A.D. 21','A.D. 21')):
+            rows=[row('ALD. 20')]
+            with mock.patch('civ2.observe._crop_text',side_effect=[[row(first)],[row(second)]]):
+                _recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[0]['text'],'A.D. 20' if first==second=='A.D. 20' else 'ALD. 20')
+
+    def test_actual_damaged_ad_prefix_era(self):
+        from civ2.observe import recognize
+        path=Path('runs/attempt-012/screens/ui-0001547.png')
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        result=recognize(path)
+        dates=[r for r in result['lines'] if r['text']=='A.D. 20' and r['bounds'][0]>=470]
+        self.assertEqual(len(dates),1)
+        self.assertEqual([p['text'] for p in dates[0]['provenance']],['ALD. 20','A.D. 20','A.D. 20'])
+
+    def test_ad_prefix_single_glyph_needs_two_identical_pixel_reads(self):
+        for first,second in (('A.D. 1','A.D. 1'),('A.D. 1','A.D. 2'),('1 B.C.','1 B.C.'),('A.D. 11','A.D. 11')):
+            rows=[row('A.D. J')]
+            with mock.patch('civ2.observe._crop_text',side_effect=[[row(first)],[row(second)]]):
+                _recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[0]['text'],'A.D. 1' if first==second=='A.D. 1' else 'A.D. J')
+            self.assertEqual(rows[0]['provenance'][0]['text'],'A.D. J')
+
+    def test_actual_first_ad_year_from_pixels(self):
+        from civ2.observe import recognize
+        path=Path('runs/attempt-012/screens/ui-0001533.png')
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        result=recognize(path)
+        dates=[r for r in result['lines'] if r['text']=='A.D. 1' and r['bounds'][0]>=470]
+        self.assertEqual(len(dates),1)
+        self.assertEqual([p['text'] for p in dates[0]['provenance']],['A.D. J','A.D. 1','A.D. 1'])
+
     def test_two_pixel_reads_recover_only_era_and_preserve_raw_provenance(self):
         rows=[row()];a=row('1250 B.C.');b=deepcopy(a)
         a['provenance']=[{'preprocessing':'rgb3','text':a['text']}]
