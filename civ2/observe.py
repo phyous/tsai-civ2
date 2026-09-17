@@ -268,6 +268,51 @@ def _replace_crop_row(rows, index, candidates, predicate):
 
 
 @lru_cache(maxsize=1)
+def _research_names():
+    """Original public advance labels; never derive names from game state."""
+    try:
+        from .boot import original_rules
+        from .save import parse_rules
+        return frozenset(r['name'].casefold() for r in parse_rules(original_rules()).get('advances',[])
+                         if r.get('name'))
+    except (OSError,ValueError,KeyError):
+        return frozenset()
+
+
+def _recover_research_rows(image,rows,executable,directory,evidence):
+    """Re-read selected white research text only in a corroborated native list."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if re.fullmatch(r'wh(?:at|ait) discovery shall our wise men p(?:ur|or)sue[?!]?',r['text'],re.I)
+            and r['confidence']>=.8 and 60<r['center'][1]<350]
+    if len(titles)!=1:return
+    title=titles[0];names=_research_names()
+    buttons=[r for r in rows if r['text'].strip().casefold() in ('help','goal','ok') and r['center'][1]>title['center'][1]]
+    if (not names or len(buttons)!=3 or {r['text'].strip().casefold() for r in buttons}!={'help','goal','ok'}
+            or any(r['confidence']<.8 for r in buttons)
+            or max(r['center'][1] for r in buttons)-min(r['center'][1] for r in buttons)>8):return
+    bottom=min(r['center'][1] for r in buttons)
+    body=[r for r in rows if title['center'][1]+8<r['center'][1]<bottom-8
+          and abs(r['center'][0]-title['center'][0])<150]
+    if sum(r['text'].casefold() in names and r['confidence']>=.8 for r in body)<2:return
+    for index,row in enumerate(rows):
+        if (row not in body or row['confidence']<.8 or row['text'].casefold() in names
+                or not re.fullmatch(r'[A-Za-z ]{5,80}',row['text'])):continue
+        x,y,w,h=row['bounds'];pixels=list(image.convert('RGB').crop((x,y,x+w,y+h)).getdata())
+        if not pixels or sum(min(p)>=230 for p in pixels)/len(pixels)<.08:continue
+        first=_crop_text(image,row,f'research_name_{index}_2x',executable,directory,evidence,padding=(3,3),scale=2)
+        second=_crop_text(image,row,f'research_name_{index}_gray_2x',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
+        if (len(first)==len(second)==1 and first[0]['text']==second[0]['text']
+                and second[0]['confidence']>=.8 and _same_location(row,second[0])
+                and _replace_crop_row(rows,index,first,lambda old,new:new.casefold() in names
+                                      and _near_text(old.casefold(),new.casefold(),2))):
+            rows[index]['provenance']+=second[0]['provenance']
+            # The crop establishes the label, not a new target. Keep the
+            # original independently observed row hit point and its geometry.
+            for key in ('x','y','width','height','bounds','center'):
+                rows[index][key]=row[key]
+
+
+@lru_cache(maxsize=1)
 def _production_names():
     """Public original label vocabulary only; no save state or guessed words."""
     try:
@@ -660,6 +705,30 @@ def _recover_treasury_marker(image,rows,executable,directory,evidence):
                 or not _same_location(a[0],b[0]) or not _same_location(old,b[0])
                 or not re.fullmatch(pattern,a[0]['text'].casefold())):continue
         if _replace_crop_row(rows,index,a,lambda before,after:True):rows[index]['provenance']+=b[0]['provenance']
+
+
+def _recover_status_year(image,rows,executable,directory,evidence):
+    """Recover a malformed era from two reads of the native status row pixels.
+
+    The numerical year must remain unchanged. This is a layout marker, not an
+    authority for the current game year, which comes from the native observer.
+    """
+    if image.size!=(640,480):return
+    pattern=r'([0-9]{1,5})\s+(?:B\.?\s*C\.?|A\.?\s*D\.?)'
+    for index,old in enumerate(rows):
+        x,y,w,h=old['bounds']
+        raw=re.fullmatch(r'([0-9]{1,5})\s+[^\s]{1,8}',old['text'])
+        if (not x>=470 or not 210<=y<=232 or w>160 or h>24 or raw is None
+                or re.fullmatch(pattern,old['text'],re.I)):continue
+        a=_crop_text(image,old,'status_year_rgb3',executable,directory,evidence,padding=(3,3))
+        b=_crop_text(image,old,'status_year_gray3',executable,directory,evidence,padding=(3,3),grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(a[0],b[0]) or not _same_location(old,b[0])):continue
+        complete=re.fullmatch(pattern,a[0]['text'],re.I)
+        if complete is None or complete[1]!=raw[1]:continue
+        if _replace_crop_row(rows,index,a,lambda before,after:True):
+            rows[index]['provenance']+=b[0]['provenance']
 
 
 def _recover_diplomacy_intro(image,rows,executable,directory,evidence):
@@ -1117,8 +1186,8 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_history_rows,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_population_notice,_recover_treasury_marker,_recover_diplomacy_intro,_recover_herald_panel,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+            for recover in (_recover_history_rows,_recover_research_rows,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+                            _recover_saved_caption,_recover_acquisition_line,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
