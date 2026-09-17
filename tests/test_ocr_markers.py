@@ -51,6 +51,28 @@ class MarkerTests(unittest.TestCase):
         self.assertEqual(sum(x['text']==intro['text'] for x in intro['provenance']),2)
         self.assertEqual(data,p.read_bytes())
 
+    def test_joined_amount_marker_still_requires_two_actual_agreeing_reads(self):
+        original=dict(text='131Cold 4.0.6',bounds=[474,230,80,10],center=[514,235],confidence=1.,
+                      provenance=[{'text':'131Cold 4.0.6','preprocessing':'native'}])
+        for mode in ('valid','disagree','word'):
+            rows=[deepcopy(original)];a={**deepcopy(original),'text':'137 Gold 4.0.6'};b=deepcopy(a)
+            if mode=='disagree':b['text']='138 Gold 4.0.6'
+            elif mode=='word':rows[0]['text']='Scold 4.0.6'
+            before=deepcopy(rows)
+            with patch('civ2.observe._crop_text',side_effect=[[a],[b]]) as crop:
+                _recover_treasury_marker(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            if mode=='valid':self.assertEqual(rows[0]['text'],'137 Gold 4.0.6')
+            else:self.assertEqual(rows,before)
+            if mode=='word':crop.assert_not_called()
+
+    def test_actual_joined_treasury_is_only_a_layout_marker(self):
+        p=Path('runs/attempt-011/screens/ui-0001689.png')
+        if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original frame absent')
+        o=recognize(p);r=next(r for r in o['lines'] if r['text']=='137 Gold 4.0.6')
+        self.assertIn('131Cold 4.0.6',[x['text'] for x in r['provenance']])
+        self.assertGreaterEqual(sum(x['text']==r['text'] for x in r['provenance']),2)
+        self.assertNotIn('gold_value',r)
+
     def test_disagreeing_wrong_location_and_non_marker_crops_do_not_replace(self):
         original=dict(text='BT Cold 4.0.6',bounds=[474,230,80,10],center=[514,235],confidence=1.,
                       provenance=[{'text':'BT Cold 4.0.6','preprocessing':'native'}])

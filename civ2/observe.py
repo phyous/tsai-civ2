@@ -896,7 +896,7 @@ def _recover_treasury_marker(image,rows,executable,directory,evidence):
     for index,old in enumerate(rows):
         x,y,w,h=old['bounds']
         if (not x>=470 or not 220<=y<=242 or w>168 or h>24
-                or not re.search(r'\b(?:gold|cold)\b',old['text'],re.I)
+                or not re.search(r'(?<![A-Za-z])(?:gold|cold)\b',old['text'],re.I)
                 or re.fullmatch(pattern,old['text'].casefold())):continue
         readings=[_crop_text(image,old,'treasury_marker_'+name,executable,directory,evidence,
                             padding=(3,3),grayscale=gray) for name,gray in (('rgb3',False),('gray3',True))]
@@ -911,36 +911,52 @@ def _recover_treasury_marker(image,rows,executable,directory,evidence):
 def _recover_status_year(image,rows,executable,directory,evidence):
     """Recover a malformed date from two reads of the native status row pixels.
 
-    Readable numerical digits must remain unchanged. A single nonnumeric year
-    glyph may be recovered only with an intact era and two agreeing pixel reads.
+    Readable numerical digits must remain unchanged. At most two nonnumeric
+    year glyphs may be recovered with a recognizable era and two agreeing reads.
     This is a layout marker, not the authority for the native game year.
     """
     if image.size!=(640,480):return
     pattern=r'([0-9]{1,5})\s+(?:B\.?\s*C\.?|A\.?\s*D\.?)'
+    era_glyphs=str.maketrans({'В':'B','в':'b','С':'C','с':'c'})
     for index,old in enumerate(rows):
         x,y,w,h=old['bounds']
         raw=re.fullmatch(r'([0-9]{1,5})\s+[^\s]{1,8}',old['text'])
-        damaged=re.fullmatch(r'([0-9A-Za-z]{2,5})\s+(B\.?\s*C\.?|A\.?\s*D\.?)',old['text'],re.I)
-        if damaged is not None and sum(not c.isdigit() for c in damaged[1])!=1:damaged=None
+        damaged=re.fullmatch(r'([0-9A-Za-zА-Яа-я]{2,5})\s+([BВ]\.?\s*[CС]\.?|A\.?\s*D\.?)',old['text'],re.I)
+        if damaged is not None and (not 1<=sum(not c.isdigit() for c in damaged[1])<=2
+                                    or not any(c.isdigit() for c in damaged[1])):damaged=None
         if (not x>=470 or not 210<=y<=232 or w>160 or h>24 or (raw is None and damaged is None)
                 or re.fullmatch(pattern,old['text'],re.I)):continue
+        def compatible(number,text):
+            if raw is not None:return number==raw[1]
+            return (len(number)==len(damaged[1])
+                    and all(not before.isdigit() or before==after for before,after in zip(damaged[1],number))
+                    and re.sub(r'[^A-Za-z]','',text).casefold()==re.sub(r'[^A-Za-z]','',damaged[2].translate(era_glyphs)).casefold())
+        def agrees(a,b):
+            return (len(a)==len(b)==1 and a[0]['text']==b[0]['text']
+                    and min(a[0]['confidence'],b[0]['confidence'])>=.8
+                    and _same_location(a[0],b[0]) and _same_location(old,b[0]))
         for scale in (3,2):
             a=_crop_text(image,old,f'status_year_rgb{scale}',executable,directory,evidence,padding=(3,3),scale=scale)
             b=_crop_text(image,old,f'status_year_gray{scale}',executable,directory,evidence,padding=(3,3),grayscale=True,scale=scale)
-            if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
-                    or min(a[0]['confidence'],b[0]['confidence'])<.8
-                    or not _same_location(a[0],b[0]) or not _same_location(old,b[0])):break
+            if not agrees(a,b):break
             complete=re.fullmatch(pattern,a[0]['text'],re.I)
+            normalized=a[0]['text'].translate(era_glyphs)
+            corroborated=re.fullmatch(pattern,normalized,re.I)
+            if (complete is None and scale==3 and a[0]['text']!=old['text']
+                    and corroborated is not None and compatible(corroborated[1],normalized)):
+                # The first pair can read digits correctly yet use a Cyrillic
+                # era glyph. A wider crop must read the complete ASCII date
+                # itself; never rewrite that glyph or consult native state.
+                a=_crop_text(image,old,'status_year_wide_rgb3',executable,directory,evidence,padding=(6,3),scale=3)
+                b=_crop_text(image,old,'status_year_wide_gray3',executable,directory,evidence,padding=(6,3),grayscale=True,scale=3)
+                if not agrees(a,b):break
+                complete=re.fullmatch(pattern,a[0]['text'],re.I)
             if complete is None:
                 # A second scale is useful only when both first crops repeat
                 # the original malformed reading, not when they contradict it.
                 if scale==3 and a[0]['text']==old['text']:continue
                 break
-            year_matches=(complete[1]==raw[1]) if raw is not None else (
-                len(complete[1])==len(damaged[1])
-                and all(not before.isdigit() or before==after for before,after in zip(damaged[1],complete[1]))
-                and re.sub(r'[^A-Za-z]','',a[0]['text']).casefold()==re.sub(r'[^A-Za-z]','',damaged[2]).casefold())
-            if year_matches and _replace_crop_row(rows,index,a,lambda before,after:True):
+            if compatible(complete[1],a[0]['text']) and _replace_crop_row(rows,index,a,lambda before,after:True):
                 rows[index]['provenance']+=b[0]['provenance']
             break
 
@@ -1134,6 +1150,31 @@ def _recover_treaty_reminder(image,rows,executable,directory,evidence):
         if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
 
 
+def _recover_intruder_notice(image,rows,executable,directory,evidence):
+    """Read one clipped source word in a complete native treaty warning."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary') and r['confidence']>=.8
+              and 280<=r['center'][0]<=350 and 150<=r['center'][1]<=210]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    title,ok=headings[0],controls[0]
+    if abs(title['center'][0]-ok['center'][0])>8 or not 90<=ok['center'][1]-title['center'][1]<=130:return
+    body=sorted((r for r in rows if 190<=r['bounds'][0]<=210
+                 and title['center'][1]+12<r['center'][1]<ok['center'][1]-12),key=lambda r:r['center'][1])
+    if (len(body)!=4 or body[0]['text']!='"Your troops have violated the territory of ou'
+            or not re.fullmatch(r'city of [A-Za-z -]{2,60}\. By the terms of our peace',body[1]['text'])
+            or body[2]['text']!='treaty, you must withdraw immediately or face'
+            or body[3]['text']!='the consequences!"'):return
+    old=body[0];wanted='"Your troops have violated the territory of our'
+    a=_crop_text(image,old,'intruder_first_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+    b=_crop_text(image,old,'intruder_first_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+    if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']==wanted
+            and min(a[0]['confidence'],b[0]['confidence'])>=.8
+            and _same_location(old,a[0]) and _same_location(a[0],b[0])):
+        index=rows.index(old)
+        if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+
+
 def _recover_herald_title(image,rows,executable,directory,evidence):
     """Read a damaged Emissary suffix twice without changing nation or attitude."""
     if image.size!=(640,480):return
@@ -1244,12 +1285,16 @@ def _recover_herald_options(image,rows,executable,directory,evidence):
     words=lambda text:re.findall(r'[A-Za-z0-9]+',text)
     for old in candidates:
         observed_words=words(old['text'][old['text'].index('"'):])
-        variants=((4,6),) if not old['text'].endswith('"') else ((3,3),(2,3),(3,6))
-        for scale,pad in variants:
-            name=f'herald_option_{rows.index(old)}_{scale}x_pad{pad}'
+        # Some native OCR boxes stop before the closing quote at the right
+        # frame. A wider horizontal crop still needs two complete identical
+        # readings and every original word/number; keep the vertical crop low
+        # enough to avoid absorbing the next radio row.
+        variants=((4,6,6),(3,18,3)) if not old['text'].endswith('"') else ((3,3,3),(2,3,3),(3,6,6))
+        for scale,pad,vertical in variants:
+            name=f'herald_option_{rows.index(old)}_{scale}x_pad{pad}'+(f'x{vertical}' if pad!=vertical else '')
             try:
-                a=_crop_text(image,old,name+'_rgb',executable,directory,evidence,padding=(pad,pad),scale=scale)
-                b=_crop_text(image,old,name+'_gray',executable,directory,evidence,padding=(pad,pad),scale=scale,grayscale=True)
+                a=_crop_text(image,old,name+'_rgb',executable,directory,evidence,padding=(pad,vertical),scale=scale)
+                b=_crop_text(image,old,name+'_gray',executable,directory,evidence,padding=(pad,vertical),scale=scale,grayscale=True)
             except ValueError:
                 evidence.setdefault('fallback_errors',[]).append({'pass_name':name,'error':'ValueError'})
                 continue
@@ -1261,6 +1306,33 @@ def _recover_herald_options(image,rows,executable,directory,evidence):
             index=rows.index(old)
             if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
             break
+
+
+def _recover_treaty_missing_ok(image,rows,executable,directory,evidence):
+    """Locate an omitted treaty button by two actual bounded pixel reads."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary') and r['confidence']>=.8
+              and 330<=r['bounds'][1]<=350 and 430<=r['center'][0]<=445]
+    if len(headings)!=1 or any(r['text'] in ('OK','Cancel','Yes','No','Help','Goal') for r in rows):return
+    heading=headings[0]
+    body=[r for r in rows if 302<=r['bounds'][0]<=320 and 355<=r['center'][1]<=440]
+    body.sort(key=lambda r:r['center'][1])
+    if (len(body)!=4 or any(r['confidence']<.8 for r in body)
+            or body[0]['text']!='"We affirm this treaty of eternal friendship and'
+            or not re.fullmatch(r'goodwill [bh]etween the people of the [A-Za-z -]{2,40} and',body[1]['text'])
+            or not re.fullmatch(r'[A-Za-z -]{2,40} civilizations\. We shall withdraw ou[r]?',body[2]['text'])
+            or not _near_text(body[3]['text'],'forces from your territory at once."',2)):return
+    anchor={'bounds':[heading['center'][0]-21,448,44,24]};found=[]
+    for scale in (3,4):
+        values=_crop_text(image,anchor,f'treaty_missing_ok_{scale}x',executable,directory,evidence,padding=(0,0),scale=scale)
+        if (len(values)!=1 or values[0]['text']!='OK' or values[0]['confidence']<.8
+                or abs(values[0]['center'][0]-heading['center'][0])>4
+                or not 454<=values[0]['center'][1]<=464 or values[0]['bounds'][2]>32
+                or values[0]['bounds'][3]>18):return
+        found.append(values[0])
+    if not _same_location(*found):return
+    found[0]['provenance']+=found[1]['provenance']
+    rows.append(found[0])
 
 
 def _recover_treaty_closing_rows(image,rows,executable,directory,evidence):
@@ -1855,7 +1927,7 @@ def recognize(path: str | Path) -> dict:
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
             for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_caption_year,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_map_menu_label,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_herald_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+                            _recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_map_menu_label,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_intruder_notice,_recover_herald_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_missing_ok,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

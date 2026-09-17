@@ -69,5 +69,29 @@ class HeraldOptionPixels(unittest.TestCase):
         r=next(r for r in o['lines'] if r['text']==d['options'][0]['text'])
         self.assertEqual(r['provenance'][0]['text'],'"Yes, we welcome peace with the Germans.')
 
+    def test_wider_horizontal_pair_still_requires_identical_complete_words(self):
+        raw=prepared('"No. We do not need TEST Riding.',336,370,280,18)
+        correct=prepared('"No. We do not need TEST Riding."',345,368,285,20)
+        for corrupted in (False,True):
+            rows=[prepared('TEST Emissary',390,257,134,18),deepcopy(raw),prepared('OK',444,453,24,16)]
+            bad=deepcopy(correct);bad['text']='"No. We do not need OTHER Riding."'
+            with patch.object(observe,'_crop_text',side_effect=[[raw],[raw],[correct],[bad if corrupted else correct]]) as crop:
+                observe._recover_herald_options(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(crop.call_args_list[-1].kwargs['padding'],(18,3))
+            self.assertEqual(rows[1]['text'],raw['text'] if corrupted else correct['text'])
+
+    def test_optional_original_long_technology_label_restores_all_real_choices(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-010/screens/ui-0001782.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original trade absent')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text,labels_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'EXCHANGE0')
+        self.assertTrue(d['requires_model']);self.assertEqual(len(d['options']),3)
+        self.assertEqual(d['options'][0]['text'],'"No. We do not need Horseback Riding."')
+        r=next(r for r in o['lines'] if r['text']==d['options'][0]['text'])
+        self.assertEqual(r['provenance'][0]['text'],'"No. We do not need Horseback Riding.')
+        self.assertEqual(len(r['provenance']),3)
+
 
 if __name__=='__main__':unittest.main()

@@ -207,3 +207,25 @@ sequence bounds remain available. The verifier marks their input coverage
 incomplete; it does not reconstruct missing inputs or certify those runs as
 complete release evidence. Post-input OCR failures now retain the captured
 image so actual returned input receipts can still be logged.
+
+## Continued campaign debugging
+
+Attempt 012 reached four cities and Monarchy by the ancient era. Its production
+caption and status dates required additional paired reads of the original
+pixels. These reads preserve raw OCR provenance and do not insert native-state
+values into the screenshot text. Narrow repairs also cover original treaty
+warnings, withdrawal notices, greetings and map labels.
+
+Attempt 011 repeatedly attempted the same move without a change in its observed
+position, movement spent or order. The next requests now summarize such
+individually bound, consecutive failures explicitly, while retaining every
+command. Jev then skipped, advanced the turn and later chose another direction.
+Subsequent diplomacy included a real choice to withdraw troops and an original
+notice confirming withdrawal. The earlier unchanged attempts alone did not
+establish their cause or illegality.
+
+API failures now have bounded status/category records and unavailable usage,
+without invented token counts or remote error text. Historical known failures
+can be declared late without rewriting their original requests. These changes
+improve accounting; they do not repair previously missing input receipts or
+constitute a completed victory.

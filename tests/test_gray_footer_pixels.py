@@ -52,3 +52,29 @@ class FooterPixelsTests(TestCase):
         o=recognize(b);lines=[r for r in o['lines'] if r['center'][1]>440]
         self.assertEqual([r['text'] for r in lines],['End of Turn','(Press ENTER)'])
         self.assertIn('exact_original_gray_footer_rgb_sha256',o['ocr']['passes'])
+
+    def test_upper_layout_exact_source_pair_preserves_all484_glyphs(self):
+        paths=[Path('runs/attempt-010/screens/ui-0001834.png'),Path('runs/attempt-010/screens/ui-0001855.png'),
+               Path('runs/attempt-011/screens/ui-0000503.png')]
+        if not all(p.exists() for p in paths):self.skipTest('Private original calibration unavailable')
+        white,gray,prior=[Image.open(p).convert('RGB').crop(footer.CROP) for p in paths]
+        self.assertEqual(hashlib.sha256(paths[0].read_bytes()).hexdigest(),footer.UPPER_WHITE_SOURCE_SHA256)
+        self.assertEqual(hashlib.sha256(paths[1].read_bytes()).hexdigest(),footer.UPPER_GRAY_SOURCE_SHA256)
+        self.assertEqual(hashlib.sha256(white.tobytes()).hexdigest(),footer.UPPER_WHITE_CROP_SHA256)
+        self.assertEqual(hashlib.sha256(gray.tobytes()).hexdigest(),footer.UPPER_GRAY_CROP_SHA256)
+        changed=[(a,b) for a,b in zip(white.getdata(),gray.getdata()) if a!=b]
+        self.assertEqual(changed,[((255,255,255),(134,134,134))]*484)
+        glyphs=lambda image:{(i%image.width,i//image.width) for i,p in enumerate(image.getdata()) if p==(255,255,255)}
+        self.assertEqual(glyphs(white),{(x,y-4) for x,y in glyphs(prior)})
+        o=recognize(paths[1]);lines=[r for r in o['lines'] if r['bounds'][0]>=466 and r['center'][1]>440]
+        self.assertEqual([r['text'] for r in lines],['End of Turn','(Press ENTER)'])
+        self.assertEqual([r['bounds'][1] for r in lines],[441,453])
+
+    def test_upper_variant_refuses_any_altered_pixel(self):
+        image=Image.new('RGB',(640,480),(91,92,93));digest=hashlib.sha256(image.crop(footer.CROP).tobytes()).hexdigest()
+        rows=[]
+        with mock.patch.object(footer,'UPPER_GRAY_CROP_SHA256',digest):
+            self.assertTrue(footer.annotate_footer(image,rows,'a'*64))
+            self.assertEqual([r['bounds'][1] for r in rows],[441,453])
+            image.putpixel((480,450),(0,0,0))
+            self.assertFalse(footer.annotate_footer(image,[],'a'*64))

@@ -61,11 +61,45 @@ class StatusYearTests(unittest.TestCase):
             self.assertEqual(rows[0]['text'],expected)
             self.assertEqual(rows[0]['provenance'][0]['text'],'8T5 B.C.')
 
-    def test_unreadable_year_requires_intact_era_and_only_one_damaged_glyph(self):
-        for text in ('8TT B.C.','T B.C.','8T5 В.C.','8T5 A','8T5 Gold'):
+    def test_unreadable_year_requires_era_some_digits_and_bounded_damaged_glyphs(self):
+        for text in ('8TTT B.C.','T B.C.','8T5 X.C.','8T5 A','8T5 Gold','ЗБ B.C.'):
             with mock.patch('civ2.observe._crop_text') as crop:
                 _recover_status_year(Image.new('RGB',(640,480)),[row(text)],None,None,{})
             crop.assert_not_called()
+
+    def test_cyrillic_glyphs_require_actual_ascii_pixel_agreement_and_keep_known_digit(self):
+        for text,second in (('375 B.C.','375 B.C.'),('375 B.C.','375 A.D.'),
+                            ('365 B.C.','365 B.C.'),('3375 B.C.','3375 B.C.')):
+            rows=[row('З7Б В.С.')]
+            with mock.patch('civ2.observe._crop_text',side_effect=[[row(text)],[row(second)]]):
+                _recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[0]['text'],'375 B.C.' if text==second=='375 B.C.' else 'З7Б В.С.')
+
+    def test_actual_unicode_status_year_is_read_without_native_year_substitution(self):
+        from civ2.observe import recognize
+        path=Path(__file__).resolve().parents[1]/'runs/attempt-012/screens/ui-0001066.png'
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        result=recognize(path)
+        dates=[r for r in result['lines'] if r['text']=='375 B.C.' and r['bounds'][0]>=470]
+        self.assertEqual(len(dates),1)
+        self.assertEqual([p['text'] for p in dates[0]['provenance']],['З7Б В.С.','375 B.C.','375 B.C.'])
+
+    def test_wider_pair_follows_compatible_nonascii_era_not_contradictory_digits(self):
+        for first,second in (('775 В.C.','775 B.C.'),('715 В.C.','775 B.C.'),('775 В.C.','715 B.C.')):
+            rows=[row('T75 B.C.')]
+            with mock.patch('civ2.observe._crop_text',side_effect=[[row(first)],[row(first)],[row(second)],[row(second)]]) as crop:
+                _recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(crop.call_count,2 if first=='715 В.C.' else 4)
+            self.assertEqual(rows[0]['text'],'775 B.C.' if (first,second)==('775 В.C.','775 B.C.') else 'T75 B.C.')
+
+    def test_actual_wider_status_year_crop(self):
+        from civ2.observe import recognize
+        path=Path(__file__).resolve().parents[1]/'runs/attempt-011/screens/ui-0001769.png'
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        result=recognize(path)
+        dates=[r for r in result['lines'] if r['text']=='775 B.C.' and r['bounds'][0]>=470]
+        self.assertEqual(len(dates),1)
+        self.assertEqual([p['text'] for p in dates[0]['provenance']],['T75 B.C.','775 B.C.','775 B.C.'])
 
     def test_actual_status_digit_is_recovered_from_pixels_without_game_state(self):
         from civ2.observe import recognize

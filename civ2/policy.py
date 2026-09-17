@@ -747,6 +747,55 @@ def _unchanged_move_attempts(observation, actions, records):
     return counts
 
 
+def _backtrack_feedback(observation, actions, records):
+    """Match observed movement endpoints, without asserting durable slot identity."""
+    selected = next((u for u in observation['units']
+                     if u['id'] == observation['selected_unit_id']), None)
+    if selected is None:return None
+    signature = {k:selected.get(k) for k in ('id','owner','type_id')}
+    endpoint = [selected.get('x'),selected.get('y')]
+    if any(type(v) is not int for v in [*signature.values(),*endpoint]):return None
+    moves=[];intervening=False;latest_turn=observation['turn']
+    for record in reversed(records[-RECENT_ACTION_LIMIT:]):
+        action=record.get('action',{});actor=action.get('actor',{}) if isinstance(action,dict) else {}
+        if not isinstance(actor,dict) or actor.get('id')!=signature['id']:
+            intervening=True
+            continue
+        delta=record.get('observed_delta',{})
+        if not isinstance(delta,dict):break
+        position=delta.get('position');turns=delta.get('turn')
+        if (any(actor.get(k)!=v for k,v in signature.items())
+                or delta.get('actor_binding')!='unique_observed_signature'
+                or not isinstance(position,list) or len(position)!=2
+                or any(not isinstance(p,list) or len(p)!=2 or any(type(v) is not int for v in p) for p in position)
+                or position[0]!=[actor.get('x'),actor.get('y')] or position[1]!=endpoint
+                or not isinstance(turns,list) or len(turns)!=2 or any(type(v) is not int for v in turns)
+                or turns[0]!=turns[1] or turns[0]!=record.get('turn') or not 0<=turns[0]<=latest_turn):break
+        latest_turn=turns[0]
+        if position[0]==position[1]:continue
+        target=action.get('parameters',{}).get('destination',{})
+        if (action.get('kind')!='move' or not isinstance(target,dict)
+                or position[1]!=[target.get('x'),target.get('y')]
+                or type(record.get('decision')) is not int):break
+        moves.append(dict(decision=record['decision'],turn=turns[0],
+                          start=list(position[0]),end=list(position[1])))
+        endpoint=position[0]
+    if len(moves)<2:return None
+    ordered=list(reversed(moves))
+    visits=[(ordered[0]['start'],ordered[0]['turn'])]+[(m['end'],m['turn']) for m in ordered]
+    candidates={}
+    for identifier,action in actions.items():
+        if action['kind']!='move':continue
+        p=action['parameters']['destination'];point=[p['x'],p['y']]
+        seen=[turn for visited,turn in visits[:-1] if visited==point]
+        if seen:candidates[identifier]=dict(destination=deepcopy(p),prior_observed_visits=len(seen),
+            last_observed_visit_turn=max(seen),reverses_most_recent_observed_move=point==moves[0]['start'])
+    if not candidates:return None
+    return dict(by_candidate=candidates,current_turn=observation['turn'],observed_moves=ordered,
+        intervening_other_commands=intervening,history_limit=RECENT_ACTION_LIMIT,
+        scope='Historical moves each have a uniquely bound native before/after observation, matching slot/type/owner and consecutive position endpoints. Other commands and turn boundaries do not prove continued unit identity; this is not a persistent-ID claim. Visits and reversals are factual movement history, not proof of wasted turns or strategic progress. A detour, defense or changed circumstances can justify returning. No move is ranked, removed or declared illegal.')
+
+
 def unit_request_for(observation, actions, rules=None, recent_actions=None):
     expected = unit_candidates(observation, rules=rules)
     if actions != expected:
@@ -775,6 +824,17 @@ def unit_request_for(observation, actions, rules=None, recent_actions=None):
             'Consider an offered detour, useful order or skip; a prior task target does not require repeating its direct step. '
             'You still choose freely among every listed candidate; the cause of the unchanged result is unknown. '
             +request['questions']['unit_action']['instructions'])
+    backtrack = _backtrack_feedback(observation, actions, records)
+    if backtrack:
+        request['state']['unit_movement_history_feedback'] = backtrack
+        detail='; '.join(f"{key}: {row['prior_observed_visits']} prior observed visits"+
+                        ('; reverses the most recent observed move' if row['reverses_most_recent_observed_move'] else '')
+                        for key,row in backtrack['by_candidate'].items())
+        request['questions']['unit_action']['instructions'] = (
+            'Movement history for these offered destinations: '+detail+'. '
+            'Consider whether another reversal serves your task, a real detour or safety; '
+            'compare the supplied target geometry and recent outcomes instead of treating motion alone as progress. '
+            'Revisiting remains available and can be useful. '+request['questions']['unit_action']['instructions'])
     return request
 
 
