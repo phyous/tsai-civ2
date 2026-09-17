@@ -21,6 +21,7 @@ EVENT_TITLES = {
     'DESTROYED': 'defense minister',
     'SNEAK': 'defense minister',
     'SURPRISESCROLLS': 'village',
+    'SURPRISEMETALS': 'village',
     **dict.fromkeys(('STARTWONDER','SWITCHWONDER','ABANDONWONDER','ALMOSTWONDER'), 'travellers report'),
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
@@ -36,7 +37,9 @@ EVENT_TITLES = {
 TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
                  # Original005/1688: complete Horseback Riding discovery and
                  # sole OK. Preserve this observed title, not guessed glyphs.
-                 'CIVADVANCE': {'ciadization advance', 'cialization advance'},
+                 # Original011/735: complete Ceremonial Burial discovery and
+                 # sole OK; the original pixels show Civilization Advance.
+                 'CIVADVANCE': {'ciadization advance', 'cialization advance', 'cinlization adsance'},
                  # Original006/608: complete destruction notice and sole OK.
                  'DESTROYED': {'detense ifinister'},
                  # Original009/570: full sneak-attack body and sole OK.

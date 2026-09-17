@@ -28,6 +28,27 @@ def fixture():
     return im,rows
 
 class NoticeIconTests(unittest.TestCase):
+    def test_reviewed_discovery_title_variant_still_requires_complete_body(self):
+        _,rows=fixture();rows[0]['text']='Cinlization Adsance'
+        r=classify_dialog(observation(*rows),game_text=SOURCE)
+        self.assertTrue(r['supported'],r)
+        self.assertEqual(r['title'],'Cinlization Adsance')
+        self.assertEqual(r['evidence']['observed_title'],'Cinlization Adsance')
+        self.assertEqual(r['evidence']['title_match'],'reviewed OCR alias')
+        rows[1]['text']='TEST unknown news.'
+        self.assertFalse(classify_dialog(observation(*rows),game_text=SOURCE)['supported'])
+
+    def test_optional_original_ceremonial_burial_discovery(self):
+        p=Path('runs/attempt-011/screens/ui-0000735.png')
+        if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private discovery frame unavailable')
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        r=classify_dialog(recognize(p),game_text=game_text())
+        self.assertTrue(r['supported'],r)
+        self.assertEqual(r['resource_tag'],'CIVADVANCE')
+        self.assertEqual(r['evidence']['observed_body'],'Roman wise men discover the secret of\nCeremonial Burial.')
+        self.assertEqual([o['text'] for o in r['options']],['OK'])
+
     def test_exact_border_artwork_cannot_become_a_control_or_game_fact(self):
         _,rows=fixture();r=classify_dialog(observation(*rows),game_text=SOURCE)
         self.assertTrue(r['supported'],r);self.assertEqual(r['resource_tag'],'CIVADVANCE')

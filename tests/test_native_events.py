@@ -25,6 +25,37 @@ def notice(*body, title='Domestic Advisor'):
 
 
 class NativeEventTests(unittest.TestCase):
+    def test_village_metals_requires_complete_observed_numeric_reward(self):
+        source=resource(tag='SURPRISEMETALS',title='Village',
+                        body='You have discovered valuable metal deposits worth %NUMBER0 gold.')
+        screen=notice('You have discovered valuable metal deposits','worth 50 gold.',title='Village')
+        result=classify_information(screen,[source])
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['resource_tag'],'SURPRISEMETALS')
+        self.assertEqual(result['mechanical_action'],'acknowledge_information')
+        self.assertIn('50 gold.',result['evidence']['observed_body'])
+        for body in ('You have discovered valuable metal deposits.',
+                     'You have discovered valuable metal deposits worth many gold.',
+                     'You must pay 50 gold.'):
+            self.assertFalse(classify_information(notice(body,title='Village'),[source])['supported'])
+        self.assertFalse(classify_information(screen,[dict(source,options=['Accept','Refuse'])])['supported'])
+
+    def test_actual_original_metals_notice_and_verifier_pin(self):
+        p=Path('runs/attempt-011/screens/ui-0000791.png')
+        if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original village frame unavailable')
+        import hashlib
+        from civ2.evidence import canonical
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        from civ2.dialogs import classify_dialog,dialog_resources
+        from civ2.verify import PUBLIC_NOTICE_RESOURCES
+        source=next(r for r in dialog_resources(game_text()) if r['tag']=='SURPRISEMETALS')
+        self.assertEqual(hashlib.sha256(canonical(source)).hexdigest(),PUBLIC_NOTICE_RESOURCES['SURPRISEMETALS'])
+        result=classify_dialog(recognize(p),game_text=game_text())
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['resource_tag'],'SURPRISEMETALS')
+        self.assertEqual([o['text'] for o in result['options']],['OK'])
+
     def test_village_scrolls_notice_is_complete_information_not_a_hut_choice(self):
         source=resource(tag='SURPRISESCROLLS',title='Village',
                         body='You have discovered scrolls of ancient wisdom.')
