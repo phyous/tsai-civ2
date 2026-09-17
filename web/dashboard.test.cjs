@@ -129,3 +129,18 @@ test('historical objectives stay distinct from command decisions and remain immu
   assert.equal(s.recent_decisions[0].groups[0].total,.99);
   assert.equal(s.recent_decisions[0].groups[0].options[0].label,'[redacted]');
 });
+
+ test('category planning retains its real vector and never claims dispatch',()=>{
+  const s=normalize({decision:{stage:'planning_category',executes_input:false,receipt:'accepted',selected_question:'task_category',answers:{task_category:answer({settle:.8,hold:.2})}}});
+  assert.equal(s.decision.stage,'planning_category');assert.equal(s.decision.receipt,null);
+  assert.equal(vectorLayout(s.decision).panels[0].role,'OBJECTIVE CATEGORY');
+  assert.deepEqual(s.decision.groups[0].options.map(x=>x.p),[.8,.2]);
+  const unsafe=normalize({decision:{stage:'planning_category',executes_input:true}});
+  assert.equal(unsafe.decision.stage,'command');
+});
+
+test('compatible live category envelope preserves distinct category display',()=>{
+ const s=normalize({decision:{stage:'planning',planning_phase:'category',executes_input:false,selected_question:'task_category',answers:{task_category:answer({settle:.7,hold:.3})}}});
+ assert.equal(s.decision.stage,'planning_category');assert.equal(s.decision.receipt,null);
+ assert.equal(vectorLayout(s.decision).panels[0].role,'OBJECTIVE CATEGORY');
+});

@@ -871,6 +871,24 @@ def _recover_population_notice(image,rows,executable,directory,evidence):
         if _replace_crop_row(rows,index,a,lambda old,new:True):rows[index]['provenance']+=b[0]['provenance']
 
 
+def _recover_map_menu_label(image,rows,executable,directory,evidence):
+    """Recover a clipped menu label from pixels; no modal/map guard is relaxed."""
+    if image.size!=(640,480):return
+    menu=' '.join(r['text'].casefold() for r in rows if 18<=r['center'][1]<=38)
+    if not all(re.search(r'\b'+word+r'\b',menu) for word in ('kingdom','view','orders','advisors','civilopedia')):return
+    candidates=[(i,r) for i,r in enumerate(rows) if r['text']=='ame'
+                and 6<=r['bounds'][0]<=20 and 20<=r['bounds'][1]<=26
+                and 24<=r['bounds'][2]<=40 and 8<=r['bounds'][3]<=16]
+    if len(candidates)!=1 or re.search(r'\bgame\b',menu):return
+    index,old=candidates[0]
+    a=_crop_text(image,old,'map_menu_rgb3',executable,directory,evidence,padding=(6,3),scale=3)
+    b=_crop_text(image,old,'map_menu_gray3',executable,directory,evidence,padding=(6,3),grayscale=True,scale=3)
+    if (len(a)!=1 or len(b)!=1 or a[0]['text']!='Game' or b[0]['text']!='Game'
+            or min(a[0]['confidence'],b[0]['confidence'])<.8
+            or not _same_location(old,b[0]) or not _same_location(a[0],b[0])):return
+    if _replace_crop_row(rows,index,a,lambda before,after:True):rows[index]['provenance']+=b[0]['provenance']
+
+
 def _recover_treasury_marker(image,rows,executable,directory,evidence):
     """Recover a status layout marker; native memory/save remains the amount source."""
     if image.size!=(640,480):return
@@ -891,17 +909,20 @@ def _recover_treasury_marker(image,rows,executable,directory,evidence):
 
 
 def _recover_status_year(image,rows,executable,directory,evidence):
-    """Recover a malformed era from two reads of the native status row pixels.
+    """Recover a malformed date from two reads of the native status row pixels.
 
-    The numerical year must remain unchanged. This is a layout marker, not an
-    authority for the current game year, which comes from the native observer.
+    Readable numerical digits must remain unchanged. A single nonnumeric year
+    glyph may be recovered only with an intact era and two agreeing pixel reads.
+    This is a layout marker, not the authority for the native game year.
     """
     if image.size!=(640,480):return
     pattern=r'([0-9]{1,5})\s+(?:B\.?\s*C\.?|A\.?\s*D\.?)'
     for index,old in enumerate(rows):
         x,y,w,h=old['bounds']
         raw=re.fullmatch(r'([0-9]{1,5})\s+[^\s]{1,8}',old['text'])
-        if (not x>=470 or not 210<=y<=232 or w>160 or h>24 or raw is None
+        damaged=re.fullmatch(r'([0-9A-Za-z]{2,5})\s+(B\.?\s*C\.?|A\.?\s*D\.?)',old['text'],re.I)
+        if damaged is not None and sum(not c.isdigit() for c in damaged[1])!=1:damaged=None
+        if (not x>=470 or not 210<=y<=232 or w>160 or h>24 or (raw is None and damaged is None)
                 or re.fullmatch(pattern,old['text'],re.I)):continue
         for scale in (3,2):
             a=_crop_text(image,old,f'status_year_rgb{scale}',executable,directory,evidence,padding=(3,3),scale=scale)
@@ -915,7 +936,11 @@ def _recover_status_year(image,rows,executable,directory,evidence):
                 # the original malformed reading, not when they contradict it.
                 if scale==3 and a[0]['text']==old['text']:continue
                 break
-            if complete[1]==raw[1] and _replace_crop_row(rows,index,a,lambda before,after:True):
+            year_matches=(complete[1]==raw[1]) if raw is not None else (
+                len(complete[1])==len(damaged[1])
+                and all(not before.isdigit() or before==after for before,after in zip(damaged[1],complete[1]))
+                and re.sub(r'[^A-Za-z]','',a[0]['text']).casefold()==re.sub(r'[^A-Za-z]','',damaged[2]).casefold())
+            if year_matches and _replace_crop_row(rows,index,a,lambda before,after:True):
                 rows[index]['provenance']+=b[0]['provenance']
             break
 
@@ -1021,6 +1046,66 @@ def _recover_audience_body(image,rows,executable,directory,evidence):
     for old,a,b in recovered:
         a['provenance']=old['provenance']+a['provenance']+b['provenance']
         rows[rows.index(old)]=a
+
+
+def _recover_withdrawal_warning(image,rows,executable,directory,evidence):
+    """Read two damaged VIOLATOR rows; every treaty term stays source-bound."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if r['text'].endswith(' Emissary')
+            and 305<=r['center'][0]<=335 and 140<=r['center'][1]<=170]
+    buttons=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help')]
+    if (len(titles)!=1 or len(buttons)!=1 or buttons[0]['text']!='OK'
+            or abs(buttons[0]['center'][0]-titles[0]['center'][0])>8
+            or not 310<=buttons[0]['center'][1]<=340):return
+    panel=[r for r in rows if 190<=r['bounds'][0]<=245
+           and titles[0]['center'][1]<r['center'][1]<buttons[0]['center'][1]]
+    panel.sort(key=lambda r:r['center'][1])
+    if (len(panel)!=6 or panel[0]['text']!='"Your troops have violated the territory of our'
+            or not re.fullmatch(r'city of [A-Za-z -]{2,60}\. By the terms of our peace',panel[1]['text'])
+            or panel[2]['text'] not in ('treaty, you must withdraw inmediately or face','treaty, you must withdraw immediately or face')
+            or panel[3]['text']!='the consequences! Will you comply?"'
+            or panel[4]['text'] not in ('O Withdraw troops to nearest city.','Withdraw troops to nearest city.')
+            or panel[5]['text']!='"No! We renounce this worthless treaty!"'
+            or any(r['confidence']<.8 for r in [*titles,*panel,*buttons])):return
+    recovered=[]
+    for i,wanted in ((2,'treaty, you must withdraw immediately or face'),(4,'Withdraw troops to nearest city.')):
+        old=panel[i]
+        if old['text']==wanted:continue
+        a=_crop_text(image,old,f'withdrawal_{i}_rgb3',executable,directory,evidence,padding=(4,4),scale=3)
+        b=_crop_text(image,old,f'withdrawal_{i}_gray3',executable,directory,evidence,padding=(4,4),scale=3,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=wanted or b[0]['text']!=wanted
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+        recovered.append((old,a[0],b[0]))
+    for old,a,b in recovered:
+        a['provenance']=old['provenance']+a['provenance']+b['provenance']
+        rows[rows.index(old)]=a
+
+
+def _recover_treaty_warning(image,rows,executable,directory,evidence):
+    """Read a joined 'withthe' only within the complete two-choice warning."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if r['text'] in ('Foreign Minister','Foreign Mfinister')
+            and 305<=r['center'][0]<=335 and 145<=r['center'][1]<=185]
+    buttons=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help')]
+    if (len(titles)!=1 or len(buttons)!=1 or buttons[0]['text']!='OK'
+            or abs(buttons[0]['center'][0]-titles[0]['center'][0])>8
+            or not 300<=buttons[0]['center'][1]<=330):return
+    panel=[r for r in rows if 190<=r['bounds'][0]<=245
+           and titles[0]['center'][1]<r['center'][1]<buttons[0]['center'][1]]
+    panel.sort(key=lambda r:r['center'][1])
+    if (len(panel)!=5 or panel[0]['text']!='We have signed a peace treaty withthe'
+            or not re.fullmatch(r'[A-Za-z -]{2,60}! Our reputation will be damaged if we',panel[1]['text'])
+            or [r['text'] for r in panel[2:]]!=['break it!','Cancel action.','Break treaty.']
+            or any(r['confidence']<.8 for r in [*titles,*panel,*buttons])):return
+    old=panel[0];wanted='We have signed a peace treaty with the'
+    a=_crop_text(image,old,'treaty_warning_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+    b=_crop_text(image,old,'treaty_warning_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+    if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']==wanted
+            and min(a[0]['confidence'],b[0]['confidence'])>=.8
+            and _same_location(old,a[0]) and _same_location(a[0],b[0])):
+        index=rows.index(old)
+        if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
 
 
 def _recover_treaty_reminder(image,rows,executable,directory,evidence):
@@ -1222,6 +1307,8 @@ def _recover_greeting_body(image,rows,executable,directory,evidence):
     # exact here; preserve every observed letter and recover only the tail.
     if body and re.fullmatch(r'"Greetings from the most exalted [A-Za-z][A-Za-z \x27-]{1,60}:',body[0]['text']):
         prefix=body[0]['text']
+    if body and re.fullmatch(r'"I bring tidings from [A-Za-z][A-Za-z \x27-]{1,60}, ruler and',body[0]['text']):
+        prefix=body[0]['text']
     if (len(body)!=2 or abs(heading['center'][0]-ok['center'][0])>8
             or not 16<=body[1]['center'][1]-body[0]['center'][1]<=26
             or not _near_text(body[0]['text'],prefix,3)
@@ -1238,12 +1325,13 @@ def _recover_greeting_body(image,rows,executable,directory,evidence):
         rows[index]['provenance']+=b[0]['provenance']
     if tail['text'].endswith('..."'):return
     x,y,w,h=tail['bounds'];readings=[]
+    scale=2 if prefix.startswith('"I bring tidings from ') else 3
     words=lambda text:re.findall(r'[A-Za-z]+',text)
     for pad,right in ((3,37),(3,41)):
         box=(x-pad,y-pad,min(640,x+w+right),min(480,y+h+pad));crop=image.crop(box)
-        name='greeting_tail_black3_right'+str(right);target=Path(directory)/(name+'.png')
+        name=f'greeting_tail_black{scale}_right'+str(right);target=Path(directory)/(name+'.png')
         crop.convert('L').point(lambda value:255 if value>70 else 0).resize(
-            (crop.width*3,crop.height*3),Image.Resampling.BICUBIC).save(target)
+            (crop.width*scale,crop.height*scale),Image.Resampling.BICUBIC).save(target)
         evidence['passes'].append(name);raw=_run_ocr(executable,target)
         if (len(raw)!=1 or raw[0]['confidence']<.8 or not raw[0]['text'].endswith('..."')
                 or words(raw[0]['text'])!=words(tail['text'])):return
@@ -1252,7 +1340,7 @@ def _recover_greeting_body(image,rows,executable,directory,evidence):
         mapped=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
             x=(box[0]+nx*crop.width)/640,y=(box[1]+ny*crop.height)/480,
             width=nw*crop.width/640,height=nh*crop.height/480)],640,480,name)[0]
-        mapped['provenance'][0].update(crop=list(box),scale=3,normalized_crop_bounds=[nx,ny,nw,nh],
+        mapped['provenance'][0].update(crop=list(box),scale=scale,normalized_crop_bounds=[nx,ny,nw,nh],
             transform='L<=70 retained black, others white; bicubic enlargement')
         if not _same_location(tail,mapped):return
         readings.append(mapped)
@@ -1324,6 +1412,32 @@ def _recover_founded_production_title(image,rows,executable,directory,evidence):
     if _replace_crop_row(rows,index,[selected],lambda old,new:True):
         rows[index]['production_title_identity_consensus']={'city_text':readings[0][2],
             'independent_scales':2,'requires_founding_notice':True,'observed_year':years[0]}
+
+
+def _recover_city_caption_year(image,rows,executable,directory,evidence):
+    """Read the date in two prefix crops without changing city/name/body text."""
+    if image.size!=(640,480):return
+    pattern=r'^City of (.+?),\s*(\d{1,5})\s*(B\.?\s*C\.?|A\.?\s*D\.?)'
+    for row in rows:
+        old=re.match(pattern,row['text'],re.I);x,y,w,h=row['bounds']
+        if not old or row['confidence']<.8 or not (32<=y<=56 and 350<=w<=500 and 8<=h<=24):continue
+        prefix={'bounds':[max(0,x-6),max(0,y-4),round(w*.42)+6,h+8]}
+        found=[]
+        for scale in (3,4):
+            values=_crop_text(image,prefix,f'city_year_prefix_{scale}x',executable,directory,evidence,
+                              padding=(0,0),scale=scale)
+            if len(values)!=1:break
+            fresh=values[0];match=re.match(pattern,fresh['text'],re.I)
+            if (not match or fresh['confidence']<.8 or not _near_text(old[1].casefold(),match[1].casefold(),2)
+                    or re.sub('[^a-z]','',old[3].casefold())!=re.sub('[^a-z]','',match[3].casefold())
+                    or len(old[2])!=len(match[2]) or not _near_text(old[2],match[2],1)
+                    or not x-6<=fresh['bounds'][0]<=x+6 or abs(fresh['center'][1]-row['center'][1])>4):break
+            found.append((match[2],fresh))
+        if len(found)!=2 or found[0][0]!=found[1][0] or found[0][0]==old[2]:continue
+        row['text']=row['text'][:old.start(2)]+found[0][0]+row['text'][old.end(2):]
+        row['provenance']+=found[0][1]['provenance']+found[1][1]['provenance']
+        row['caption_year_consensus']={'independent_scales':2,'old_year':old[2],'observed_year':found[0][0],
+            'scope':'Only date digits; original city and remaining caption text unchanged'}
 
 
 def _recover_city_and_production_rows(image, rows, executable, directory, evidence):
@@ -1563,15 +1677,17 @@ def _recover_map_labels(image,rows,executable,directory,evidence):
             return (candidate['confidence']>=.8 and _same_location(row,candidate)
                     and re.fullmatch(r'[A-Za-z]{3,25}',candidate['text'])
                     and _near_text(row['text'].casefold(),candidate['text'].casefold(),2))
-        def read(suffix,**kwargs):
+        def read(suffix,*,retain=True,**kwargs):
+            name=f'map_label_{index}{suffix}_{kwargs.get("scale",3)}x'
             try:
-                result=_crop_text(image,row,f'map_label_{index}{suffix}_3x',executable,directory,evidence,**kwargs)
+                result=_crop_text(image,row,name,executable,directory,evidence,**kwargs)
             except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
-                evidence.setdefault('fallback_errors',[]).append(dict(pass_name=f'map_label_{index}{suffix}_3x',
+                evidence.setdefault('fallback_errors',[]).append(dict(pass_name=name,
                                                                       error=type(error).__name__))
                 return None
-            for candidate in result:
-                if credible(candidate):row['provenance']+=candidate['provenance']
+            if retain:
+                for candidate in result:
+                    if credible(candidate):row['provenance']+=candidate['provenance']
             return result[0] if len(result)==1 and credible(result[0]) else None
         def agree(first,second):
             return first is not None and second is not None and first['text']==second['text']
@@ -1580,6 +1696,18 @@ def _recover_map_labels(image,rows,executable,directory,evidence):
         if pair is None and row['confidence']<.8:
             peer=read('_wide_gray',padding=(6,6),grayscale=True)
             if agree(a,peer):pair=(a,peer)
+        # RGB/gray can agree on the same wrong map-font reading. Two bounded
+        # white-glyph framings remain independent evidence even in that case.
+        # Publish neither new reading unless both agree; no city state enters
+        # this reader, and previous raw readings are never discarded.
+        pixels=list(image.crop((x,y,x+w,y+h)).convert('RGB').getdata())
+        white_count=sum(min(pixel)>=230 for pixel in pixels)
+        if white_count>=20 and white_count>=len(pixels)*.04:
+            first=read('_white190',retain=False,padding=(3,3),white_threshold=190,scale=2)
+            second=read('_white230',retain=False,padding=(2,2),white_threshold=230,scale=4)
+            if agree(first,second) and _same_location(first,second):
+                row['provenance']+=first['provenance']+second['provenance']
+                if pair is None:pair=(first,second)
         if pair is None:
             whites=[]
             for suffix,padding,threshold in (('_white',(3,3),190),('_white_low',(3,3),160),('_white_wide',(6,6),190)):
@@ -1726,8 +1854,8 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_audience_body,_recover_treaty_reminder,_recover_herald_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+            for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_caption_year,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+                            _recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_map_menu_label,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_herald_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

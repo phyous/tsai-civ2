@@ -705,15 +705,77 @@ def _question(actions, instructions):
             "criteria": {identifier: action["label"] for identifier, action in actions.items()}}
 
 
+def _unchanged_move_attempts(observation, actions, records):
+    """Summarize only a contiguous tail of individually observed native deltas.
+
+    Free text outcomes and old slot IDs alone cannot establish continuity. A
+    changed, pending, ambiguous or other-actor record ends the usable tail.
+    This is feedback on attempted moves, never a legality filter.
+    """
+    selected = next((u for u in observation['units']
+                     if u['id'] == observation['selected_unit_id']), None)
+    if selected is None:
+        return {}
+    actor = {k:selected.get(k) for k in ('id', 'owner', 'type_id', 'x', 'y')}
+    if any(type(value) is not int for value in actor.values()):
+        return {}
+    point = [actor['x'], actor['y']]
+    unchanged = {'turn':[observation['turn']]*2, 'position':[point, point]}
+    for key in ('movement_thirds_spent', 'order_id'):
+        if type(selected.get(key)) is not int:
+            return {}
+        unchanged[key] = [selected[key]]*2
+    counts = {}
+    for record in reversed(records[-RECENT_ACTION_LIMIT:]):
+        action, delta = record.get('action', {}), record.get('observed_delta', {})
+        if (not isinstance(action, dict) or not isinstance(delta, dict)
+                or action.get('actor') != actor or record.get('turn') != observation['turn']
+                or delta.get('actor_binding') != 'unique_observed_signature'
+                or any(delta.get(k) != value for k, value in unchanged.items())):
+            break
+        identifier = action.get('id')
+        current = actions.get(identifier) if isinstance(identifier, str) else None
+        if (not current or action.get('kind') != 'move' or current['kind'] != 'move'
+                or action.get('parameters') != current['parameters']
+                or type(record.get('decision')) is not int):
+            break
+        row = counts.setdefault(identifier, {
+            'no_observed_change_count':0,
+            'destination':deepcopy(current['parameters']['destination']),
+            'most_recent_decision':record['decision']})
+        row['no_observed_change_count'] += 1
+    return counts
+
+
 def unit_request_for(observation, actions, rules=None, recent_actions=None):
     expected = unit_candidates(observation, rules=rules)
     if actions != expected:
         raise PolicyError("Unit question candidates differ from the bound observation.")
-    return {"state": model_state(observation, rules, recent_actions), "questions": {
+    try:
+        records = list(recent_actions) if recent_actions is not None else []
+    except TypeError as exc:
+        raise PolicyError('Recent actions must be a sequence of observed receipts.') from exc
+    request = {"state": model_state(observation, rules, records), "questions": {
         "unit_action": _question(actions,
             "Choose exactly one useful order for the selected owned unit. This answer selects the executed command; empire_strategy is independent advice and is not a previous answer. Use the whole explored map, current owned-unit roster, city spacing, strategic_playbook and recent receipts to plan a purposeful next step. Establish and grow productive settlements, protect valuable settlers, use military roles appropriately, and improve useful surrounding land under the current government's rules. Avoid repeated no-effect attempts and aimless back-and-forth travel; an old slot ID alone is not a persistent unit. A directional order into a visible foreign unit can initiate combat or diplomacy. Sentry/fortify for a useful defensive purpose, skip when waiting serves a specific goal. Do not infer hidden terrain, enemy strength or diplomacy. The original UI can reject an order; do not mistake an attempted order or save change for progress."),
         "empire_strategy": deepcopy(STRATEGY_QUESTION),
     }}
+    attempts = _unchanged_move_attempts(observation, actions, records)
+    if attempts:
+        request['state']['unit_action_feedback'] = {
+            'turn':observation['turn'], 'by_candidate':attempts,
+            'history_limit':RECENT_ACTION_LIMIT,
+            'observed_fields':['position', 'movement_thirds_spent', 'order_id'],
+            'scope':'Consecutive individually bound checkpoint observations at this same actor signature and turn. Each counted move had no observed change in the listed fields. Other game effects, the cause, and current legality are unverified; no candidate has been removed.'}
+        detail = '; '.join(f"{key}: {value['no_observed_change_count']} attempts with no observed change"
+                           for key, value in attempts.items())
+        request['questions']['unit_action']['instructions'] = (
+            'Observed feedback for these exact offered moves: '+detail+'. '
+            'Repeating the same command without a new reason has made no observed movement progress. '
+            'Consider an offered detour, useful order or skip; a prior task target does not require repeating its direct step. '
+            'You still choose freely among every listed candidate; the cause of the unchanged result is unknown. '
+            +request['questions']['unit_action']['instructions'])
+    return request
 
 
 def dialog_candidates(observation, dialog):

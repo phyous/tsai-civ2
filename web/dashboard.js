@@ -48,11 +48,11 @@
     const selectedIntent = text(d.selected_intent || graph.selected_intent, 80);
     const root = groups.find(g=>g.name===rootName);
     const disagreement = Boolean(root && selectedIntent && root.choice!==selectedIntent);
-    const planning = d.stage === 'planning' && d.executes_input === false;
+    const planning = ['planning','planning_category'].includes(d.stage) && d.executes_input === false;
     const rawReceipt = planning ? null : d.receipt;
     const receipt = ['pending','dispatched','accepted','refused'].includes(rawReceipt) ? rawReceipt : null;
     return {id:text(d.id,30),model:/^jev[a-zA-Z0-9._-]*$/.test(d.model) ? d.model : '',latency_ms:nonnegative(d.latency_ms ?? metadata.latency_ms) ? (d.latency_ms ?? metadata.latency_ms) : null,observed_turn:number(d.observed_turn),observed_revision:text(d.observed_revision,40),
-        stage:planning?'planning':'command',groups: invalid || pathInvalid || disagreement ? [] : groups,invalid:invalid||pathInvalid||disagreement,rootName,childName,selectedIntent,action_label:text(d.action_label,220),receipt,
+        stage:planning?(d.stage==='planning_category'||(d.stage==='planning'&&d.planning_phase==='category'&&rootName==='task_category')?'planning_category':'planning'):'command',groups: invalid || pathInvalid || disagreement ? [] : groups,invalid:invalid||pathInvalid||disagreement,rootName,childName,selectedIntent,action_label:text(d.action_label,220),receipt,
         input_tokens:nonnegative(d.input_tokens ?? metadata.input_tokens_total) ? (d.input_tokens ?? metadata.input_tokens_total) : null};
   }
   function recentDecisions(raw, current) {
@@ -98,7 +98,7 @@
     const plans=shown.map((g,i)=>{
       const limit=i===0?16:count===3?8:12,visible=Math.min(g.options.length,limit);
       const columns=i===0?(count===1?1:visible>(count===3?8:12)?2:1):(visible>4?2:1);
-      return {group:g,role:i===0?(decision.stage==='planning'?'OBJECTIVE CHOICE':'COMMAND CHOICE'):g===root?'ROUTING CHOICE':'COMPANION · NOT DISPATCHED',visible,columns,rows:Math.ceil(visible/columns)};
+      return {group:g,role:i===0?(decision.stage==='planning_category'?'OBJECTIVE CATEGORY':decision.stage==='planning'?'OBJECTIVE CHOICE':'COMMAND CHOICE'):g===root?'ROUTING CHOICE':'COMPANION · NOT DISPATCHED',visible,columns,rows:Math.ceil(visible/columns)};
     });
     const rowHeight=Math.min(43,Math.max(24,Math.floor((556-40*count-10*(count-1))/plans.reduce((n,p)=>n+p.rows,0))));
     let y=286;
@@ -153,7 +153,7 @@
   }
   const shown = value => value === null ? '—' : new Intl.NumberFormat('en-US',{maximumFractionDigits:1}).format(value);
   function probabilityText(p){return p>0&&p<.001?'<0.1%':(p*100).toFixed(Math.abs(p*100-Math.round(p*100))<1e-8?0:1)+'%';}
-  function vectorName(name){return ({unit_action:'Unit orders',dialog_action:'Dialog choices',empire_strategy:'Empire strategy',intent:'Strategic direction'})[name]||name.replace(/^action_/, '').replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());}
+  function vectorName(name){return ({task_category:'Objective categories',task_choice:'Objective targets',unit_action:'Unit orders',dialog_action:'Dialog choices',empire_strategy:'Empire strategy',intent:'Strategic direction'})[name]||name.replace(/^action_/, '').replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());}
   function paintVector(ctx,plan){
     const {group,role,y,columns,visible,rows,rowHeight}=plan;
     const primary=['COMMAND CHOICE','OBJECTIVE CHOICE'].includes(role),color=primary?C.teal:'#8c6939';
@@ -188,7 +188,7 @@
       const {decision,group,y,height,visible,rows}=card;
       rect(ctx,1201,y-3,670,height,'#fbf7ee',null,3);
       const when=decision.observed_turn!==null?'T'+shown(decision.observed_turn)+'  ·  ':'';
-      const stage=decision.stage==='planning'?'OBJECTIVE · NO INPUT':'COMMAND';
+      const stage=decision.stage==='planning_category'?'CATEGORY · NO INPUT':decision.stage==='planning'?'OBJECTIVE · NO INPUT':'COMMAND';
       write(ctx,clipped(ctx,when+'#'+decision.id+'  /  '+stage+'  /  '+vectorName(group.name),648,10,'mono'),1208,y+2,10,'#796b54','mono');
       group.options.slice(0,visible).forEach((option,index)=>{
         const col=Math.floor(index/rows),row=index%rows,x=1208+col*337,top=y+21+row*20;
@@ -254,7 +254,7 @@
     rect(ctx,1184,890,704,75,'#12363e',C.line,3);
     const receiptText={pending:'AWAITING INPUT DISPATCH',dispatched:'INPUT DISPATCHED',accepted:'ORDER ACCEPTED',refused:'ORDER NOT ACCEPTED'};
     const receiptColor=s.decision.receipt==='refused'?C.red:C.gold;
-    write(ctx,s.decision.stage==='planning'?'JEV’S CURRENT OBJECTIVE':(receiptText[s.decision.receipt]||'LATEST MODEL ORDER'),1206,901,10,receiptColor,'mono');
+    write(ctx,s.decision.stage==='planning_category'?'JEV’S OBJECTIVE CATEGORY · NO INPUT':s.decision.stage==='planning'?'JEV’S CURRENT OBJECTIVE':(receiptText[s.decision.receipt]||'LATEST MODEL ORDER'),1206,901,10,receiptColor,'mono');
     wrapped(ctx,s.decision.action_label||'Waiting for an order',651,2,17).forEach((line,i)=>write(ctx,line,1206,921+i*21,17,C.ivory));
     rect(ctx,1184,977,704,53,'#102a34',C.line,3);
     write(ctx,'CHRONICLE',1206,985,9,C.mutedGold,'mono');

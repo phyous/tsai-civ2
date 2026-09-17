@@ -134,7 +134,7 @@ def _rows(observation):
             for p in provenance:
                 if not isinstance(p,dict):continue
                 mode=p.get('preprocessing','');coords=p.get('normalized_bounds')
-                if (mode!='native' and not re.fullmatch(r'map_label_\d+(?:_gray|_white|_wide_gray|_white_low|_white_wide)?_3x',str(mode))):continue
+                if (mode!='native' and not re.fullmatch(r'map_label_\d+(?:(?:_gray|_white|_wide_gray|_white_low|_white_wide)?_3x|_white190_2x|_white230_4x)',str(mode))):continue
                 if (not isinstance(p.get('text'),str) or not re.fullmatch(r'[A-Za-z]{3,25}',p['text'])
                         or type(p.get('confidence')) not in (int,float) or not .8<=p['confidence']<=1
                         or not isinstance(coords,list) or len(coords)!=4

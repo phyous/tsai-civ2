@@ -50,6 +50,32 @@ class StatusYearTests(unittest.TestCase):
             self.assertEqual(crop.call_args_list[-1].kwargs['scale'],2)
             self.assertEqual(rows[0]['text'],'1200 B.C.' if final=='1200 B.C.' else '1200 В.C.')
 
+    def test_one_unreadable_digit_requires_two_reads_and_keeps_other_digits_and_era(self):
+        for text,second in (('875 B.C.','875 B.C.'),('875 B.C.','865 B.C.'),
+                            ('975 B.C.','975 B.C.'),('875 A.D.','875 A.D.'),
+                            ('1875 B.C.','1875 B.C.')):
+            rows=[row('8T5 B.C.')]
+            with mock.patch('civ2.observe._crop_text',side_effect=[[row(text)],[row(second)]]):
+                _recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{})
+            expected='875 B.C.' if text==second=='875 B.C.' else '8T5 B.C.'
+            self.assertEqual(rows[0]['text'],expected)
+            self.assertEqual(rows[0]['provenance'][0]['text'],'8T5 B.C.')
+
+    def test_unreadable_year_requires_intact_era_and_only_one_damaged_glyph(self):
+        for text in ('8TT B.C.','T B.C.','8T5 В.C.','8T5 A','8T5 Gold'):
+            with mock.patch('civ2.observe._crop_text') as crop:
+                _recover_status_year(Image.new('RGB',(640,480)),[row(text)],None,None,{})
+            crop.assert_not_called()
+
+    def test_actual_status_digit_is_recovered_from_pixels_without_game_state(self):
+        from civ2.observe import recognize
+        path=Path(__file__).resolve().parents[1]/'runs/attempt-010/screens/ui-0001419.png'
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        result=recognize(path)
+        dates=[r for r in result['lines'] if r['text']=='875 B.C' and r['bounds'][0]>=470]
+        self.assertEqual(len(dates),1)
+        self.assertEqual([p['text'] for p in dates[0]['provenance']],['8T5 B.C.','875 B.C','875 B.C'])
+
     def test_actual_second_scale_preserves_native_year(self):
         from civ2.observe import recognize
         path=Path(__file__).resolve().parents[1]/'runs/attempt-010/screens/ui-0001194.png'

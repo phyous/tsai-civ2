@@ -50,13 +50,16 @@ def classify_native_choice(observation,rows,resources,rules=None):
         if supplied!=[source]:continue
         title_names={_normal(source['title'])}
         if tag=='NOFOREIGN':title_names.add('foreign ifinister') # actual isolated3950/48
+        if tag=='ANNOYPEACE':title_names.add('foreign mfinister') # actual011/1596
         headings=[r for r in rows if _normal(r['text']) in title_names]
         if len(headings)!=1:continue
         title=headings[0];cx,cy=title['center']
         if title['confidence']<.8 or not 80<=cx<=560 or not 45<=cy<=360:continue
         # Source widths bound the foreground; default-width dialogs receive a
         # conservative440px text region. This is a guard, not a measured border.
-        half=(source['width'] or 440)/2+8
+        # The original ANNOYPEACE illustration adds horizontal space outside
+        # its @width=320 text block: actual011/1596 panel x118..522.
+        half=204 if tag=='ANNOYPEACE' else (source['width'] or 440)/2+8
         controls=[r for r in rows if _normal(r['text']) in CONTROL_WORDS]
         if len(controls)!=1 or _normal(controls[0]['text'])!='ok':continue
         ok=controls[0]
@@ -101,10 +104,13 @@ def classify_native_choice(observation,rows,resources,rules=None):
             option_source_lines=[r['source_line'] for r in alternatives],button_source_line=ok['source_line'],
             match='Complete original title and body, all ordered alternatives and sole observed OK',
             calibration=('Original isolated3950 F3 no-contact notice, frame48' if tag=='NOFOREIGN' else
+                         'Original attempt011 treaty-break warning, frame1596' if tag=='ANNOYPEACE' else
                          'Source and synthetic-layout validation; no original live modal capture yet'))
         if _normal(title['text'])!=_normal(source['title']):
             evidence['title_recovery']=dict(raw=title['text'],original_title=source['title'],
-                source='Measured original3950 F3 Foreign Ifinister OCR; complete no-contact body independently required')
+                source=('Measured original3950 F3 Foreign Ifinister OCR; complete no-contact body independently required'
+                        if tag=='NOFOREIGN' else
+                        'Measured original011/1596 Foreign Mfinister OCR; complete warning and both alternatives independently required'))
         if counterparty:evidence['observed_counterparty']=counterparty
         matches.append(dict(kind=KINDS[tag],title=title['text'],resource_tag=tag,
             options=[_control(r,'option') for r in alternatives] if model else [button],buttons=[button],

@@ -69,5 +69,35 @@ class GreetingBodyPixels(unittest.TestCase):
         crop.assert_not_called();self.assertEqual(rows[1]['text'],'"Greetings from the most exalted TEST:')
         self.assertEqual(rows[2]['text'],tail['text'])
 
+    def test_greetings01_keeps_observed_leader_and_requires_two_exact_tail_reads(self):
+        for changed in (False,True):
+            rows=self.rows();rows[1]['text']='"I bring tidings from TEST King, ruler and'
+            rows[2]=prepared('Emperor of the TEST..',308,425,251,16)
+            tail=dict(text='Emperor of the TEST ..."',confidence=1,x=.01,y=.06,width=.94,height=.77)
+            second=deepcopy(tail)
+            if changed:second['text']='Emperor of the OTHER ..."'
+            before=deepcopy(rows)
+            with tempfile.TemporaryDirectory() as directory,patch.object(observe,'_crop_text') as crop,patch.object(
+                    observe,'_run_ocr',side_effect=[[tail],[second]]):
+                observe._recover_greeting_body(Image.new('RGB',(640,480)),rows,None,directory,{'passes':[]})
+            crop.assert_not_called();self.assertEqual(rows[1],before[1])
+            if changed:self.assertEqual(rows,before)
+            else:
+                self.assertEqual(rows[2]['text'],tail['text'])
+                self.assertEqual(rows[2]['provenance'][-1]['scale'],2)
+
+    def test_original_greetings01_retains_every_word_and_has_no_strategic_choice(self):
+        p=Path('runs/attempt-010/screens/ui-0001762.png')
+        if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original herald absent')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'GREETINGS01')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        self.assertIn('"I bring tidings from Frederick, ruler and',[r['text'] for r in o['lines']])
+        tail=next(r for r in o['lines'] if r['text'].startswith('Emperor'))
+        self.assertEqual(tail['text'],'Emperor of the Germans ..."')
+        self.assertIn(tail['provenance'][0]['text'],('Emperor of the Germans.','Emperor of the Germans..'))
+
 
 if __name__=='__main__':unittest.main()
