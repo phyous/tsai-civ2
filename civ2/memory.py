@@ -432,8 +432,8 @@ class LiveMemoryObserver:
         self._reads_started = True
         total_start = time.monotonic()
         try:
-            self.game.rpc('resume')
             for attempt in range(self.max_attempts):
+                self.game.rpc('resume')
                 start = time.monotonic(); sequence = self.game.rpc('status')['inputSequence']
                 inventory_before = _save_inventory(self.game.rpc('listSaves'))
                 _require(inventory_before == self.initial_save_inventory, 'Native save created or changed during final run')
@@ -450,6 +450,11 @@ class LiveMemoryObserver:
                     if index == 1 and middle_settle:
                         time.sleep(middle_settle)
                     if index < 2: wires.append(self._read_wire(sequence))
+                # Guest time is no longer needed after the last authentic
+                # image. Freeze it before host hashing/parsing and inventory
+                # checks, which otherwise allow an avoidable blink repaint.
+                # Every retry resumes above; the final safety pause remains.
+                self.game.rpc('pause')
                 after = self.game.rpc('status')['inputSequence']
                 inventory_after = _save_inventory(self.game.rpc('listSaves'))
                 _require(inventory_after == self.initial_save_inventory, 'Native save created or changed during final run')

@@ -45,3 +45,35 @@ class MemorySettleTests(TestCase):
                 with self.assertRaises(memory.MemoryObservationError):observer.read(middle_settle=delay)
                 self.assertEqual(events,[])
                 observer.game.capture.assert_not_called()
+
+    def test_guest_is_paused_immediately_after_last_capture_before_host_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events=[];observer=self.observer(directory,events);original=memory.capsule_from_wires
+            def build(*args,**kwargs):
+                self.assertEqual(events[-4:],['capture','pause','status','listSaves'])
+                events.append('validate')
+                return original(*args,**kwargs)
+            with mock.patch.object(memory,'capsule_from_wires',side_effect=build):result=observer.read()
+            self.assertEqual(events.count('capture'),3)
+            self.assertEqual(events.count('wire'),2)
+            self.assertEqual(events.count('pause'),2)
+            self.assertEqual(events[-1],'pause')
+            self.assertEqual(result['receipt']['proof']['input_sequence_after'],7)
+
+    def test_unstable_native_pair_resumes_retry_after_early_pause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events=[];observer=self.observer(directory,events);observer.max_attempts=2
+            def read_wire(sequence):
+                # A fresh independently named request on every native read.
+                events.append('wire');return wire(nonce=format(events.count('wire'),'032x'))
+            observer._read_wire.side_effect=read_wire
+            original=memory.capsule_from_wires;attempts=[]
+            def build(*args,**kwargs):
+                attempts.append(True)
+                if len(attempts)==1:raise memory.MemoryObservationError('TEST native pair changed')
+                return original(*args,**kwargs)
+            with mock.patch.object(memory,'capsule_from_wires',side_effect=build):result=observer.read()
+            lifecycle=[e for e in events if e in ('resume','pause','capture')]
+            self.assertEqual(lifecycle,['resume','capture','capture','capture','pause',
+                                        'resume','capture','capture','capture','pause','pause'])
+            self.assertEqual(result['receipt']['attempts'],2)
