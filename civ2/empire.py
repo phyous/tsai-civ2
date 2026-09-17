@@ -10,7 +10,7 @@ from copy import deepcopy
 import re
 
 from .dialogs import classify_dialog
-from .policy import model_state, STRATEGY_QUESTION
+from .policy import model_state, STRATEGY_QUESTION, _unit_health_resolved
 from .rules import eligible_governments
 from .save import parse_rules
 from .revision import RevisionError, revision
@@ -83,7 +83,8 @@ def _production_context(state,rules):
     def spec(identifier):
         matches=[s for s in rules.get('units',[]) if s.get('id')==identifier]
         return matches[0] if len(matches)==1 else {}
-    workers=[u for u in units if spec(u.get('type_id')).get('role')==5]
+    unresolved={u['id'] for u in units if not _unit_health_resolved(u,spec(u.get('type_id')))}
+    workers=[u for u in units if u['id'] not in unresolved and spec(u.get('type_id')).get('role')==5]
     unknown=sum(type(spec(u.get('type_id')).get('role')) is not int for u in units)
     builds=[];unknown_builds=0;city_facts=[]
     for city in cities:
@@ -92,7 +93,7 @@ def _production_context(state,rules):
         if production.get('kind') not in ('unit','improvement','wonder'):unknown_builds+=1
         if build.get('role')==5:builds.append(city['id'])
         here=[u for u in units if (u.get('x'),u.get('y'))==(city.get('x'),city.get('y'))]
-        armed=sum(spec(u.get('type_id')).get('attack',0)>0 for u in here)
+        armed=sum(u['id'] not in unresolved and spec(u.get('type_id')).get('attack',0)>0 for u in here)
         home=[u for u in units if type(u.get('home_city_id')) is int and u['home_city_id']==city['id']]
         # These stock ground roles are explicitly covered by the manual's
         # military/Settler support rules. Other types remain unclassified.
@@ -105,9 +106,12 @@ def _production_context(state,rules):
         support=dict(home_units=len(home),home_units_away=sum(
             (u.get('x'),u.get('y'))!=(city.get('x'),city.get('y')) for u in home),
             known_ground_support_units=len(ground),home_worker_units=len(home_workers),
-            unclassified_home_units=len(home)-len(ground))
+            unclassified_home_units=len(home)-len(ground),
+            unresolved_native_home_unit_ids=[u['id'] for u in home if u['id'] in unresolved])
         government=state['player'].get('government_id');size=city.get('size')
-        if type(government) is int and government in (1,2) and type(size) is int and size>0:
+        if support['unresolved_native_home_unit_ids']:
+            support['arithmetic_unavailable']='Home roster contains unresolved native HP; await a stable native observation before estimating support.'
+        if not support['unresolved_native_home_unit_ids'] and type(government) is int and government in (1,2) and type(size) is int and size>0:
             allowance=size if government==1 else 3
             support.update(free_shield_support_allowance=allowance,
                 minimum_shield_support=max(0,len(ground)-allowance),
@@ -119,13 +123,14 @@ def _production_context(state,rules):
                     cost=2*size+len(home_workers) if resource=='food' else support['minimum_shield_support']
                     support[resource+'_after_listed_costs']=gross-cost
         city_facts.append(dict(city_id=city['id'],name=city['name'],owned_units_here=len(here),
-            armed_units_here=armed,unknown_unit_specifications_here=sum(type(spec(u.get('type_id')).get('attack')) is not int for u in here),
+            armed_units_here=armed,unresolved_native_unit_ids=[u['id'] for u in here if u['id'] in unresolved],unknown_unit_specifications_here=sum(type(spec(u.get('type_id')).get('attack')) is not int for u in here),
             production=deepcopy(production),unit_production_repeats=production.get('kind')=='unit',support_review=support))
     return dict(owned_worker_units=len(workers),worker_producing_city_ids=builds,
         unknown_unit_specifications=unknown,unknown_production_specifications=unknown_builds,
-        no_observed_worker_or_worker_build=(not workers and not builds and unknown==unknown_builds==0),
+        unresolved_native_unit_ids=sorted(unresolved),
+        no_observed_worker_or_worker_build=(not workers and not builds and not unresolved and unknown==unknown_builds==0),
         cities=city_facts,
-        note='Only owned records and original unit roles/base attack are counted. Garrison counts do not establish safety, sufficiency or a required build. Unit production repeats after completion until changed; this is not a completion forecast.',
+        note='Only owned records and original unit roles/base attack are counted. Zero or unresolved HP records remain visible but are excluded from armed/worker counts; they block support arithmetic for their home city. Garrison counts do not establish safety, sufficiency or a required build. Unit production repeats after completion until changed; this is not a completion forecast.',
         support_note='Original manual: home city pays support regardless of current location. Arithmetic is limited to Despotism/Monarchy and current recorded population/output. The shield minimum counts only known ground combat/worker roles; unclassified units may add costs. Food subtracts two per citizen and one per known home worker. These remainders are not verified net surplus: waste, other unit costs, food routes and native effects are not modeled. A nonnegative remainder does not establish sustainability or predict output after Settler completion. Missing home identities are not assigned to a nearby city.',
         support_source='https://archive.org/details/civ2_manual')
 

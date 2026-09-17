@@ -13,8 +13,8 @@ def support_fixture(government=1):
                     dict(id=2,name='Warriors',role=1,domain=0,attack=1)]
     state['cities'][0].update(size=2,food_produced=6,shields_produced=2,
                              production=dict(id=0,kind='unit',name='Settlers'))
-    state['units']=[dict(id=i,owner=1,type_id=2,home_city_id=0,x=2,y=2) for i in range(4)]
-    state['units'].append(dict(id=20,owner=1,type_id=0,home_city_id=0,x=0,y=2))
+    state['units']=[dict(id=i,owner=1,type_id=2,home_city_id=0,x=2,y=2,hp=10) for i in range(4)]
+    state['units'].append(dict(id=20,owner=1,type_id=0,home_city_id=0,x=0,y=2,hp=10))
     return state,screen,rules
 
 
@@ -39,7 +39,7 @@ class EmpireSupportTests(unittest.TestCase):
         # 008 city370 displays Support3/Production1, Food3/Surplus0.
         state,_,rules=support_fixture(2)
         state['cities'][0].update(size=1,food_produced=3,shields_produced=4)
-        state['units'].append(dict(id=21,owner=1,type_id=2,home_city_id=0,x=2,y=2))
+        state['units'].append(dict(id=21,owner=1,type_id=2,home_city_id=0,x=2,y=2,hp=10))
         result=budget(state,rules)
         self.assertEqual(result['free_shield_support_allowance'],3)
         self.assertEqual(result['minimum_shield_support'],3)
@@ -59,7 +59,7 @@ class EmpireSupportTests(unittest.TestCase):
         state,_,rules=support_fixture();before=budget(state,rules)
         for i,extra in enumerate((dict(owner=2,home_city_id=0),dict(home_city_id=None),
                                   dict(home_city_id=3),dict(home_city_id=False),{})):
-            unit=dict(id=40+i,owner=1,type_id=0,x=2,y=2);unit.update(extra)
+            unit=dict(id=40+i,owner=1,type_id=0,x=2,y=2,hp=10);unit.update(extra)
             state['units'].append(unit)
         self.assertEqual(budget(state,rules),before)
 
@@ -67,7 +67,7 @@ class EmpireSupportTests(unittest.TestCase):
         state,_,rules=support_fixture()
         rules['units'].append(dict(id=40,name='TEST Ship',role=2,domain=2,attack=12))
         for i,kind in enumerate((40,99)):
-            state['units'].append(dict(id=50+i,owner=1,type_id=kind,home_city_id=0,x=2,y=2))
+            state['units'].append(dict(id=50+i,owner=1,type_id=kind,home_city_id=0,x=2,y=2,hp=10))
         result=budget(state,rules)
         self.assertEqual(result['home_units'],7)
         self.assertEqual(result['unclassified_home_units'],2)

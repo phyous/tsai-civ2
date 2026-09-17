@@ -553,16 +553,30 @@ def _city_labor_context(observation, rules, cities):
             "action_note": "Only separately offered city_action candidates authorize a labor click after a fresh city checkpoint. Removing a worker creates an entertainer; assigning an entertainer uses an observed unworked tile. Specialist-type cycling is not verified. This context alone never adds an action."}
 
 
+def _unit_health_resolved(unit, specification):
+    """Positive observed HP only; retain zero/malformed records as unresolved."""
+    hp=unit.get('hp');lost=unit.get('hp_lost');maximum=specification.get('max_hp')
+    if 'hp' in unit and (type(hp) is not int or hp<=0):return False
+    if 'hp_lost' in unit and (type(lost) is not int or lost<0):return False
+    if type(maximum) is int and maximum>0:
+        if type(hp) is int and hp>maximum:return False
+        if type(lost) is int and lost>=maximum:return False
+        if type(lost) is int:return True
+    return type(hp) is int and hp>0
+
+
 def _empire_readiness(observation, rules, own, cities, specifications):
     """Compact arithmetic over owned records and original rules, never a forecast."""
-    armed={u['id'] for u in own if specifications.get(str(u['type_id']),{}).get('attack',0)>0}
-    workers={u['id'] for u in own if specifications.get(str(u['type_id']),{}).get('role')==5}
+    unresolved={u['id'] for u in own if not _unit_health_resolved(u,specifications.get(str(u['type_id']),{}))}
+    armed={u['id'] for u in own if u['id'] not in unresolved and specifications.get(str(u['type_id']),{}).get('attack',0)>0}
+    workers={u['id'] for u in own if u['id'] not in unresolved and specifications.get(str(u['type_id']),{}).get('role')==5}
     unknown={u['id'] for u in own if str(u['type_id']) not in specifications}
     garrisons=[];pipeline=[]
     for city in cities:
         here=[u['id'] for u in own if (u['x'],u['y'])==(city['x'],city['y'])]
         garrisons.append({'city_id':city['id'],'name':city['name'],'owned_unit_ids':here,
             'armed_unit_ids':[identifier for identifier in here if identifier in armed],
+            'unresolved_native_unit_ids':[identifier for identifier in here if identifier in unresolved],
             'unknown_specification_unit_ids':[identifier for identifier in here if identifier in unknown]})
         item=city.get('production',{})
         specs=[s for s in rules.get('units',[]) if item.get('kind')=='unit' and s.get('id')==item.get('id')]
@@ -575,8 +589,9 @@ def _empire_readiness(observation, rules, own, cities, specifications):
                       'Owned records from the bound native save and original RULES.TXT'),
         'owned_armed_unit_count':len(armed),'owned_worker_unit_count':len(workers),
         'unknown_unit_specification_count':len(unknown),'city_garrisons':garrisons,
+        'unresolved_native_unit_ids':sorted(unresolved),
         'worker_production_pipeline':pipeline,
-        'count_scope':'Counts use available original specifications; unknown specifications are reported separately. Armed means positive original base attack. Non-armed units may still defend. Locations and production are current checkpoint facts, not effective defense, safety, completion dates or guaranteed outcomes.',
+        'count_scope':'Counts use available original specifications; unknown specifications are reported separately. Armed means positive original base attack and positive resolved HP. Zero/missing/malformed HP records remain in the roster and are flagged unresolved; they are not counted as ready defenders or workers. Non-armed units may still defend. Locations and production are current checkpoint facts, not effective defense, safety, completion dates or guaranteed outcomes.',
         'current_government':observation.get('player',{}).get('government'),
         'available_government_concepts':[g for g in eligible_governments(observation,rules) if g['id']!=current],
         'government_adoption_note':'Original manual, Governments: discovering a government advance does not adopt it. A revolution may cause temporary Anarchy, followed by a separate native government choice. Available concepts are not automatic switches or permission to skip the original confirmation.'}
@@ -792,3 +807,63 @@ def validate_action(action, observation, rules=None, dialog=None):
         expected = unit_candidates(observation, rules=rules)
     if action.get("id") not in expected or expected[action["id"]] != action:
         raise PolicyError("The selected action is stale or differs from a current candidate.")
+
+
+def city_actions(state, screen, reviewed=None, rules=None, *, labor_ready=False,
+                 observation=None, activation_ready=False):
+    """Explicit wrapper: legacy controls plus opt-in, freshly bound activation."""
+    from .city_controls import city_control_candidates
+    from .unit_activation import activation_candidates
+    actions=city_control_candidates(state,screen,reviewed,rules,labor_ready=labor_ready)
+    if activation_ready is True:
+        if not isinstance(observation,dict) or observation.get('sha256')!=screen.get('sha256'):
+            raise PolicyError('Activation requires the same original city observation')
+        actions.update(activation_candidates(state,observation,_rules(rules),reviewed,ready=True))
+    return actions
+
+
+def city_action_request_for(state, screen, actions=None, reviewed=None, rules=None,
+                            recent_actions=None, *, labor_ready=False,
+                            observation=None, activation_ready=False):
+    """Opt-in wrapper; unchanged legacy request whenever no activation is offered."""
+    from .city_controls import city_control_candidates,city_control_request_for,labor_allowance
+    expected=city_actions(state,screen,reviewed,rules,labor_ready=labor_ready,
+                          observation=observation,activation_ready=activation_ready)
+    if actions is None:actions=expected
+    if actions!=expected:raise PolicyError('City actions differ from the bound observed candidates')
+    base=city_control_candidates(state,screen,reviewed,rules,labor_ready=labor_ready)
+    additions={i:a for i,a in actions.items() if i not in base}
+    if not additions:
+        return city_control_request_for(state,screen,base,reviewed,rules,recent_actions,labor_ready=labor_ready)
+    if len(base)>1:
+        request=city_control_request_for(state,screen,base,reviewed,rules,recent_actions,labor_ready=labor_ready)
+    else:
+        # Reviewed controls may leave Exit plus a real activation intent. No
+        # phantom unreviewed control is injected to manufacture a model choice.
+        request=dict(state=model_state(state,rules,recent_actions),questions={
+            'city_action':dict(type='choice',instructions='Choose one offered native city action or Exit.',criteria={}),
+            'empire_strategy':deepcopy(STRATEGY_QUESTION)})
+        request['state']['city_control_review']=dict(actor=deepcopy(base['exit_city']['actor']),
+            observed_title=base['exit_city']['preconditions']['observed_city_title'],
+            year_raw=base['exit_city']['preconditions']['year_raw'],
+            reviewed_action_ids=base['exit_city']['preconditions']['reviewed_action_ids'],
+            labor_review=labor_allowance(state,base['exit_city']['actor']['id'],reviewed),
+            labor_checkpoint_ready=labor_ready,
+            scope='Reviewed city controls remain omitted for this same city/year; Exit and the separately bound activation intents remain available.',
+            review_policy='Omitted reviewed actions are not declared illegal; no review or reassignment is inferred.')
+    request['questions']['city_action']['criteria']={i:a['label'] for i,a in actions.items()}
+    request['questions']['city_action']['instructions']+=' An activation choice authorizes only the identified fortified unit’s original Activate Unit and Close City Screen workflow. It does not move, disband, rehome or otherwise order that unit; a new native observation must verify its resulting order and selection.'
+    request['state']['city_control_review']['controls']={i:a['label'] for i,a in actions.items()}
+    request['state']['city_unit_activation']=dict(checkpoint_ready=True,
+        calibration=next(iter(additions.values()))['preconditions']['grid_calibration'],
+        intents=deepcopy(additions),
+        scope='Only positively calibrated one-row Units Present layouts and living owned fortified units are offered. Omitted layouts or units are unverified, not declared illegal. Wake-up alone does not change a unit’s home support cost or authorize a subsequent move.')
+    return request
+
+
+def validate_city_action(action,state,screen,reviewed=None,rules=None,*,labor_ready=False,
+                         observation=None,activation_ready=False):
+    expected=city_actions(state,screen,reviewed,rules,labor_ready=labor_ready,
+                          observation=observation,activation_ready=activation_ready)
+    if not isinstance(action,dict) or expected.get(action.get('id'))!=action:
+        raise PolicyError('City action differs from its bound canonical candidate')

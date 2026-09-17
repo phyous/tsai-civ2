@@ -24,11 +24,11 @@ class EmpireTests(unittest.TestCase):
         s,screen,r=inputs()
         r['units']=[dict(id=2,name='Warriors',role=1,attack=1),dict(id=0,name='Settlers',role=5,attack=0)]
         s['cities'][0]['production']=dict(id=2,kind='unit',name='Warriors')
-        s['units']=[dict(id=i,owner=1,type_id=2,type='Warriors',x=2,y=2,order=2) for i in range(5)]
+        s['units']=[dict(id=i,owner=1,type_id=2,type='Warriors',x=2,y=2,order=2,hp=10) for i in range(5)]
         for case in ('none','existing_worker','worker_build','unknown','foreign_worker'):
             ss=deepcopy(s)
             if case in ('existing_worker','foreign_worker'):
-                ss['units'].append(dict(id=10,owner=1 if case=='existing_worker' else 2,type_id=0,type='Settlers',x=4,y=4))
+                ss['units'].append(dict(id=10,owner=1 if case=='existing_worker' else 2,type_id=0,type='Settlers',x=4,y=4,hp=10))
             if case=='worker_build':ss['cities'][0]['production']=dict(id=0,kind='unit',name='Settlers')
             if case=='unknown':ss['units'].append(dict(id=10,owner=1,type_id=99,x=4,y=4))
             actions=empire_candidates(ss,screen,rules=r)

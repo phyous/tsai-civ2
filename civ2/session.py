@@ -340,17 +340,34 @@ class Session:
         receipt['images'] = images
         return receipt
 
+    def enable_unit_activation(self):
+        """Opt into owned stack observations at the next native checkpoint.
+
+        No existing state is reinterpreted and no game input is sent. Actual
+        activation still needs a fresh city view and a separate Jev choice.
+        """
+        if getattr(self,'unit_activation_enabled',False):return
+        if self.pending_decisions:
+            raise RuntimeError('Finish observing pending commands before enabling unit activation')
+        status=self.game.rpc('status')
+        if status.get('paused') is not True or status.get('heldKeys')!=[] or status.get('buttons')!=0:
+            raise RuntimeError('Unit activation capability requires a paused game with clear inputs')
+        from .unit_activation import CALIBRATION
+        self.journal.append('unit_activation_enabled',calibration=CALIBRATION,executes_input=False)
+        self.unit_activation_enabled=True
+
     def checkpoint(self):
         checkpoint_index=self.checkpoints+1
+        parsing = ({'include_stack_links':True} if getattr(self,'unit_activation_enabled',False) else {})
         if getattr(self, 'observer', None) is None:
             name = f'd{checkpoint_index:06d}.sav'
             data, receipt = self.ui.save_native(name)
             self.game.rpc('pause')
-            state = parse_save(data, rules_text=self.rules_text)
+            state = parse_save(data, rules_text=self.rules_text, **parsing)
             path = 'saves/'+name
             provenance = {}
         else:
-            state, data, receipt = self._live_read(self.observer.read(rules_text=self.rules_text))
+            state, data, receipt = self._live_read(self.observer.read(rules_text=self.rules_text, **parsing))
             path = f'observations/d{checkpoint_index:06d}.json'
             provenance = {'observation_kind':'live_memory'}
         for key in ('difficulty','barbarians','bloodlust','simplified_combat','round_world','scenario','restart_eliminated'):
@@ -734,16 +751,35 @@ class Session:
         self.publish('running')
         return action, after
 
-    def choose_city_control(self, screen, reviewed, *, labor_ready=False):
-        actions = city_control_candidates(self.state, screen, reviewed, self.rules, labor_ready=labor_ready)
+    def choose_city_control(self, screen, reviewed, *, labor_ready=False,
+                            observation=None, activation_ready=False):
+        if activation_ready:
+            if not getattr(self,'unit_activation_enabled',False) or not labor_ready:
+                raise RuntimeError('Unit activation needs an enabled capability and a fresh city checkpoint')
+            if getattr(self,'pending_unit_activation',None) is not None:
+                raise RuntimeError('A unit activation is already pending')
+            from .policy import city_actions,city_action_request_for,validate_city_action
+            actions=city_actions(self.state,screen,reviewed,self.rules,labor_ready=labor_ready,
+                                 observation=observation,activation_ready=True)
+        else:
+            actions = city_control_candidates(self.state, screen, reviewed, self.rules, labor_ready=labor_ready)
         decision_id = None
         if len(actions) == 1:
             action = actions['exit_city']
             self.journal.append('forced_city_control', action=action, reviewed=deepcopy(reviewed),
                 reason='Only observed Exit remains after city review. No model distribution created.')
         else:
-            request = city_control_request_for(self.state, screen, actions, reviewed, self.rules,
-                                               recent_actions=list(self.history), labor_ready=labor_ready)
+            request = (city_action_request_for(self.state,screen,actions,reviewed,self.rules,
+                        recent_actions=list(self.history),labor_ready=labor_ready,
+                        observation=observation,activation_ready=True) if activation_ready else
+                       city_control_request_for(self.state, screen, actions, reviewed, self.rules,
+                                               recent_actions=list(self.history), labor_ready=labor_ready))
+            if getattr(self,'unit_activation_enabled',False):
+                request['questions']['city_action']['instructions'] += (
+                    ' Verified unit activation is enabled. When Review labor is offered, it also refreshes'
+                    ' the city and its stationed-unit roster. Choose that review if considering waking a'
+                    ' fortified unit; afterward eligible exact unit activation intents can be offered'
+                    ' as separate choices. The review itself never activates or moves a unit.')
             request['state']['checkpoint_freshness'] = {
                 'pending_decisions_since_native_save':list(self.pending_decisions),
                 'note':'Saved city statistics may precede pending orders; this city window and its control labels are current.'}
@@ -755,10 +791,20 @@ class Session:
                 request['state']['latest_observed_city_report'] = deepcopy(self.city_report)
             action = self._evaluate(request, actions, 'city_action')
             decision_id = self.decisions
-        validate_city_control(action, self.state, screen, reviewed, self.rules, labor_ready=labor_ready)
+        if activation_ready:
+            validate_city_action(action,self.state,screen,reviewed,self.rules,labor_ready=labor_ready,
+                                 observation=observation,activation_ready=True)
+        else:
+            validate_city_control(action, self.state, screen, reviewed, self.rules, labor_ready=labor_ready)
         current = self.ui.observe()
         if current['sha256'] != screen['sha256']:
             raise RuntimeError('Native city screen changed before the chosen control')
+        if action['kind']=='unit_activation':
+            from .activation_flow import begin_activation
+            self.pending_unit_activation=begin_activation(action,self.state,current,self.rules,
+                decision_id,self.journal.append,reviewed,ready=True)
+            self.publish('paused')
+            return action,current
         self.game.rpc('resume')
         inputs = self.game.click(*action['parameters']['center'])
         time.sleep(.4)
@@ -775,6 +821,36 @@ class Session:
             'turn':self.state['turn'],'label':action['label'],'kind':'city_control'})
         self.publish('running')
         return action, after
+
+    def advance_unit_activation(self, observation, dialog, resources, labels):
+        """Continue only the already-selected unit intent, then observe its result."""
+        from .activation_flow import dispatch_activation_step,complete_activation
+        pending=self.pending_unit_activation
+        if pending['phase']=='checkpoint':
+            if not dialog.get('supported') or dialog.get('kind') not in ('normal_map','end_turn'):
+                raise RuntimeError('Activation confirmation has not returned to the original map')
+            self.checkpoint()
+            result=complete_activation(pending,self.state,self.checkpoints,self.journal.append)
+            for record in reversed(self.history):
+                if record.get('decision')==pending['decision']:
+                    record['outcome']='Native activation checkpoint: '+result['status']
+                    record['observed_activation']=deepcopy(result);break
+            if result['status']=='unexpected_change':
+                raise RuntimeError('Native activation result differed from the selected unit intent')
+            self.pending_unit_activation=None
+            self.publish('paused')
+            return result
+        phase=pending['phase']
+        after=dispatch_activation_step(pending,self.ui,observation,resources,labels,self.journal.append)
+        if phase=='confirm_activation':
+            action=pending['action'];identifier=pending['decision']
+            self._mark_dispatched(identifier,'city_action',action,pending['last_input']['inputs'])
+            self.history.append(dict(turn=self.state['turn'],actor=deepcopy(action['actor']),
+                decision=identifier,action=deepcopy(action),order=action['label'],
+                outcome='Activation confirmation dispatched; awaiting native checkpoint'))
+            self.chronicle.append(dict(id=str(identifier),turn=self.state['turn'],label=action['label'],kind='unit_activation'))
+        self.publish('running')
+        return after
 
     def mechanical(self, label, code='Enter'):
         self.game.rpc('resume')

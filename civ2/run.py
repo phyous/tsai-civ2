@@ -452,7 +452,8 @@ def run_steps(session, *, max_decisions=10000):
     context = controller_context(session)
     housekeeping = 0
     verified_endturn_checkpoint = None
-    while session.decisions < max_decisions or context['pending_labor_refresh'] is not None:
+    while (session.decisions < max_decisions or context['pending_labor_refresh'] is not None
+           or getattr(session,'pending_unit_activation',None) is not None):
         if session.recorder:
             session.recorder.check()
         session.game.rpc('pause')
@@ -475,6 +476,9 @@ def run_steps(session, *, max_decisions=10000):
             return {'status':'paused','reason':audience_wait_error,'screen':observation['path']}
         if turn_wait_error:
             return {'status':'paused','reason':turn_wait_error,'screen':observation['path']}
+        if getattr(session,'pending_unit_activation',None) is not None:
+            session.advance_unit_activation(observation,dialog,resources,labels_text())
+            continue
         if not dialog['supported']:
             return {'status':'paused','reason':'Original screen requires a controller update.',
                     'screen':observation['path'],'classification':dialog}
@@ -611,9 +615,15 @@ def run_steps(session, *, max_decisions=10000):
                 ready=context['city_labor_ready']=={'city':_labor_city(session.state,actor),
                     **prefixed_revision(session.state)}
                 previous_decisions = session.decisions
-                action, _ = session.choose_city_control(dialog, review, labor_ready=True) if ready else session.choose_city_control(dialog,review)
+                if ready and getattr(session,'unit_activation_enabled',False):
+                    action,_=session.choose_city_control(dialog,review,labor_ready=True,
+                        observation=observation,activation_ready=True)
+                else:
+                    action, _ = session.choose_city_control(dialog, review, labor_ready=True) if ready else session.choose_city_control(dialog,review)
                 decision=session.decisions if session.decisions>previous_decisions else None
-                if action['id']=='review_labor':
+                if action['kind']=='unit_activation':
+                    context['city_labor_ready']=None
+                elif action['id']=='review_labor':
                     start_labor_refresh(session,context,action['actor'],decision=decision,preparation_action=action)
                 elif action['kind']=='city_labor':
                     review['labor_reassignments']=review.get('labor_reassignments',0)+1
@@ -755,6 +765,7 @@ def main():
     parser.add_argument('--fps',type=int,default=4)
     parser.add_argument('--port',type=int,default=3920)
     parser.add_argument('--planning',action='store_true',help='Ask Jev for persistent unit objectives before independent action choices')
+    parser.add_argument('--unit-activation',action='store_true',help='Offer verified fortified-unit activation after a fresh city review')
     args = parser.parse_args()
     if args.no_saves and not args.setup_directory:
         parser.error('--no-saves requires --setup-directory')
@@ -772,6 +783,8 @@ def main():
                       game=game,planning=args.planning,observer=observer,setup_directory=args.setup_directory)
     outcome = None
     try:
+        if args.unit_activation:
+            session.enable_unit_activation()
         outcome = run_steps(session,max_decisions=args.max_decisions)
         print(json.dumps(outcome))
     finally:

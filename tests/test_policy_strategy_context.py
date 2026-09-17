@@ -7,7 +7,7 @@ from civ2.policy import dialog_request_for,model_state
 
 class StrategyContextTests(unittest.TestCase):
     def test_garrisons_and_pipeline_count_owned_checkpoint_facts_only(self):
-        s=fixture();r=rules()
+        s=fixture();r=rules();s['units'][0]['hp']=10
         s['cities']=[dict(id=0,owner=1,name='TEST Rome',x=8,y=8,size=2,production={'kind':'unit','id':0}),
                      dict(id=1,owner=1,name='TEST Veii',x=10,y=8,size=1,production={'kind':'unit','id':1})]
         warrior={**deepcopy(s['units'][0]),'id':8,'type_id':1,'type':'Warriors','x':10,'specification':r['units'][1]}

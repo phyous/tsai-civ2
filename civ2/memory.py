@@ -292,7 +292,7 @@ def _validate_capsule(data):
     return capsule, second
 
 
-def parse_memory(data, rules_text=None):
+def parse_memory(data, rules_text=None, *, include_stack_links=False):
     """Return only owned/explored state from the exact canonical memory capsule."""
     capsule, snapshot = _validate_capsule(data)
     regions = snapshot['regions']
@@ -313,7 +313,7 @@ def parse_memory(data, rules_text=None):
     layout[terrain:terrain+6*area] = regions['terrain']
     layout[unit_base:city_base] = regions['units']; layout[city_base:] = regions['cities']
     try:
-        state = parse_save(bytes(layout), rules_text=rules_text)
+        state = parse_save(bytes(layout), rules_text=rules_text,include_stack_links=include_stack_links)
     except SaveFormatError as exc:
         raise MemoryObservationError(str(exc)) from exc
     old_evidence = state['evidence']
@@ -424,7 +424,7 @@ class LiveMemoryObserver:
             time.sleep(.025)
         raise MemoryObservationError('No complete current map observation from native helper')
 
-    def read(self, *, rules_text=None):
+    def read(self, *, rules_text=None, include_stack_links=False):
         last_error = None
         self._reads_started = True
         total_start = time.monotonic()
@@ -450,7 +450,7 @@ class LiveMemoryObserver:
                                               input_sequence_after=after, elapsed_ms=round(1000*(time.monotonic()-start)),
                                               save_inventory_initial=self.initial_save_inventory, save_inventory_before=inventory_before,
                                               save_inventory_after=inventory_after, runtime_provenance=self.provenance, campaign_start=self.campaign_start)
-                    state = parse_memory(data, rules_text=rules_text)
+                    state = parse_memory(data, rules_text=rules_text,include_stack_links=include_stack_links)
                 except MemoryObservationError as exc:
                     last_error = exc
                     _require(after == sequence, 'Ordinary input interrupted observation')

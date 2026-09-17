@@ -36,6 +36,9 @@ SCREEN_KEYS = {'screen', 'before', 'after', 'dialog', 'typed', 'saved',
 DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_action',
               'empire_command_dispatched': 'empire_action', 'city_control_dispatched':'city_action'}
 KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
+                'unit_activation_enabled',
+                'unit_activation_started','unit_activation_step_started','unit_activation_step_dispatched',
+                'unit_activation_failed','unit_activation_observed',
                 'screen_observed', 'mechanical_input', 'open_city_control',
                 'native_map_observed', 'native_map_observation_failed',
                 'model_command_not_dispatched', 'model_command_interrupted', 'controller_error', 'controller_update', 'controller_input_gap',
@@ -563,6 +566,9 @@ def _action_binding(action, request, question, saves, *, forced=False):
                  and pre.get('screen_kind') == 'end_turn' and _sha(pre.get('image_sha256')),
                  'Empire action is outside the observed End of Turn command mapping')
     elif question == 'city_action':
+        if action['kind']=='unit_activation':
+            _activation_binding(action,request,state,saves)
+            return
         controls = {'change_production':('change','production_choice'),
                     'open_buy_quote':('buy','buy_quote'), 'exit_city':('exit','original_map'),
                     'review_labor':('exit','fresh_city_labor')}
@@ -624,6 +630,149 @@ def _action_binding(action, request, question, saves, *, forced=False):
                          'Labor preparation must be an explicit choice before fresh tile choices')
     else:
         raise VerificationError('Unsupported model dispatch question')
+
+
+_ACTIVATION_GROUND_NAMES={0:'Settlers',1:'Engineers',2:'Warriors',3:'Phalanx',4:'Archers',5:'Legion',
+    6:'Pikemen',7:'Musketeers',8:'Fanatics',9:'Partisans',10:'Alpine Troops',11:'Riflemen',12:'Marines',
+    13:'Paratroopers',14:'Mech. Inf.',15:'Horsemen',16:'Chariot',17:'Elephant',18:'Crusaders',19:'Knights',
+    20:'Dragoons',21:'Cavalry',22:'Armor',23:'Catapult',24:'Cannon',25:'Artillery',26:'Howitzer',
+    46:'Diplomat',47:'Spy',48:'Caravan',49:'Freight',50:'Explorer',51:'Extra Land'}
+_ACTIVATION_HP=(20,20,10,10,10,10,10,20,20,20,20,20,20,20,30,10,10,10,10,10,20,20,30,10,20,20,30,
+                20,20,20,20,20,10,10,20,20,30,30,30,30,40,30,40,30,10,10,10,10,10,10,10,10,20,20)
+_ACTIVATION_ADJECTIVES=('Roman','Babylonian','German','Egyptian','American','Greek','Indian','Russian',
+    'Zulu','French','Aztec','Chinese','English','Mongol','Celtic','Japanese','Viking','Spanish','Persian','Carthaginian','Sioux')
+_ACTIVATION_POPUP_SHA='92d3b820fff1f9593a6e5a474cc5f7a52f7b3e445abc269f3363d9ac4d5c5561'
+
+
+def _activation_binding(action,request,state,saves):
+    """Bind the original unit/whole visible stack, independently of its label."""
+    from .unit_activation import CALIBRATION,ACTIVATE,IDENTITY
+    pre,actor,params=action['preconditions'],action['actor'],action['parameters']
+    city=pre.get('city')
+    _require(isinstance(city,dict) and set(city)=={'kind','id','owner','name','x','y'} and city['kind']=='city',
+             'Activation requires an owned native city identity')
+    # Reuse the existing city/year/title/request checks through a harmless
+    # validation-only Exit descriptor. It is never journaled or dispatched.
+    proxy={**action,'id':'exit_city','kind':'city_control','actor':city,
+        'parameters':dict(center=[1,1],button_index=0,observed_text='Exit',control='button',
+            expected_screen='original_map',only_open_menu=False,purchase_authorized=False,
+            confirmation_requires_separate_choice=False)}
+    _action_binding(proxy,request,'city_action',saves)
+    members=[u for u in state['units'] if (u['x'],u['y'])==(city['x'],city['y'])]
+    stacks=[s for s in state.get('owned_unit_stacks',[]) if (s['x'],s['y'])==(city['x'],city['y'])]
+    _require(len(stacks)==1 and 1<=len(members)<=5 and pre.get('stack')==stacks[0]
+             and not any((u['x'],u['y'])==(city['x'],city['y']) for u in state['visible_units'] if u['owner']!=city['owner']),
+             'Activation has no complete calibrated native stack')
+    stack=stacks[0];ids=stack['unit_ids'];by_id={u['id']:u for u in members}
+    _require(len(ids)==len(set(ids))==len(members) and set(ids)==set(by_id)
+             and stack['links']==[dict(id=i,previous=ids[n-1] if n else None,
+                                      next=ids[n+1] if n+1<len(ids) else None) for n,i in enumerate(ids)],
+             'Activation stack links differ from the complete owned tile roster')
+    def alive(u):
+        t=u.get('type_id');lost=u.get('hp_lost')
+        return type(t) is int and 0<=t<len(_ACTIVATION_HP) and type(lost) is int and 0<=lost<_ACTIVATION_HP[t]
+    selected=state.get('selected_unit_id')
+    _require(all(alive(u) and u['owner']==city['owner'] for u in members)
+             and (selected is None or sum(u['id']==selected and alive(u) for u in state['units'])==1),
+             'Activation cannot use a dead stack member or unresolved foreign selection')
+    roster=[{k:deepcopy(by_id[i][k]) for k in IDENTITY} for i in ids]
+    _require(set(actor)==set(IDENTITY)|{'kind'} and actor['kind']=='unit'
+             and actor.get('id') in by_id and {k:actor[k] for k in IDENTITY}==roster[ids.index(actor['id'])]
+             and pre.get('unit_roster')==roster and actor['order_id']==2 and actor['veteran'] is False
+             and actor['type_id'] in _ACTIVATION_GROUND_NAMES and pre.get('grid_calibration')==CALIBRATION,
+             'Activation actor differs from its living fortified original unit')
+    tribe=state['player'].get('tribe_id');homes=[c for c in state['cities'] if c['id']==actor['home_city_id']]
+    _require(_int(tribe) and tribe<len(_ACTIVATION_ADJECTIVES) and len(homes)==1
+             and pre.get('expected_unit_text')==_ACTIVATION_ADJECTIVES[tribe]+' '+_ACTIVATION_GROUND_NAMES[actor['type_id']]
+             and pre.get('expected_home_text')=='Home City: '+homes[0]['name'],
+             'Activation popup identity differs from original unit and civilization metadata')
+    slot=ids.index(actor['id'])
+    _require(action['id']=='activate_city_unit_'+str(actor['id']) and params==dict(control='units_present',slot=slot,
+        center=[216+48*slot,310],expected_screen='unit_information',continuation=ACTIVATE,
+        native_checkpoint_required=True,movement_authorized=False),
+        'Activation does not target exactly its calibrated icon and continuation')
+    anchors=pre.get('grid_anchors');row=anchors.get('unitspresent') if isinstance(anchors,dict) else None
+    _require(isinstance(anchors,dict) and set(anchors)=={'unitspresent'} and isinstance(row,dict)
+             and set(row)=={'source_line','text','center','bounds'} and _int(row.get('source_line'))
+             and row.get('text','').casefold().replace(' ','')=='unitspresent'
+             and isinstance(row.get('center'),list) and len(row['center'])==2
+             and all(type(v) is int for v in row['center'])
+             and abs(row['center'][0]-315)<=12 and abs(row['center'][1]-283)<=6
+             and isinstance(row.get('bounds'),list) and len(row['bounds'])==4
+             and all(type(v) is int for v in row['bounds']) and 0<row['bounds'][2]<150 and 0<row['bounds'][3]<24,
+             'Activation lacks its original single-row Units Present anchor')
+    _require(request['state'].get('city_control_review',{}).get('labor_checkpoint_ready') is True,
+             'Activation must be offered only after a fresh city refresh')
+
+
+def _activation_command(action,step,command,files):
+    from .unit_activation import ACTIVATE
+    _require(isinstance(command,dict),'Activation step has no bounded command')
+    digest=command.get('source_image_sha256');files.screen(digest)
+    if step=='inspect_unit':
+        _require(command==dict(kind='click',point=action['parameters']['center'],
+                              source_image_sha256=action['preconditions']['image_sha256']),
+                 'Activation inspection differs from the selected original icon')
+        return
+    _require(step in ('select_activation','confirm_activation'),'Unknown activation step')
+    popup=command.get('popup')
+    _require(isinstance(popup,dict) and set(popup)=={'kind','source_image_sha256','source_sha256',
+        'resource_tag','title','unit','home','option','ok','cancel','scope'}
+        and popup.get('kind')=='unit_activation_continuation' and popup.get('source_image_sha256')==digest
+        and popup.get('source_sha256')==_ACTIVATION_POPUP_SHA and popup.get('resource_tag')=='UNITOPTIONS',
+        'Activation popup differs from its pinned original source and image')
+    rows={'title':('Unit Information',116,134),'unit':(action['preconditions']['expected_unit_text'],140,159),
+          'home':(action['preconditions']['expected_home_text'],160,181),'option':(ACTIVATE,311,333),
+          'ok':('OK',342,365),'cancel':('Cancel',342,365)}
+    for key,(text,low,high) in rows.items():
+        row=popup.get(key)
+        _require(isinstance(row,dict) and set(row)=={'text','source_line','center','bounds'}
+                 and row.get('text')==text and _int(row.get('source_line'))
+                 and isinstance(row.get('center'),list) and len(row['center'])==2
+                 and all(_int(v) for v in row['center']) and 90<=row['center'][0]<=550 and low<=row['center'][1]<=high
+                 and isinstance(row.get('bounds'),list) and len(row['bounds'])==4
+                 and all(_int(v) for v in row['bounds']) and 0<row['bounds'][2]<=640 and 0<row['bounds'][3]<40,
+                 'Activation popup identity/control descriptor is invalid')
+    _require(len({popup[k]['source_line'] for k in rows})==len(rows)
+             and popup['ok']['center'][0]<320<popup['cancel']['center'][0],
+             'Activation popup controls overlap or changed order')
+    if step=='select_activation':
+        _require(command==dict(kind='click',point=popup['option']['center'],source_image_sha256=digest,popup=popup),
+                 'Activation selection contains an unchosen input')
+        return
+    radio=command.get('radio')
+    expected=dict(source_image_sha256=digest,calibration='classic640-unit-options-radio-centers-v1',
+        selected_label=ACTIVATE,selected_bounds=[243,320,5,3],
+        unselected_bounds=[[243,y-1,5,3] for y in (195,220,246,271,296)],popup_source_sha256=_ACTIVATION_POPUP_SHA)
+    _require(command==dict(kind='key',code='Enter',source_image_sha256=digest,popup=popup,radio=expected),
+             'Activation confirmation lacks the exact selected-radio proof')
+    from PIL import Image
+    with Image.open(files.path(files.screen(digest))) as raw:
+        _require(raw.format=='PNG' and raw.size==(640,480),'Activation radio image is not original size')
+        image=raw.convert('RGB')
+        for index,y in enumerate((195,220,246,271,296,321)):
+            color=(0,0,0) if index==5 else (195,195,195)
+            _require(all(image.getpixel((x,yy))==color for x in range(243,248) for yy in range(y-1,y+2)),
+                     'Original activation radio pixels are not uniquely selected')
+
+
+def _activation_inputs(payload,files):
+    command=payload['command'];ordinary=_inputs(payload.get('inputs'))
+    _require(payload.get('before')==command['source_image_sha256'],
+             'Activation input source differs from its immediate observed command')
+    files.screen(payload.get('after'))
+    if command['kind']=='key':
+        _require([(r['type'],r.get('code'),r.get('down')) for r in ordinary]==
+                 [('key','Enter',True),('key','Enter',False)] and payload.get('pointer_park') is None,
+                 'Activation confirmation contains another key or pointer operation')
+        return len(ordinary)
+    action=dict(label='Activation step',preconditions={'image_sha256':payload['before']},
+                parameters={'center':command['point']})
+    count=_dispatch({**payload,'action':action},action,'city_action',files)
+    park=payload.get('pointer_park')
+    _require(isinstance(park,dict),'Activation click lacks its returned pointer-park receipt')
+    parked,_=_pointer_park({'before':payload['after'],'receipt':park},files)
+    return count+parked
 
 
 def _dispatch(payload, action, question, files):
@@ -1185,6 +1334,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     initial_campaign_start=None
     native_map_observations=native_map_failures=0
     failed_pointer_parks=[]
+    activation_enabled=False
+    activation_pending=None;activation_results=[];activation_steps=0;activation_failures=[]
     latest_runtime_input=0
     native_map_seen=set()
     for event in events:
@@ -1204,6 +1355,14 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             last_finish=None
         if kind not in KNOWN_EVENTS:
             unknown[kind] += 1
+        if activation_pending is not None:
+            _require(kind not in {'inference_started','model_decision','model_plan'}|set(DISPATCHES),
+                     'A new decision or dispatch interrupted an unresolved activation')
+            _require(kind in {'screen_observed','checkpoint','batch_observed_effect','plan_status',
+                'session_stopped','recording_finalized','controller_update','pointer_park_for_observation',
+                'native_map_observed','native_map_observation_failed','unit_activation_step_started',
+                'unit_activation_step_dispatched','unit_activation_failed','unit_activation_observed'},
+                'An unrelated input or transaction interrupted the selected activation')
         if kind in ('begin', 'checkpoint'):
             live = payload.get('observation_kind') == 'live_memory'
             _require(payload.get('observation_kind') in (None,'live_memory'),
@@ -1224,7 +1383,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                 data = files.path(info['path']).read_bytes()
                 if live:
                     from .memory import parse_memory
-                    state = parse_memory(data)
+                    state = parse_memory(data,include_stack_links=activation_enabled)
                     capsule=_loads(data)
                     proof=capsule['proof'];receipt=payload.get('receipt')
                     _require(state['evidence'].get('kind')=='live_memory'
@@ -1256,7 +1415,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     _require(proof['save_inventory_initial']==initial_memory_inventory,
                              'Live campaign resets its native save inventory baseline')
                 else:
-                    state = parse_save(data)
+                    state = parse_save(data,include_stack_links=activation_enabled)
                 if kind == 'begin':
                     checks = verify_setup(state)
                     initial_state = state
@@ -1295,6 +1454,105 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                                           turn=state['turn'],year=state['year_raw'])
                                      if last_finish is not None and state['turn']>last_finish['turn'] else None)
             last_finish=None
+        elif kind=='unit_activation_enabled':
+            from .unit_activation import CALIBRATION
+            _require(initial_state is not None and not activation_enabled
+                     and payload=={'calibration':CALIBRATION,'executes_input':False},
+                     'Activation capability must be enabled once without executing input')
+            activation_enabled=True
+        elif kind=='unit_activation_started':
+            identifier=payload.get('decision');action=payload.get('action')
+            _require(activation_enabled and activation_pending is None and city_pending is None and labor_refresh is None
+                     and set(payload)=={'decision','action','before_revision','source_image_sha256'}
+                     and identifier in decisions and identifier not in dispatched|refused_commands|interrupted_commands|set(input_gaps)
+                     and decisions[identifier]['question']=='city_action' and action==decisions[identifier]['action']
+                     and action.get('kind')=='unit_activation' and payload.get('before_revision')==prefixed_revision(saves[latest_save_sha256])
+                     and _revision_digest(action['preconditions'])==latest_save_sha256
+                     and payload.get('source_image_sha256')==action['preconditions']['image_sha256']
+                     and labor_ready is not None and _revision_digest(labor_ready)==latest_save_sha256
+                     and labor_ready.get('city')=={k:action['preconditions']['city'][k] for k in ('id','owner','name','x','y')},
+                     'Activation does not follow a selected unit and fresh same-city checkpoint/reopening')
+            files.screen(payload['source_image_sha256'])
+            activation_pending=dict(decision=identifier,action=action,phase='inspect_unit',command=None,
+                                    before_revision=latest_save_sha256,sequence=event['sequence'])
+            labor_ready=None
+        elif kind=='unit_activation_step_started':
+            _require(activation_pending is not None and set(payload)=={'decision','step','command'}
+                     and payload.get('decision')==activation_pending['decision']
+                     and payload.get('step')==activation_pending['phase'] and activation_pending['command'] is None,
+                     'Activation step is repeated or out of order')
+            _activation_command(activation_pending['action'],payload['step'],payload['command'],files)
+            activation_pending['command']=payload['command']
+            activation_pending['input_base']=previous_runtime_input
+        elif kind=='unit_activation_step_dispatched':
+            _require(activation_pending is not None and set(payload)=={'decision','step','command','before','after','inputs','pointer_park'}
+                     and payload.get('decision')==activation_pending['decision']
+                     and payload.get('step')==activation_pending['phase'] and activation_pending['command'] is not None
+                     and payload.get('command')==activation_pending['command'],
+                     'Activation input differs from its exact pending step')
+            count=_activation_inputs(payload,files)
+            ordinary=_inputs(payload['inputs'])
+            parking=payload.get('pointer_park')
+            if parking and parking.get('inputs'):ordinary+=_inputs(parking['inputs'])
+            start=activation_pending['input_base']
+            _require([r['sequence'] for r in ordinary]==list(range(start+1,start+count+1)),
+                     'Activation step has a missing, repeated or out-of-order ordinary input')
+            inputs+=count;activation_steps+=1
+            step=activation_pending['phase'];activation_pending['command']=None
+            activation_pending['phase']={'inspect_unit':'select_activation','select_activation':'confirm_activation',
+                                          'confirm_activation':'checkpoint'}[step]
+            if step=='confirm_activation':
+                dispatched.add(activation_pending['decision']);activation_pending['sequence']=event['sequence']
+        elif kind=='unit_activation_failed':
+            _require(activation_pending is not None and set(payload)=={'decision','step','reason','inputs','pointer_park','success_not_inferred'}
+                     and payload.get('decision')==activation_pending['decision'] and payload.get('step')==activation_pending['phase']
+                     and activation_pending['command'] is not None and payload.get('success_not_inferred') is True
+                     and isinstance(payload.get('reason'),str) and 0<len(payload['reason'])<=2000
+                     and isinstance(payload.get('inputs'),list), 'Activation failure has no matching uncertain step')
+            raw_inputs=[]
+            for item in payload['inputs']:
+                if isinstance(item,dict) and item.get('issued') is False and 'inputs' in item:
+                    _require(item.get('target')==activation_pending['command'].get('point'),
+                             'Failed activation cursor targeted another control')
+                    _require(isinstance(item['inputs'],list),'Failed activation input list is malformed')
+                    raw_inputs.extend(item['inputs'])
+                else:raw_inputs.append(item)
+            known=_inputs(raw_inputs) if raw_inputs else []
+            command=activation_pending['command']
+            if command['kind']=='key':
+                _require([(r['type'],r.get('code'),r.get('down')) for r in known] in
+                         ([],[('key','Enter',True)],[('key','Enter',True),('key','Enter',False)]),
+                         'Failed activation confirmation contains an unrelated input')
+            else:
+                _require(not any(r['type']=='key' for r in known),
+                         'Failed activation click contains an unrelated key')
+                clicks=[r for r in known if r['type']=='mouse' and r['event']!='mousemove']
+                _require([r['event'] for r in clicks] in ([],['mousedown'],['mousedown','mouseup'])
+                         and all(r['button']==0 for r in clicks),
+                         'Failed activation contains another mouse command')
+                wrappers=[r for r in payload['inputs'] if isinstance(r,dict) and 'inputs' in r]
+                _require(all(r.get('target')==command['point'] for r in wrappers)
+                         and (bool(wrappers) or all([r['x'],r['y']]==command['point'] for r in clicks)),
+                         'Failed activation click is not bound to its selected target')
+            inputs+=len(known)
+            if payload.get('pointer_park') is not None:
+                parked,_=_pointer_park({'before':activation_pending['command']['source_image_sha256'],
+                                       'receipt':payload['pointer_park']},files);inputs+=parked
+            activation_failures.append({'decision':payload['decision'],'step':payload['step'],
+                'known_input_events':len(known),'status':'uncertain_input_not_replayed'})
+            activation_pending['phase']='failed'
+        elif kind=='unit_activation_observed':
+            from .unit_activation import activation_result
+            _require(activation_pending is not None and set(payload)=={'decision','checkpoint','result'}
+                     and payload.get('decision')==activation_pending['decision'] and activation_pending['phase']=='checkpoint'
+                     and payload.get('checkpoint')==checkpoint_ordinal
+                     and checkpoint_sequences[latest_save_sha256]>activation_pending['sequence'],
+                     'Activation result lacks a later native checkpoint after confirmation')
+            result=activation_result(activation_pending['action'],saves[activation_pending['before_revision']],saves[latest_save_sha256])
+            _require(payload.get('result')==result,'Activation result differs from the independent native comparison')
+            activation_results.append({'decision':payload['decision'],**result})
+            if result['status']=='unexpected_change':activation_pending['phase']='failed'
+            else:activation_pending=None
         elif kind=='native_map_observed':
             digest=payload.get('artifact',{}).get('sha256')
             _require(digest not in native_map_seen,'Native map context reuses an earlier source capsule')
@@ -1591,6 +1849,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      and decisions[identifier]['question'] == question,
                      'Dispatch has no unique prior selected model decision')
             selected=decisions[identifier]['action']
+            _require(selected['kind']!='unit_activation','Activation must use its finite observed continuation')
             if selected['kind']=='city_labor':
                 key=(selected['actor']['id'],selected['actor']['name'],selected['preconditions']['year_raw'])
                 _require(labor_ready is not None
@@ -1846,6 +2105,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'native_map_observations':native_map_observations,
                           'native_map_observation_failures':native_map_failures,
                           'failed_pointer_parks':failed_pointer_parks,
+                          'unit_activation_enabled':activation_enabled,
+                          'unit_activation_steps':activation_steps,
+                          'unit_activation_results':activation_results,
+                          'unit_activation_failures':activation_failures,
                           'native_map_note':'Full source capsule, bracketed original frame, no intervening input and recorded menu/status OCR checked. This allows map artwork only; it is not a gameplay checkpoint or modal acknowledgement.',
                           'accepted_trade_continuations':trade_confirmations,
                           'trade_continuation_note':'Prior actual model offer/action and original frame/list pixels checked; one Enter only. Technology acquisition and OCR semantics are not independently inferred.',
@@ -1867,10 +2130,12 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                              'pending_city_control':city_pending is not None or forced_city_pending is not None,
                              'pending_labor_refresh':labor_refresh is not None,
                              'pending_trade_continuation':trade_pending is not None,
+                             'pending_unit_activation':activation_pending is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] in ('human_reviewed','assistant_reviewed') and len(dispatched) == len(decisions)
                               and len(started) == len(decisions)+len(plans) and forced_pending is None and not recoveries
-                              and city_pending is None and forced_city_pending is None and labor_refresh is None and trade_pending is None},
+                              and city_pending is None and forced_city_pending is None and labor_refresh is None and trade_pending is None
+                              and activation_pending is None},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
                            'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
                            'This verifier performs no OCR, live game calls or automatic victory recognition.',

@@ -102,7 +102,31 @@ def _improvements(value: int) -> list[str]:
     return result
 
 
-def parse_save(data: bytes, *, rules_text: str | None = None) -> dict:
+def _owned_stacks(data, unit_base, units):
+    """Expose only complete reciprocal owned chains, never foreign link IDs."""
+    groups={}
+    for unit in units:groups.setdefault((unit['x'],unit['y']),[]).append(unit)
+    stacks=[]
+    for (x,y),group in sorted(groups.items()):
+        ids={unit['id'] for unit in group}
+        links={unit['id']:struct.unpack_from('<hh',data,unit_base+26*unit['id']+22) for unit in group}
+        if any(previous==i or following==i or any(v!=-1 and v not in ids for v in (previous,following))
+               for i,(previous,following) in links.items()):continue
+        heads=[i for i,(previous,_) in links.items() if previous==-1]
+        if len(heads)!=1:continue
+        if any((previous!=-1 and links[previous][1]!=i) or (following!=-1 and links[following][0]!=i)
+               for i,(previous,following) in links.items()):continue
+        order=[];at=heads[0]
+        while at!=-1 and at not in order:
+            order.append(at);at=links[at][1]
+        if at!=-1 or set(order)!=ids:continue
+        stacks.append(dict(x=x,y=y,unit_ids=order,links=[dict(id=i,
+            previous=None if links[i][0]==-1 else links[i][0],
+            next=None if links[i][1]==-1 else links[i][1]) for i in order]))
+    return stacks
+
+
+def parse_save(data: bytes, *, rules_text: str | None = None, include_stack_links=False) -> dict:
     """Return only the human player's owned/known observation.
 
     Foreign unit visibility is additionally limited to immediate own-unit/city
@@ -279,7 +303,8 @@ def parse_save(data: bytes, *, rules_text: str | None = None) -> dict:
     # The alive mask is a starting-player count only on the initial turn.
     # Later it changes with eliminations/restarts and cannot recover setup.
     starting_civilizations=(data[46] & 0xfe).bit_count() if u16(28)==1 else None
-    return dict(version=VERSION,turn=u16(28),year=i16(30),year_raw=i16(30),view=view,
+    if type(include_stack_links) is not bool:raise SaveFormatError('Stack projection opt-in must be boolean')
+    state=dict(version=VERSION,turn=u16(28),year=i16(30),year_raw=i16(30),view=view,
                 selected_unit_id=None if u16(34)==65535 else u16(34),
                 settings=dict(difficulty=DIFFICULTIES[data[44]],barbarians=BARBARIANS[data[45]],
                               # Bit 4 ENABLES HP/firepower. The original clone's
@@ -295,3 +320,6 @@ def parse_save(data: bytes, *, rules_text: str | None = None) -> dict:
                               classic_layout=True,year_semantics="signed raw field; validate against displayed year",
                               foreign_units="visibility mask AND immediate own-unit/city adjacency only",
                               outcome="not inferred from save; require original result UI"))
+    if include_stack_links:
+        state['owned_unit_stacks']=_owned_stacks(data,unit_base,own_units)
+    return state

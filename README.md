@@ -73,6 +73,9 @@ The dense spectator panel can show 16 command probabilities and separate
 independent Jev vectors in the same live/recording layout, plus recent evaluations
 when there is room. [Native city labor](docs/labor-controls.md) includes calibrated
 worker reassignment and a fresh state check after every change. The
+[optional unit-activation control](docs/unit-activation.md) lets Jev wake an
+identified fortified unit through the original city window after that review.
+Enable it with `--unit-activation`. The
 [persistent OCR worker](docs/ocr-performance.md) reduces observation overhead.
 The [researched strategy guide](docs/strategy-sources.md) is included in actual
 Jev requests, with its revision and sources retained in the decision evidence.
