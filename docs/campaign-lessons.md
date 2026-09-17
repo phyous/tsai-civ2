@@ -49,6 +49,8 @@ the message about archeologists discovering the remains of the civilization.
 Its full recording and terminal screenshot are retained. American Horsemen had
 attacked Rome; the earlier production and support problems left this campaign
 with one city. This is a confirmed loss, not a successful full-game run.
+The [attempt 009 postmortem](attempt-009-postmortem.md) gives the audited counts,
+actual decision history and limits of the observed combat evidence.
 
 A read during combat also contained a zero-HP owned unit and a selected enemy
 unit while the status panel still said End of Turn. That intermediate state

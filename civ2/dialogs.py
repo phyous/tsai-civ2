@@ -110,7 +110,9 @@ def _rows(observation):
             raise DialogObservationError('Invalid OCR confidence')
         prepared=dict(text=text,normal=_normal(text),center=list(center),bounds=list(bounds),
                       source_line=index,confidence=confidence)
-        if proven_badge(row,observation['sha256']):prepared['original_city_badge']=True
+        if proven_badge(row,observation['sha256']):
+            prepared['original_city_badge']=True
+            prepared['original_city_badge_bounds']=list(row['map_badge_pixels']['bounds'])
         if (arrows:=proven_tax_arrows(row,observation['sha256'])):
             prepared['native_tax_arrows']=arrows
         colors=row.get('map_patch_colors')
@@ -304,9 +306,13 @@ def _owned_city_size_sprite(row, labels, state):
 def _city_badge_text(row,labels):
     if (not row.get('original_city_badge') or row['confidence']<.8
             or not re.fullmatch(r'[1-9][0-9]?',row['text'])):return False
-    return any(abs(row['center'][0]-label['center'][0])<=32
-               and 14<=label['center'][1]-row['center'][1]<=30
-               and -2<=label['bounds'][1]-(row['bounds'][1]+row['bounds'][3])<=12 for label in labels)
+    # OCR may include nearby artwork in a numeric row's box. Its unique
+    # hash-bound13px badge raster, rather than the oversized OCR box, locates
+    # the layout element; no population value is inferred from it.
+    x,y,w,h=row['original_city_badge_bounds']
+    return any(abs(x+w/2-label['center'][0])<=32
+               and 14<=label['center'][1]-(y+h/2)<=30
+               and -2<=label['bounds'][1]-(y+h)<=12 for label in labels)
 
 
 def _native_map_kind(rows, observation, state, native_map_context=None):

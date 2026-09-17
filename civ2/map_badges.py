@@ -23,13 +23,13 @@ def annotate_badges(image,rows,source_hash):
     for row in rows:
         x,y,w,h=row['bounds']
         if (not re.fullmatch(r'[1-9][0-9]?',row['text']) or row['confidence']<.8
-                or not 8<=x<x+w<=456 or not 70<=y<y+h<=440 or not 1<=w<=20 or not 8<=h<=18):continue
+                or not 8<=x<x+w<=456 or not 70<=y<y+h<=440 or not 1<=w<=20 or not 8<=h<=24):continue
         candidates=[]
-        for left in range(x-2,x+2):
+        for left in range(x-2,x+3):
             for top in range(y-3,y+2):
                 for width in (11,17):
                     if (abs(left+width/2-row['center'][0])>5
-                            or abs(top+6.5-row['center'][1])>4):continue
+                            or abs(top+6.5-row['center'][1])>6):continue
                     pattern=[''.join('K' if max(pixels[xx,yy])<80 else 'W' if min(pixels[xx,yy])>230 else '.'
                                      for xx in range(left,left+width))for yy in range(top,top+13)]
                     if badge_pattern(pattern):candidates.append(([left,top,width,13],pattern))
@@ -49,4 +49,4 @@ def proven_badge(row,source_hash):
             and box[2]==len(proof['pattern'][0]) and box[3]==13
             and 6<=box[0] and box[0]+box[2]<=458 and 67<=box[1] and box[1]+13<=445
             and abs(box[0]+box[2]/2-row['center'][0])<=5
-            and abs(box[1]+6.5-row['center'][1])<=4)
+            and abs(box[1]+6.5-row['center'][1])<=6)

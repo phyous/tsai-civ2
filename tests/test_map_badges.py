@@ -29,6 +29,38 @@ class MapBadgeTests(unittest.TestCase):
             annotate_badges(original,[candidate],'a'*64)
             self.assertNotIn('map_badge_pixels',candidate,changed)
 
+    def test_oversized_ocr_box_uses_exact_badge_pixels_for_city_geometry(self):
+        from civ2.dialogs import _rows,_city_badge_text
+        image=Image.new('RGB',(640,480),'green');draw=ImageDraw.Draw(image)
+        draw.rectangle((210,201,220,213),fill='white');draw.line((210,201,220,201),fill='black')
+        draw.line((210,201,210,213),fill='black');draw.line((220,201,220,213),fill='black')
+        draw.rectangle((215,205,216,212),fill='black')
+        row={'text':'2','bounds':[208,202,14,22],'center':[215,213],'confidence':1}
+        annotate_badges(image,[row],'a'*64)
+        self.assertTrue(proven_badge(row,'a'*64))
+        converted=_rows({'width':640,'height':480,'sha256':'a'*64,'lines':[row]})[0]
+        label={'center':[234,228],'bounds':[218,220,33,15]}
+        self.assertTrue(_city_badge_text(converted,[label]))
+        self.assertFalse(_city_badge_text(converted,[{'center':[330,228],'bounds':[314,220,33,15]}]))
+        self.assertFalse(proven_badge(row,'b'*64))
+        self.assertNotIn('value',row['map_badge_pixels'])
+
+    def test_optional_original_010_oversized_badge_no_native_map_bypass(self):
+        from civ2.dialogs import classify_dialog
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-010/screens/ui-0000285.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original badge unavailable')
+        before=p.read_bytes();o=observe.recognize(p)
+        badge=next(row for row in o['lines'] if row['text']=='2')
+        self.assertEqual(badge['bounds'],[208,202,14,22])
+        self.assertEqual(badge['map_badge_pixels']['bounds'],[210,201,11,13])
+        state={'player':{'id':1,'tribe_id':0},'evidence':{'kind':'live_memory','observation_sha256':'a'*64},
+               'cities':[{'id':0,'owner':1,'name':'Rome','x':52,'y':8},
+                         {'id':5,'owner':1,'name':'Veii','x':56,'y':8}]}
+        dialog=classify_dialog(o,state=state)
+        self.assertEqual(dialog['kind'],'end_turn',dialog)
+        self.assertNotIn('native_map',dialog['evidence'])
+        self.assertEqual(p.read_bytes(),before)
+
     def test_low_confidence_city_word_needs_two_actual_agreeing_crop_readings(self):
         def row(text,x=220,y=222,width=30,height=16,confidence=1):
             return observe._prepare_rows([{'text':text,'x':x/640,'y':y/480,'width':width/640,'height':height/480,'confidence':confidence}],640,480,'TEST')[0]
