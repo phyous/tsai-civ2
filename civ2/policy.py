@@ -604,7 +604,14 @@ def model_state(observation, rules=None, recent_actions=None):
     _revision(observation)
     rules = _rules(rules)
     _, _, tiles = _map(observation)
-    unit = _unit(observation)
+    selected_id=observation.get('selected_unit_id')
+    missing_selection=(_integer(selected_id) and selected_id>=0
+                       and not any(isinstance(u,dict) and u.get('id')==selected_id
+                                   for u in observation.get('units',[])))
+    # Combat/turn processing can leave the native selection on a vacated slot.
+    # Global/dialog context needs no selected actor. Unit candidate generation
+    # still uses _unit directly and refuses this unavailable selection.
+    unit = None if missing_selection else _unit(observation)
     unit_fields = ("id", "type_id", "type", "owner", "x", "y", "hp", "hp_lost", "veteran", "movement_thirds_spent", "order_id", "waiting", "home_city_id", "specification")
     selected = {key: deepcopy(unit[key]) for key in unit_fields if key in unit} if unit else None
     nearby = []
@@ -646,6 +653,8 @@ def model_state(observation, rules=None, recent_actions=None):
         "strategy_guide": {"revision":STRATEGY_GUIDE_REVISION,"sources":deepcopy(STRATEGY_GUIDE_SOURCES),
                            "scope":"Researched advice adapted to Prince and current observations; no automatic commands or hidden facts."},
         "selected_unit": selected, "neighboring_tiles": nearby,
+        **({'selected_unit_note':'The native selection does not identify a unit in the current observed owned roster. No selected actor is available for unit orders.'}
+           if missing_selection else {}),
         "selected_unit_city_context": {"nearest_owned_city": _nearest_city(observation, unit),
             "at_owned_city_center": (unit["x"], unit["y"]) in city_centers,
             "distance_note": "Geometric keypad steps on an empty grid, accounting for horizontal world wrap. Not terrain costs, reachability or a known safe path."} if unit else None,
