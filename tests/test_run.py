@@ -46,6 +46,19 @@ class ControllerTests(TestCase):
              mock.patch('civ2.run.time.sleep'):
             return run_steps(s,max_decisions=limit)
 
+    def test_no_contact_report_completes_requested_foreign_review(self):
+        notice=frame(1,'information',resource_tag='NOFOREIGN',mechanical_action='acknowledge_information')
+        end=frame(2,'end_turn');s=session([notice,end,end]);s.mechanical=mock.Mock();s.checkpoint=mock.Mock()
+        ctx=controller_context(s);ctx['pending_empire']={'id':'open_diplomacy'}
+        def choose(dialog,reviewed):
+            self.assertIn('open_diplomacy',reviewed['actions'])
+            s.decisions+=1;return {'id':'finish_turn'},frame(3,'normal_map')
+        s.choose_empire=mock.Mock(side_effect=choose)
+        with mock.patch('civ2.run.Session.remember_public_notice'):
+            self.run_fake(s)
+        s.mechanical.assert_called_once_with('acknowledge_information')
+        s.choose_empire.assert_called_once()
+
     def test_agreed_audience_waits_through_map_without_checkpoint_or_repeated_choice(self):
         audience=frame(1,'diplomacy','Neutral TEST Emissary',resource_tag='EMISSARY',requires_model=True,
                        options=[{'text':'"Yes. I will grant an audience."'},{'text':'"No. Send him away."'}])

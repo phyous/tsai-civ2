@@ -25,6 +25,7 @@ from .tax_controls import proven_tax_arrows
 from .exchange_picker import classify_exchange_picker
 from .acquisition_notice import classify_acquisition_notice
 from .history_notice import classify_history_notice
+from .native_choices import classify_native_choice
 from .native_map import evidence_for as native_map_evidence
 
 CDROM_TEMPLATE_SHA256='28a50ae19b7eaf7abf51d1c97ab591c3f03abff2e7a19fc18dcb623914666fd7'
@@ -637,6 +638,12 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             result['evidence']['template_sha256']=hashlib.sha256(expected.encode()).hexdigest()
             return finish('presentation_notice','Throne room notice',[button],[button],
                           mechanical='acknowledge_presentation')
+    native_choice=classify_native_choice(observation,rows,dialog_resources(game_text or ''),rules)
+    if native_choice:
+        result['resource_tag']=native_choice['resource_tag']
+        result['evidence'].update(native_choice['evidence'])
+        return finish(native_choice['kind'],native_choice['title'],native_choice['options'],native_choice['buttons'],
+                      model=native_choice['requires_model'],mechanical=native_choice['mechanical_action'])
     history=classify_history_notice(observation,rows,game_text,dialog_resources(game_text or ''))
     if history:
         result['resource_tag']='HISTORY'

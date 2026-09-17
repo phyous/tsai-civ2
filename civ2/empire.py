@@ -122,6 +122,18 @@ def _production_context(state,rules):
                     support['gross_'+resource]=gross
                     cost=2*size+len(home_workers) if resource=='food' else support['minimum_shield_support']
                     support[resource+'_after_listed_costs']=gross-cost
+            if (build.get('id')==0 and build.get('role')==5 and build.get('domain')==0
+                    and size>1 and not support['unclassified_home_units']):
+                next_allowance=size-1 if government==1 else 3
+                scenario=dict(kind='conditional_arithmetic_not_a_forecast',
+                    assumption='This Settler completes at the current city size, with no growth, other unit change or government change.',
+                    population_if_completed=size-1,home_support_units_if_completed=len(ground)+1,
+                    free_shield_allowance_if_completed=next_allowance,
+                    shield_support_if_completed=max(0,len(ground)+1-next_allowance),
+                    output_warning='Gross output is NOT projected. Losing population can remove a worked tile and reduce output; current output may overstate what remains. This does not predict completion time or which unit the original game would remove.')
+                if 'gross_shields' in support:
+                    scenario['shields_after_support_if_gross_output_unchanged']=support['gross_shields']-scenario['shield_support_if_completed']
+                support['settler_completion_scenario']=scenario
         city_facts.append(dict(city_id=city['id'],name=city['name'],owned_units_here=len(here),
             armed_units_here=armed,unresolved_native_unit_ids=[u['id'] for u in here if u['id'] in unresolved],unknown_unit_specifications_here=sum(type(spec(u.get('type_id')).get('attack')) is not int for u in here),
             production=deepcopy(production),unit_production_repeats=production.get('kind')=='unit',support_review=support))

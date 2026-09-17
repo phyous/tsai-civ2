@@ -100,3 +100,26 @@ class EmpireSupportTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class ConditionalSettlerSupportTests(unittest.TestCase):
+    def test_population_loss_and_added_support_are_explicitly_conditional(self):
+        state,_,rules=support_fixture();state['units'].pop()
+        state['cities'][0].update(size=2,shields_produced=3)
+        original=deepcopy(state);scenario=budget(state,rules)['settler_completion_scenario']
+        self.assertEqual(scenario['population_if_completed'],1)
+        self.assertEqual(scenario['home_support_units_if_completed'],5)
+        self.assertEqual(scenario['shield_support_if_completed'],4)
+        self.assertEqual(scenario['shields_after_support_if_gross_output_unchanged'],-1)
+        self.assertEqual(scenario['kind'],'conditional_arithmetic_not_a_forecast')
+        self.assertIn('NOT projected',scenario['output_warning']);self.assertEqual(state,original)
+    def test_monarchy_keeps_fixed_allowance_and_unsupported_cases_have_no_scenario(self):
+        state,_,rules=support_fixture(2)
+        self.assertEqual(budget(state,rules)['settler_completion_scenario']['free_shield_allowance_if_completed'],3)
+        for change in ('size_one','other_build','other_government','unresolved'):
+            s=deepcopy(state)
+            if change=='size_one':s['cities'][0]['size']=1
+            elif change=='other_build':s['cities'][0]['production']['id']=2
+            elif change=='other_government':s['player']['government_id']=5
+            else:s['units'][0]['hp']=0
+            self.assertNotIn('settler_completion_scenario',budget(s,rules))

@@ -289,7 +289,8 @@ def _native_map_fallback(session, observation, dialog, resources, _attempt=0):
         raise ValueError('Native map trigger image changed')
     changed_frame=False
     try:
-        value = session.observer.read(rules_text=session.rules_text)
+        value = session.observer.read(rules_text=session.rules_text,
+                                      middle_settle=(0.0,.25,.5)[_attempt])
         status = session.game.rpc('status')
         if status.get('paused') is not True or status.get('heldKeys') or status.get('buttons'):
             raise ValueError('Native map context must return paused with no held input')
@@ -366,6 +367,12 @@ def observe_ready(session, resources):
         observation = session.ui.observe()
         dialog = classify_dialog(observation, rules=session.rules, game_text=resources, labels_text=labels_text(),
                                  state=classification_state(session))
+    # A blink can invalidate the first bracketed image while the subsequent
+    # paint waits stabilize the canvas. Give that final eligible map frame one
+    # bounded proof attempt; the same current-image and modal guards apply.
+    if (not dialog.get('supported') and dialog.get('kind') == 'unknown'
+            and dialog.get('reason') == 'Unexpected text over the native map playfield; possible unrecognized modal'):
+        observation, dialog = _native_map_fallback(session, observation, dialog, resources)
     return observation, dialog
 
 
@@ -518,6 +525,8 @@ def run_steps(session, *, max_decisions=10000):
                     'open_diplomacy':{'foreign_minister'},
                     'open_revolution':{'revolution_choice','revolution_offer'}}
         if pending and kind in expected.get(pending['id'],set()):
+            context['pending_empire_confirmed'] = True
+        if pending and pending['id']=='open_diplomacy' and dialog.get('resource_tag')=='NOFOREIGN':
             context['pending_empire_confirmed'] = True
         if kind in ('victory','game_over'):
             return {'status':'paused','reason':'Original end-game screen awaits outcome verification.',

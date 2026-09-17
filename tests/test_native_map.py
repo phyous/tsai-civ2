@@ -153,9 +153,12 @@ class NativeMapRunnerVerifierTests(unittest.TestCase):
                 output=BytesIO();image.save(output,format='PNG');changed=output.getvalue()
                 s.game.request.side_effect=[changed,changed,changed] if persistent else [changed,picture()]
                 before=e.observer.calls
-                with mock.patch('civ2.observe.recognize',return_value=deepcopy(o)):
+                with mock.patch('civ2.observe.recognize',return_value=deepcopy(o)), \
+                     mock.patch.object(e.observer,'read',wraps=e.observer.read) as reads:
                     fresh,result=_native_map_fallback(s,o,d,'')
                 self.assertEqual(e.observer.calls-before,3 if persistent else 2)
+                self.assertEqual([call.kwargs['middle_settle'] for call in reads.call_args_list],
+                                 [0.,.25,.5] if persistent else [0.,.25])
                 self.assertEqual(result['supported'],not persistent)
                 s.game.click.assert_not_called();s.ui.key.assert_not_called()
                 e.finish(checkpoint=False)

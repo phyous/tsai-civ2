@@ -105,3 +105,42 @@ class AcceptedTradeTests(TestCase):
             elif case=='label':action['parameters']['observed_text']='TEST accept something else'
             else:rules['advances'][0]['name']='Other'
             self.assertIsNone(accepted_trade_context(dialog,action,89,rules),case)
+
+
+class MultipleExchangeTests(TestCase):
+    def fixture(self,directory):
+        o,rules,resources=fixture(directory)
+        for i,name in ((1,'TEST Second'),(2,'TEST Third')):
+            item=deepcopy(o['lines'][1]);item['text']=name;item['bounds'][1]+=17*i;item['center'][1]+=17*i
+            o['lines'].insert(1+i,item);rules['advances'].append({'id':12+i,'name':name})
+        return o,rules,resources
+    def test_every_visible_advance_is_a_real_model_choice(self):
+        with TemporaryDirectory() as directory:
+            o,rules,resources=self.fixture(directory)
+            result=classify_exchange_picker(o,_rows(o),resources,rules,{'pending_trade':{'offered_advance':rules['advances'][0]}})
+            self.assertEqual([r['text'] for r in result['options']],['TEST Advance','TEST Second','TEST Third'])
+            self.assertTrue(result['requires_model']);self.assertIsNone(result['mechanical_action'])
+            self.assertIsNone(result['advance']);self.assertIsNone(result['prior_trade'])
+            self.assertFalse(result['evidence']['complete_visible_singleton'])
+    def test_missing_row_or_hidden_content_cannot_be_called_complete(self):
+        for case in ('missing','duplicate','extra_pixels','scroll'):
+            with TemporaryDirectory() as directory:
+                o,rules,resources=self.fixture(directory)
+                if case=='missing':o['lines'].pop(2)
+                elif case=='duplicate':o['lines'][2]['text']=o['lines'][1]['text']
+                else:
+                    path=Path(o['path']);im=Image.open(path).convert('RGB')
+                    im.putpixel((400,245) if case=='extra_pixels' else (628,245),(0,0,0));im.save(path)
+                    o['sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+                self.assertIsNone(classify_exchange_picker(o,_rows(o),resources,rules))
+    def test_actual_original_three_options_remain_independent(self):
+        from civ2.observe import recognize
+        from civ2.run import game_text
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        p=Path('runs/attempt-010/screens/ui-0000508.png')
+        if not p.exists():self.skipTest('Private original capture absent')
+        o=recognize(p);o['path']=str(p)
+        result=classify_exchange_picker(o,_rows(o),dialog_resources(game_text()),parse_rules(original_rules()))
+        self.assertEqual([r['text'] for r in result['options']],['Masonry','Pottery','Warrior Code'])
+        self.assertTrue(result['requires_model']);self.assertIsNone(result['mechanical_action'])

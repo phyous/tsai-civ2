@@ -57,5 +57,21 @@ class AcquisitionTests(unittest.TestCase):
         self.assertIn('Romans acquire Currencyl',[x['text'] for x in line['provenance']])
         self.assertEqual(original,p.read_bytes())
 
+    def test_actual_pottery_notice_preserves_corresponding_ascii_control_confidence(self):
+        p=Path('runs/attempt-011/screens/ui-0000379.png')
+        if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private native capture unavailable')
+        from civ2.run import game_text,labels_text
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        o=recognize(p);o['path']=str(p)
+        out=classify_dialog(o,game_text=game_text(),labels_text=labels_text(),rules=parse_rules(original_rules()),state={'player':{'tribe':'Romans'}})
+        self.assertTrue(out['supported'],out)
+        self.assertEqual(out['resource_tag'],'LABELS_ACQUIRE_ADVANCE')
+        self.assertEqual(out['title'],'Romans acquire Pottery!')
+        control=next(r for r in o['lines'] if r['text']=='OK')
+        self.assertEqual(control['confidence'],1.)
+        self.assertEqual(control['provenance'][0]['text'],'OК')
+        self.assertEqual(control['provenance'][0]['confidence'],.5)
+
 
 if __name__=='__main__':unittest.main()

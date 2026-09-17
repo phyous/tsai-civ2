@@ -107,6 +107,20 @@ class ObserveTests(unittest.TestCase):
                 result, _ = self.recognize([row('OК')], fallback)
                 self.assertEqual(result['lines'][0]['text'], 'OК')
 
+    def test_control_confidence_tracks_actual_same_location_reading(self):
+        for native_text in ('OK', 'OК'):
+            with self.subTest(native_text=native_text):
+                result, _ = self.recognize([dict(row(native_text), confidence=.5)], [row('OK', x=301)])
+                control=result['lines'][0]
+                self.assertEqual(control['text'],'OK')
+                self.assertEqual(control['confidence'],1.)
+                self.assertEqual([p['confidence'] for p in control['provenance']],[.5,1.])
+                self.assertEqual(control['center'],[320,337])
+        result,_=self.recognize([row('OК')],[dict(row('OK',x=301),confidence=.4)])
+        self.assertEqual(result['lines'][0]['confidence'],.4)
+        result,_=self.recognize([dict(row('OK'),confidence=.5)],[row('OK',y=200)])
+        self.assertEqual(result['lines'][0]['confidence'],.5)
+
     def test_contradictory_or_broad_overlaps_are_not_new_click_targets(self):
         for native in ([row('OR')], [row('Long native sentence', x=150, width=250)]):
             with self.subTest(native=native):

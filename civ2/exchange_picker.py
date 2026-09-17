@@ -1,4 +1,4 @@
-"""Recognize one visible original TAKECIV list entry; never authorize a choice.
+"""Recognize the complete visible original TAKECIV list; never choose an entry.
 
 A caller still needs the immediately preceding Jev-accepted exchange and matching
 advance before treating its sole continuation as mechanical. This module reads
@@ -15,6 +15,7 @@ from PIL import Image
 
 EMPTY_RECT=(310,186,628,440)
 SELECTED_RECT=(580,170,627,183)
+PICKER_RECT=(298,137,640,479)
 ACCEPT='"Okay, let\'s exchange knowledge."'
 
 
@@ -94,16 +95,29 @@ def classify_exchange_picker(observation, rows, resources, rules, state=None):
     No names are invented from the source template or prior strategic context.
     """
     if (not isinstance(observation,dict) or (observation.get('width'),observation.get('height'))!=(640,480)
-            or not isinstance(rows,list) or len(rows)!=4 or not isinstance(rules,dict)
+            or not isinstance(rows,list) or not 4<=len(rows)<=40 or not isinstance(rules,dict)
             or not isinstance(resources,list)):
         return None
+    # Herald artwork can produce text outside this original window. Keep all
+    # inside rows and reject overlaps; ignoring exterior rows additionally
+    # requires the complete original black outer frame below.
+    inside=[];outside=[]
+    left,top,right,bottom=PICKER_RECT
+    for row in rows:
+        x,y,w,h=row['bounds']
+        if x+w<=left or x>=right or y+h<=top or y>=bottom:outside.append(row)
+        elif left<=x and top<=y and x+w<=right and y+h<=bottom:inside.append(row)
+        else:return None
+    rows=inside
+    if not 4<=len(rows)<=18:return None
     sources=[r for r in resources if isinstance(r,dict) and r.get('tag')=='TAKECIV']
     if len(sources)!=1:return None
     source=sources[0]
     if (source.get('title')!='Select Civilization Advance' or source.get('width')!=320
             or source.get('listbox') is not True or source.get('buttons')!=['Goal']
             or source.get('body') or source.get('options')):return None
-    title,option,goal,ok=sorted(rows,key=lambda r:(r['center'][1],r['center'][0]))
+    ordered=sorted(rows,key=lambda r:(r['center'][1],r['center'][0]))
+    title,options,goal,ok=ordered[0],ordered[1:-2],ordered[-2],ordered[-1]
     # Measured bitmap-font OCR loses a few strokes only in Civilization. Keep
     # its raw reading; exact outer words, layout and all independent guards hold.
     match=re.fullmatch(r'Select ([A-Za-z]{9,14}) Advance',title['text'])
@@ -117,11 +131,16 @@ def classify_exchange_picker(observation, rows, resources, rules, state=None):
     goal,ok=controls['Goal'],controls['OK']
     if not (370<=goal['center'][0]<=405 and 449<=goal['center'][1]<=466
             and 538<=ok['center'][0]<=565 and 449<=ok['center'][1]<=466):return None
-    if not (309<=option['bounds'][0]<=316 and 168<=option['bounds'][1]<=173
-            and 173<=option['center'][1]<=180 and option['bounds'][2]<=260):return None
-    advances=[a for a in rules.get('advances',[]) if isinstance(a,dict)
-              and type(a.get('id')) is int and a.get('name')==option['text']]
-    if len(advances)!=1:return None
+    advances=[]
+    for index,option in enumerate(options):
+        if not (309<=option['bounds'][0]<=316 and 168+17*index<=option['bounds'][1]<=173+17*index
+                and 173+17*index<=option['center'][1]<=180+17*index and option['bounds'][2]<=260):return None
+        matches=[a for a in rules.get('advances',[]) if isinstance(a,dict)
+                  and type(a.get('id')) is int and a.get('name')==option['text']]
+        if len(matches)!=1:return None
+        advances.append({'id':matches[0]['id'],'name':matches[0]['name']})
+    if len({a['id'] for a in advances})!=len(advances):return None
+    empty_rect=(310,186+17*(len(options)-1),628,440)
     path=observation.get('path')
     if not isinstance(path,(str,Path)):return None
     try:
@@ -130,23 +149,31 @@ def classify_exchange_picker(observation, rows, resources, rules, state=None):
         with Image.open(BytesIO(frame)) as original:
             if original.size!=(640,480):return None
             image=original.convert('RGB')
-        if (not _solid(image,EMPTY_RECT,(207,207,207))
+        if outside and any(not _solid(image,rect,(0,0,0)) for rect in
+            ((298,137,640,138),(298,138,299,479),(639,138,640,479),(298,478,640,479))):return None
+        if (not _solid(image,empty_rect,(207,207,207))
                 or not _solid(image,SELECTED_RECT,(105,105,105))
                 or not _solid(image,(309,170,310,440),(65,65,65))
                 or not _solid(image,(628,170,629,440),(65,65,65))):return None
+        if any(not _solid(image,(580,170+17*i,627,183+17*i),(207,207,207))
+               for i in range(1,len(options))):return None
     except (OSError,ValueError):return None
     def control(row,kind):
         return {key:row[key] for key in ('text','center','source_line','confidence')}|{'control':kind,'enabled':None}
-    advance={'id':advances[0]['id'],'name':advances[0]['name']}
-    pending=_matching_prior_trade(state,advance)
+    advance=advances[0] if len(advances)==1 else None
+    pending=_matching_prior_trade(state,advance) if advance is not None else None
     return dict(title=title['text'],resource_tag='TAKECIV',
-        options=[control(option,'list_item')],buttons=[control(goal,'button'),control(ok,'button')],
+        options=[control(option,'list_item') for option in options],buttons=[control(goal,'button'),control(ok,'button')],
         advance=advance,requires_model=pending is None,
         mechanical_action='accept_single_trade_advance' if pending is not None else None,
         prior_trade=pending,
         evidence={'source':'Original GAME.TXT TAKECIV and calibrated original list pixels',
             'resource_sha256':hashlib.sha256(json.dumps(source,sort_keys=True).encode()).hexdigest(),
-            'image_sha256':observation['sha256'],'empty_list_bounds':list(EMPTY_RECT),
+            'image_sha256':observation['sha256'],'empty_list_bounds':list(empty_rect),
             'empty_list_rgb':[207,207,207],'selected_row_bounds':list(SELECTED_RECT),
-            'selected_row_rgb':[105,105,105], 'complete_visible_singleton':True,
-            'prior_accepted_trade_required':True,'raw_title':title['text']})
+            'selected_row_rgb':[105,105,105], 'complete_visible_singleton':len(options)==1,
+            'prior_accepted_trade_required':True,'raw_title':title['text'],
+            **({'picker_frame_bounds':list(PICKER_RECT),
+                'outside_picker_rows':[{'text':r['text'],'bounds':r['bounds'],'source_line':r['source_line']} for r in outside]}
+               if outside else {}),
+            **({'complete_visible_count':len(options),'observed_advances':advances} if len(options)>1 else {})})

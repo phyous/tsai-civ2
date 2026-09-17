@@ -66,7 +66,7 @@ class FakeObserver:
     def adopt_campaign_start(self,boundary):
         if boundary!=self.expected_boundary:raise ValueError('TEST wrong boot baseline')
         self.campaign_start=deepcopy(boundary);self.adopted.append(deepcopy(boundary))
-    def read(self,rules_text=None):
+    def read(self,rules_text=None,middle_settle=0.0):
         if self.failure:raise self.failure
         self.calls+=1;digest=hashlib.sha256(self.frame).hexdigest()
         data=make_capsule(self.saved,self.campaign_start,digest,('c','d') if self.calls==1 else ('e','f'))

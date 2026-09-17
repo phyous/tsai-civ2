@@ -71,6 +71,8 @@ PUBLIC_NOTICE_NOTE = (
     'Only the most recent bounded notices are retained; absence is not evidence that an event did not occur.'
 )
 PUBLIC_NOTICE_RESOURCES = {'ADJACENTCITY': 'd7a2b9c34bc0aeba6a1debda44e8a02691579cc0d56bed16d1784addbedab834',
+ 'NOFOREIGN':'c50d22f896618bb6d96535a927baabf218d7e573cce5bbbb3554ec5105fb9e0f',
+ 'NOLANDFALL':'a14c52049fb41b989a6f2f9f79da69d594504bdd480ada2c4dd3c47be541114e',
  'SNEAK':'89320dbf8910be6fc34bd3452a15911bbe32cdd42cdd190354d20f03448affad',
  'SURPRISESCROLLS':'70dbeae8b4336f362d5b3d9fa07ca294e93831d26d78553ac5db40690304fdef',
  'GREETINGS00':'950585acaf81ab9ce622ac94efd3915f89db60c2919745118cfd9ed08e57a682',

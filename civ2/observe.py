@@ -83,7 +83,10 @@ def _merge_controls(rows, fallback, conflicts):
                 previous['provenance'].extend(candidate['provenance'])
                 if not equal:
                     previous['text'] = 'OK'
+                    previous['confidence'] = candidate['confidence']
                     previous['normalization'] = 'same-control ASCII OK corroboration'
+                else:
+                    previous['confidence'] = max(previous['confidence'], candidate['confidence'])
                 continue
             conflicts.append(dict(text=candidate['text'], bounds=candidate['bounds'],
                                   reason='contradictory overlapping native text'))
@@ -893,6 +896,30 @@ def _recover_diplomacy_intro(image,rows,executable,directory,evidence):
     rows[rows.index(old)]=first
 
 
+def _recover_audience_radio(image,rows,executable,directory,evidence):
+    """Re-read a malformed quoted audience alternative from its own pixels."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary') and 130<=r['center'][1]<=200]
+    buttons=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help','close','exit')]
+    if len(headings)!=1 or len(buttons)!=1 or buttons[0]['text']!='OK':return
+    heading=headings[0];button=buttons[0]
+    if abs(heading['center'][0]-button['center'][0])>8:return
+    body=[r for r in rows if heading['center'][1]<r['center'][1]<button['center'][1]
+          and abs(r['center'][0]-heading['center'][0])<=160]
+    if not any(r['text'].startswith('An emissary from ') for r in body):return
+    expected={'"Yes. I will grant an audience."','"No. Send him away."','"No. Send her away."'}
+    for index,old in enumerate(rows):
+        if (old not in body or old['confidence']<.8 or old['bounds'][3]>24
+                or not old['text'].startswith(('("',')"')) or old['text'][1:] not in expected):continue
+        wanted=old['text'][1:]
+        a=_crop_text(image,old,'audience_radio_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+        b=_crop_text(image,old,'audience_radio_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+        if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']==wanted
+                and min(a[0]['confidence'],b[0]['confidence'])>=.8
+                and _same_location(a[0],b[0]) and _same_location(old,b[0])):
+            if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+
+
 def _recover_herald_panel(image,rows,executable,directory,evidence):
     """Read the original fullscreen herald panel; never authorize its dismissal.
 
@@ -959,6 +986,96 @@ def _recover_herald_panel(image,rows,executable,directory,evidence):
     button=buttons[0];button['provenance']=first[-1]['provenance']+second[-1]['provenance']+button['provenance']+buttons[1]['provenance']
     replacements.append(button)
     rows[:]=[r for r in rows if not (r['bounds'][0]>=box[0] and r['bounds'][1]>=box[1])]+replacements
+
+
+def _recover_herald_options(image,rows,executable,directory,evidence):
+    """Recover quoted radio labels without changing any observed words.
+
+    Actual paired crops supply punctuation and label geometry. The complete
+    original resource body and every option still require classifier matching.
+    """
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary')
+              and 200<=r['bounds'][1]<=420 and 420<=r['center'][0]<=485]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    heading=headings[0];ok=controls[0]
+    if abs(heading['center'][0]-ok['center'][0])>8:return
+    candidates=[r for r in rows if (re.match(r'^[O0©○●•)(\s]{1,5}"',r['text']) or r['text'].startswith('"\'')
+                or (r['text'].startswith('"') and not r['text'].endswith('"')))
+                and r['confidence']>=.8
+                and 290<=r['bounds'][0]<=350 and 100<=r['bounds'][2]<=350 and r['bounds'][3]<=24
+                and heading['center'][1]+35<r['center'][1]<ok['center'][1]-12]
+    if not 1<=len(candidates)<=9:return
+    words=lambda text:re.findall(r'[A-Za-z0-9]+',text)
+    for old in candidates:
+        observed_words=words(old['text'][old['text'].index('"'):])
+        variants=((4,6),) if not old['text'].endswith('"') else ((3,3),(2,3),(3,6))
+        for scale,pad in variants:
+            name=f'herald_option_{rows.index(old)}_{scale}x_pad{pad}'
+            try:
+                a=_crop_text(image,old,name+'_rgb',executable,directory,evidence,padding=(pad,pad),scale=scale)
+                b=_crop_text(image,old,name+'_gray',executable,directory,evidence,padding=(pad,pad),scale=scale,grayscale=True)
+            except ValueError:
+                evidence.setdefault('fallback_errors',[]).append({'pass_name':name,'error':'ValueError'})
+                continue
+            if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
+                    or min(a[0]['confidence'],b[0]['confidence'])<.8
+                    or not re.fullmatch(r'"[A-Za-z0-9][^"\n]*"',a[0]['text'])
+                    or words(a[0]['text'])!=observed_words
+                    or not _same_location(a[0],b[0]) or not _same_location(old,b[0])):continue
+            index=rows.index(old)
+            if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+            break
+
+
+def _recover_greeting_body(image,rows,executable,directory,evidence):
+    """Recover greeting prose and its printed closing punctuation, not terms."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary') and 370<=r['center'][1]<=400]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    heading=headings[0];ok=controls[0]
+    body=[r for r in rows if heading['center'][1]<r['center'][1]<ok['center'][1]-12
+          and 302<=r['bounds'][0]<=316]
+    prefix='"I bear a message from our most wise'
+    if (len(body)!=2 or abs(heading['center'][0]-ok['center'][0])>8
+            or not 16<=body[1]['center'][1]-body[0]['center'][1]<=26
+            or not _near_text(body[0]['text'],prefix,3)
+            or not re.fullmatch(r'[A-Za-z][A-Za-z :.-]{2,90} of the [A-Za-z .\"]{2,60}',body[1]['text'])):return
+    first,tail=body
+    if first['text']!=prefix:
+        a=_crop_text(image,first,'greeting_intro_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+        b=_crop_text(image,first,'greeting_intro_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=prefix or b[0]['text']!=prefix
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(first,a[0]) or not _same_location(a[0],b[0])):return
+        index=rows.index(first)
+        if not _replace_crop_row(rows,index,a,lambda old,fresh:True):return
+        rows[index]['provenance']+=b[0]['provenance']
+    if tail['text'].endswith('..."'):return
+    x,y,w,h=tail['bounds'];readings=[]
+    words=lambda text:re.findall(r'[A-Za-z]+',text)
+    for pad,right in ((3,37),(3,41)):
+        box=(x-pad,y-pad,min(640,x+w+right),min(480,y+h+pad));crop=image.crop(box)
+        name='greeting_tail_black3_right'+str(right);target=Path(directory)/(name+'.png')
+        crop.convert('L').point(lambda value:255 if value>70 else 0).resize(
+            (crop.width*3,crop.height*3),Image.Resampling.BICUBIC).save(target)
+        evidence['passes'].append(name);raw=_run_ocr(executable,target)
+        if (len(raw)!=1 or raw[0]['confidence']<.8 or not raw[0]['text'].endswith('..."')
+                or words(raw[0]['text'])!=words(tail['text'])):return
+        local=_prepare_rows(raw,crop.width,crop.height,name)[0]
+        nx,ny,nw,nh=local['provenance'][0]['normalized_bounds']
+        mapped=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
+            x=(box[0]+nx*crop.width)/640,y=(box[1]+ny*crop.height)/480,
+            width=nw*crop.width/640,height=nh*crop.height/480)],640,480,name)[0]
+        mapped['provenance'][0].update(crop=list(box),scale=3,normalized_crop_bounds=[nx,ny,nw,nh],
+            transform='L<=70 retained black, others white; bicubic enlargement')
+        if not _same_location(tail,mapped):return
+        readings.append(mapped)
+    a,b=readings
+    if a['text']!=b['text'] or not _same_location(a,b):return
+    a['provenance']=tail['provenance']+a['provenance']+b['provenance'];rows[rows.index(tail)]=a
 
 
 def _recover_split_production_title(image,rows,executable,directory,evidence):
@@ -1365,7 +1482,7 @@ def recognize(path: str | Path) -> dict:
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
             for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_herald_panel,_recover_herald_options,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

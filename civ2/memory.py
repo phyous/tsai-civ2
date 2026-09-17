@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import secrets
@@ -424,7 +425,9 @@ class LiveMemoryObserver:
             time.sleep(.025)
         raise MemoryObservationError('No complete current map observation from native helper')
 
-    def read(self, *, rules_text=None, include_stack_links=False):
+    def read(self, *, rules_text=None, include_stack_links=False, middle_settle=0.0):
+        _require(type(middle_settle) in (int,float) and math.isfinite(middle_settle)
+                 and 0 <= middle_settle <= .5, 'Invalid bounded middle-frame wait')
         last_error = None
         self._reads_started = True
         total_start = time.monotonic()
@@ -441,6 +444,11 @@ class LiveMemoryObserver:
                     _require(frame[:8] == b'\x89PNG\r\n\x1a\n' and frame[16:24] == struct.pack('>II', 640, 480),
                              'Original observation must be640x480 PNG')
                     paths.append(str(path)); hashes.append(_sha(frame))
+                    # Optional phase variation for a strict current-image map
+                    # proof. No input is sent; native state/topology must still
+                    # match on both sides of this longer image bracket.
+                    if index == 1 and middle_settle:
+                        time.sleep(middle_settle)
                     if index < 2: wires.append(self._read_wire(sequence))
                 after = self.game.rpc('status')['inputSequence']
                 inventory_after = _save_inventory(self.game.rpc('listSaves'))

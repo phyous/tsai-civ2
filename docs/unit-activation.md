@@ -27,4 +27,5 @@ The evidence distinguishes selecting an intent, partial ordinary inputs,
 completed confirmation, and an observed native result. An uncertain input stops
 the continuation; it is not automatically replayed. The verifier rechecks the
 original source images, popup resources, radio pixels, stack identity and native
-before/after state. No unit, order, game-memory or save-file writes are used.
+before/after state. The harness does not directly write unit records, orders,
+game memory or save files; the original game applies the ordinary inputs.
