@@ -17,7 +17,7 @@ from .policy import unit_candidates, unit_request_for, dialog_request_for, valid
 from .planning import advance_plan, make_plan, request_for as planning_request_for, task_candidates, target_geometry
 from .recording import Recorder
 from .save import parse_save, parse_rules
-from .revision import observation_digest, prefixed_revision, revision_digest
+from .revision import observation_digest, prefixed_revision, revision_digest, revision
 from .typesafe import TypeSafeClient, TransportError
 from .ui import UI
 
@@ -157,10 +157,16 @@ def observed_order_outcome(before, after, record, *, pending_count):
 
 class Session:
     def __init__(self, directory, initial_save=None, *, env_file=None, max_requests=20000, fps=4,
-                 record=True, game=None, planning=False, observer=None, setup_directory=None):
+                 record=True, game=None, planning=False, observer=None, setup_directory=None,
+                 hierarchical_planning=False):
         if type(planning) is not bool:
             raise ValueError('planning must be a boolean')
+        if type(hierarchical_planning) is not bool or hierarchical_planning and not planning:
+            raise ValueError('hierarchical_planning requires enabled planning and a boolean')
         self.planning = planning
+        self.hierarchical_planning = hierarchical_planning
+        self.pending_plan_category = None
+        self.planning_category_decisions = 0
         self.plans = {}
         self.plan_actions = []
         self.planning_decisions = 0
@@ -225,7 +231,8 @@ class Session:
             'receipt':initial_receipt, 'save_policy':'no_saves_during_playthrough', 'setup_report':setup_artifact}
         self.journal.append('begin', checks=self.initial_checks, **provenance,
                             settings=self.initial_settings, model=self.client.model,
-                            planning_enabled=self.planning)
+                            planning_enabled=self.planning,
+                            **({'hierarchical_planning':'task-category-target-v1'} if hierarchical_planning else {}))
         self.publish('paused', 'Rome, at the beginning.')
         time.sleep(.6)  # Allow the live spectator poll to show the actual start.
         self.recorder = Recorder(self.journal.directory/'video', game=self.game, fps=fps).start() if record else None
@@ -245,7 +252,15 @@ class Session:
             published.append(latest)
         self._published_decisions = published
         recent = [deepcopy(item) for item in published if latest and item['id'] < latest['id']][-3:]
-        self.game.state(snapshot(state, status=status, decision=self.decision, recent_decisions=recent,
+        def telemetry(value):
+            # Existing running dashboards understand planning as non-input.
+            # Keep canonical stages in Session/journal; annotate only this HUD
+            # envelope so no original game iframe needs to be reloaded.
+            if isinstance(value,dict) and value.get('stage')=='planning_category':
+                return {**deepcopy(value),'stage':'planning','planning_phase':'category'}
+            return value
+        self.game.state(snapshot(state, status=status, decision=telemetry(self.decision),
+                                 recent_decisions=[telemetry(item) for item in recent],
                                  chronicle=self.chronicle, message=message, ledger=self.ledger()))
 
     def ledger(self):
@@ -254,7 +269,22 @@ class Session:
                 'model_calls_started':self.decisions,
                 'command_decisions':getattr(self, 'command_decisions', 0),
                 'planning_decisions':getattr(self, 'planning_decisions', 0),
-                'active_plans':sum(p['status']=='active' for p in getattr(self, 'plans', {}).values())}
+                'active_plans':sum(p['status']=='active' for p in getattr(self, 'plans', {}).values()),
+                **({'hierarchical_planning':True,
+                    'planning_category_decisions':getattr(self,'planning_category_decisions',0)}
+                   if getattr(self,'hierarchical_planning',False) else {})}
+
+    def enable_hierarchical_planning(self):
+        """Opt into two actual planning choices without altering existing plans."""
+        if getattr(self,'hierarchical_planning',False):return
+        if not getattr(self,'planning',False) or self.pending_decisions:
+            raise RuntimeError('Observe pending commands before enabling hierarchical planning')
+        status=self.game.rpc('status')
+        if status.get('paused') is not True or status.get('heldKeys')!=[] or status.get('buttons')!=0:
+            raise RuntimeError('Hierarchical planning requires a paused game with clear inputs')
+        self.journal.append('hierarchical_planning_enabled',version='task-category-target-v1',executes_input=False)
+        self.hierarchical_planning=True
+        self.pending_plan_category=None
 
     def _record_plan_status(self, plan, previous_status=None):
         self.journal.append('plan_status', planning_decision=plan.get('decision_id'),
@@ -292,17 +322,45 @@ class Session:
             self.plans[identifier] = plan
             self._record_plan_status(plan, 'active')
         candidates, _ = task_candidates(self.state, self.rules)
+        pending=getattr(self,'pending_plan_category',None) if getattr(self,'hierarchical_planning',False) else None
+        if pending is not None and (revision_digest(pending['category']['preconditions'])!=observation_digest(self.state)
+                or any(unit.get(k)!=v for k,v in pending['category']['actor'].items())):
+            self.journal.append('planning_category_invalidated',decision=pending['decision'],
+                current_revision=revision(self.state),reason='actor_or_observation_changed',executes_input=False)
+            self.pending_plan_category=pending=None
         if len(candidates) < 2:
+            if pending is not None:raise RuntimeError('Pending category lost its targets without a new observation')
             self.journal.append('plan_status', status='unavailable', executes_input=False,
                 actor=identifier, reason='Only Hold is available; no singleton model choice fabricated')
             return None
-        request, candidates = planning_request_for(self.state, self.rules,
-                                                   recent_actions=list(self.history))
-        task = self._evaluate(request, candidates, 'task_choice', stage='planning')
+        if getattr(self,'hierarchical_planning',False):
+            from .planning import category_request_for,target_request_for,selected_category_target
+            request,categories=category_request_for(self.state,self.rules,recent_actions=list(self.history))
+            if pending is not None and categories.get(pending['category']['id'])!=pending['category']:
+                raise RuntimeError('Pending category differs from its unchanged observed candidate set')
+            if pending is None:
+                category=self._evaluate(request,categories,'task_category',stage='planning_category')
+                pending={'decision':self.decisions,'category':deepcopy(category)}
+                self.pending_plan_category=pending
+            task=selected_category_target(self.state,pending['category'],self.rules)
+            if task is None:
+                request,candidates=target_request_for(self.state,pending['category'],pending['decision'],
+                                                     self.rules,recent_actions=list(self.history))
+                # A transport failure leaves the actual selected category for
+                # a fresh target inference; it does not resample the category.
+                task=self._evaluate(request,candidates,'task_choice',stage='planning')
+                plan_decision=self.decisions
+            else:plan_decision=pending['decision']
+        else:
+            request, candidates = planning_request_for(self.state, self.rules,
+                                                       recent_actions=list(self.history))
+            task = self._evaluate(request, candidates, 'task_choice', stage='planning')
+            plan_decision=self.decisions
         plan = make_plan(task, self.state, self.rules)
-        plan['decision_id'] = self.decisions
+        plan['decision_id'] = plan_decision
         self.plans[identifier] = plan
         self._record_plan_status(plan)
+        if getattr(self,'hierarchical_planning',False):self.pending_plan_category=None
         return plan
 
     @staticmethod
@@ -402,8 +460,10 @@ class Session:
         return state
 
     def _evaluate(self, request, actions, question, *, stage='command'):
-        if stage not in ('command', 'planning'):
+        if stage not in ('command', 'planning','planning_category'):
             raise ValueError('Unknown model decision stage')
+        if stage=='planning_category' and (not getattr(self,'hierarchical_planning',False) or question!='task_category'):
+            raise ValueError('A category request requires enabled hierarchical planning')
         if hasattr(self,'controller'):
             self.controller['pending_trade']=None
         if self.recorder:
@@ -440,7 +500,16 @@ class Session:
         output_artifact = self.journal.artifact(f'decisions/{decision_id:06d}-response.json', result)
         choice = result['answers'][question]['choice']
         action = actions[choice]
-        if stage == 'planning':
+        if stage == 'planning_category':
+            from .planning import selected_category_target
+            if not getattr(self,'hierarchical_planning',False) or question!='task_category':
+                raise ValueError('A category response requires enabled hierarchical planning')
+            task=selected_category_target(self.state,action,self.rules)
+            self.planning_decisions=getattr(self,'planning_decisions',0)+1
+            self.planning_category_decisions=getattr(self,'planning_category_decisions',0)+1
+            self.journal.append('model_plan_category',decision=decision_id,response=output_artifact,
+                selected_question=question,category=action,task=task,executes_input=False)
+        elif stage == 'planning':
             self.planning_decisions = getattr(self, 'planning_decisions', 0)+1
             self.journal.append('model_plan', decision=decision_id, response=output_artifact,
                 selected_question=question, task=action, executes_input=False)
@@ -455,9 +524,9 @@ class Session:
             'labels':{name:{key:key if name=='empire_strategy' else str(label) for key,label in q['criteria'].items()}
                       for name,q in request['questions'].items()},
             'selected_question':question,'stage':stage,'authorizes_input':stage=='command',
-            'action_label':('Plan only · ' if stage=='planning' else '')+action['label'],
-            'receipt':None if stage=='planning' else 'pending'}
-        if stage == 'planning':
+            'action_label':('Plan category only · ' if stage=='planning_category' else 'Plan only · ' if stage=='planning' else '')+action['label'],
+            'receipt':None if stage in ('planning','planning_category') else 'pending'}
+        if stage in ('planning','planning_category'):
             self.decision['executes_input'] = False
         self.publish('paused')
         # Publish immediately. The current and recent vectors remain on screen

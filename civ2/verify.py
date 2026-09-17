@@ -47,6 +47,7 @@ KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'inference_failed', 
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
                 'model_plan', 'plan_status',
+                'hierarchical_planning_enabled','model_plan_category','planning_category_invalidated',
                 'forced_city_control', 'city_control_review_completed', 'city_control_closed',
                 'graphics_preferences_configured',
                 'city_labor_refresh_started', 'city_labor_refresh_input',
@@ -72,6 +73,8 @@ PUBLIC_NOTICE_NOTE = (
     'Only the most recent bounded notices are retained; absence is not evidence that an event did not occur.'
 )
 PUBLIC_NOTICE_RESOURCES = {'ADJACENTCITY': 'd7a2b9c34bc0aeba6a1debda44e8a02691579cc0d56bed16d1784addbedab834',
+    'WITHDRAWN':'b0ecb0d1a79f8a79bfa66ff6e1e07cde67476088c1e80908a6cf6f89b4e117ec',
+    'WITHDRAWN1':'4c421e4792122802c137b96942417f429e650aa44bfddf11044e6fdc9f2ab4e3',
  'TERMS':'bad07103f15cd007440f30b75184642d501936e7e5b8f100e80d675a77365ea5',
  'STARTWONDER':'1f90f88df84896e4ff2702ba8258a4350ce150298b895bff83ccfcf5a0dd465b',
  'NOFOREIGN':'c50d22f896618bb6d96535a927baabf218d7e573cce5bbbb3554ec5105fb9e0f',
@@ -1181,6 +1184,73 @@ def _plan_binding(task, request, saves):
                  'Survey plan introduces terrain facts beyond its known frontier')
 
 
+def _plan_category_binding(category,request,saves,latest_revision):
+    """Check the recorded partition and each native-bound leaf, without ranking."""
+    planning=request.get('state',{}).get('planning',{})
+    categories=planning.get('categories');targets=planning.get('targets');target_criteria=planning.get('target_criteria')
+    question=request.get('questions',{}).get('task_category',{})
+    _require(planning.get('stage')=='category' and set(request.get('questions',{}))=={'task_category'}
+             and isinstance(categories,dict) and 2<=len(categories)<=9 and isinstance(targets,dict)
+             and 2<=len(targets)<=64 and set(question.get('criteria',{}))==set(categories)
+             and isinstance(target_criteria,dict) and set(target_criteria)==set(targets)
+             and all(isinstance(v,str) and 0<len(v)<=4096 for v in target_criteria.values())
+             and planning.get('candidate_summary',{}).get('offered')==len(targets)
+             and isinstance(category,dict) and categories.get(category.get('id'))==category,
+             'Category request does not contain a complete offered partition')
+    covered=[]
+    for identifier,item in categories.items():
+        _require(isinstance(item,dict) and set(item)=={'id','kind','task','label','actor','preconditions',
+                     'target_ids','target_count','sole_target'} and item['id']==item['task']==identifier
+                 and identifier in ('hold','survey','settle','road','irrigate','mine','defend','engage','approach_city')
+                 and item['kind']=='plan_category' and isinstance(item['label'],str)
+                 and item['label']==question['criteria'][identifier]
+                 and item['actor']==category['actor'] and item['preconditions']==category['preconditions']
+                 and _revision_digest(item['preconditions'])==latest_revision,
+                 'Category schema, label or current actor binding is invalid')
+        ids=item['target_ids']
+        _require(isinstance(ids,list) and ids and all(isinstance(v,str) and v in targets for v in ids)
+                 and len(ids)==len(set(ids)) and type(item['target_count']) is int and item['target_count']==len(ids)
+                 and all(isinstance(targets[v],dict) and set(targets[v])=={'task','target'}
+                         and targets[v]['task']==identifier for v in ids),
+                 'Category target membership differs from the recorded leaves')
+        if len(ids)==1:
+            sole=item['sole_target']
+            _require(isinstance(sole,dict) and sole.get('id')==ids[0]
+                     and sole.get('label')==target_criteria[ids[0]]
+                     and sole.get('actor')==item['actor'] and sole.get('preconditions')==item['preconditions']
+                     and item['label']==sole.get('label','')+'; sole offered target in this category, selected by this choice',
+                     'A sole category target was not fully stated in its actual criterion')
+            _plan_binding(sole,request,saves)
+        else:
+            _require(item['sole_target'] is None,'Multiple category targets cannot fabricate a sole selection')
+            for target_id in ids:
+                _plan_binding(dict(id=target_id,task=identifier,label=target_criteria[target_id],actor=item['actor'],
+                    preconditions=item['preconditions'],target=targets[target_id]['target']),request,saves)
+        covered+=ids
+    _require(len(covered)==len(set(covered)) and set(covered)==set(targets) and 'hold' in categories,
+             'Category partition omits, duplicates or introduces an offered target')
+
+
+def _plan_target_binding(request,category_decision,categories,started,latest_revision):
+    planning=request.get('state',{}).get('planning',{})
+    selection=planning.get('category_selection')
+    _require(isinstance(selection,dict) and set(selection)=={'decision','category'} and _int(selection.get('decision'),1)
+             and selection.get('decision')==category_decision and category_decision in categories,
+             'Target request has no pending actual category choice')
+    category=categories[category_decision]['category'];original=started[category_decision]
+    ids=category['target_ids'];targets=original['state']['planning']['targets']
+    _require(planning.get('stage')=='target' and selection['category']==category and len(ids)>=2
+             and planning.get('selected_category_target_count')==len(ids)
+             and planning.get('targets')=={k:targets[k] for k in ids}
+             and set(request.get('questions',{}))=={'task_choice'}
+             and request['questions']['task_choice'].get('criteria')==
+                 {k:original['state']['planning']['target_criteria'][k] for k in ids}
+             and _revision_digest(category['preconditions'])==latest_revision
+             and request.get('state',{}).get('turn')==original['state'].get('turn')
+             and all(request.get('state',{}).get('selected_unit',{}).get(k)==v for k,v in category['actor'].items()),
+             'Target request changes the selected category, actor, observation or offered leaves')
+
+
 def _recording(files, payload, ffprobe):
     manifest_name = str(PurePosixPath(payload['path']).parent / 'recording.json')
     info = files.inspect(manifest_name); manifest = files.json(manifest_name)
@@ -1439,6 +1509,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     events, chain = _journal(files)
     saves, started, stages, decisions, plans, plan_statuses, dispatched = {}, {}, {}, {}, {}, {}, set()
     started_hashes, started_sequences, failed_inferences = {}, {}, {}
+    plan_categories={};category_pending=None;category_invalidations=[];target_categories={}
+    hierarchical=False
     inputs, forced, forced_pending, recording = 0, 0, None, None
     forced_city, forced_city_pending, city_pending = 0, None, None
     city_reviews, city_closures, graphics_reviews = 0, 0, 0
@@ -1478,9 +1550,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
         latest_runtime_input=max([latest_runtime_input,*_runtime_sequences(payload)])
         if kind not in {'screen_observed','pointer_park_for_observation',
                         'trade_followup_pending','trade_advance_dispatched','native_map_observed','native_map_observation_failed',
-                        'mechanical_input_gap','inference_failed'}:
+                        'mechanical_input_gap','inference_failed','controller_update'}:
             trade_pending=None;trade_eligible=None
-        if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted','mechanical_input_gap','inference_failed'}:
+        if kind not in {'screen_observed','native_cosmetic_section_clicked','native_cosmetic_display_click_attempted','mechanical_input_gap','inference_failed','controller_update'}:
             cosmetic_section_sequence=None
         observation_only={'screen_observed','batch_observed_effect','plan_status'}
         if kind not in observation_only|{'checkpoint','checkpoint_reused'}:
@@ -1489,12 +1561,17 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             last_finish=None
         if kind not in KNOWN_EVENTS:
             unknown[kind] += 1
+        if category_pending is not None:
+            _require(kind in {'screen_observed','checkpoint','inference_started','inference_failed','model_plan',
+                    'planning_category_invalidated','plan_status','controller_update','session_stopped','recording_finalized',
+                    'native_map_observed','native_map_observation_failed','pointer_park_for_observation'},
+                     'An unfinished category choice cannot authorize game input or another category')
         if navigation_pending is not None:
             _require(kind in {'screen_observed','controller_update','session_stopped','recording_finalized',
                               'checkpoint','batch_observed_effect','plan_status','inference_failed'},
                      'An unresolved city navigation cannot authorize another input or decision')
         if activation_pending is not None:
-            _require(kind not in {'inference_started','model_decision','model_plan'}|set(DISPATCHES),
+            _require(kind not in {'inference_started','model_decision','model_plan','model_plan_category'}|set(DISPATCHES),
                      'A new decision or dispatch interrupted an unresolved activation')
             _require(kind in {'screen_observed','checkpoint','batch_observed_effect','plan_status',
                 'session_stopped','recording_finalized','controller_update','pointer_park_for_observation',
@@ -1506,6 +1583,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _require(payload.get('observation_kind') in (None,'live_memory'),
                      'Unknown checkpoint observation source')
             if kind == 'begin':
+                mode=payload.get('hierarchical_planning')
+                _require(mode in (None,'task-category-target-v1') and (mode is None or payload.get('planning_enabled') is True),
+                         'Initial hierarchical planning declaration is invalid')
+                hierarchical=mode is not None
                 _require(('initial_save' in payload) != ('initial_observation' in payload)
                          and ('initial_observation' in payload)==live,
                          'Evidence structure: initial observation has ambiguous provenance')
@@ -1763,6 +1844,23 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      and observed_screens.get(payload.get('screen'))=={'classification':'end_turn','supported':True},
                      'Reused checkpoint is stale, repeated or lacks an immediately verified advanced turn')
             files.screen(payload['screen']);checkpoint_reuses+=1;reusable_checkpoint=None
+        elif kind=='hierarchical_planning_enabled':
+            _require(not hierarchical and events[0]['payload'].get('planning_enabled') is True
+                     and payload=={'version':'task-category-target-v1','executes_input':False},
+                     'Hierarchical planning enablement is undeclared or repeated')
+            hierarchical=True
+        elif kind=='planning_category_invalidated':
+            _require(set(payload)=={'decision','current_revision','reason','executes_input'}
+                     and payload.get('decision')==category_pending and category_pending in plan_categories
+                     and payload.get('reason')=='actor_or_observation_changed' and payload.get('executes_input') is False
+                     and latest_save_sha256 in saves and payload.get('current_revision')==revision(saves[latest_save_sha256]),
+                     'Category invalidation lacks its current native checkpoint')
+            category=plan_categories[category_pending]['category'];state=saves[latest_save_sha256]
+            units=[u for u in state['units'] if u['id']==state['selected_unit_id']]
+            _require(_revision_digest(category['preconditions'])!=latest_save_sha256 or len(units)!=1
+                     or any(units[0].get(k)!=v for k,v in category['actor'].items()),
+                     'An unchanged category cannot be discarded for another model choice')
+            category_invalidations.append(category_pending);category_pending=None
         elif kind == 'inference_started':
             identifier = payload.get('decision')
             _require(_int(identifier, 1) and identifier not in started, 'Inference identifier is duplicated or invalid')
@@ -1793,14 +1891,21 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             started_hashes[identifier] = files.descriptor(payload['request'])['sha256']
             started_sequences[identifier] = event['sequence']
             stage = payload.get('stage','command')
-            _require(stage in ('command','planning'), 'Inference stage is invalid')
+            _require(stage in ('command','planning','planning_category'), 'Inference stage is invalid')
+            if stage=='planning_category':
+                _require(hierarchical and category_pending is None,'Category inference is not enabled or another is pending')
+            elif stage=='planning' and hierarchical:
+                _plan_target_binding(request,category_pending,plan_categories,started,latest_save_sha256)
+                target_categories[identifier]=category_pending
+            else:
+                _require(category_pending is None,'Unfinished category choice requires its target decision first')
             stages[identifier] = stage
         elif kind == 'inference_failed':
             _require(set(payload)=={'decision','request_sha256','http_status','category','error_type','usage','recorded_late'},
                      'Failed inference has an unsupported evidence schema')
             identifier=payload.get('decision');status=payload.get('http_status');category=payload.get('category')
             _require(_int(identifier,1) and identifier in started and identifier not in failed_inferences
-                     and identifier not in decisions and identifier not in plans and identifier not in dispatched,
+                     and identifier not in decisions and identifier not in plans and identifier not in plan_categories and identifier not in dispatched,
                      'Failed inference has no unique unresolved request')
             _require(payload.get('request_sha256')==started_hashes[identifier]
                      and payload.get('error_type')=='TransportError' and payload.get('usage')=='unavailable'
@@ -1812,9 +1917,29 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             _require(payload['recorded_late'] or event['sequence']==started_sequences[identifier]+1,
                      'Delayed inference failure must be explicitly declared late')
             failed_inferences[identifier]=dict(payload)
+        elif kind=='model_plan_category':
+            identifier=payload.get('decision')
+            _require(set(payload)=={'decision','response','selected_question','category','task','executes_input'}
+                     and _int(identifier,1) and identifier in started and identifier not in decisions and identifier not in plans
+                     and identifier not in plan_categories and identifier not in failed_inferences
+                     and stages[identifier]=='planning_category' and hierarchical and category_pending is None
+                     and payload.get('selected_question')=='task_category' and payload.get('executes_input') is False,
+                     'Category response has no unique non-dispatch inference')
+            request=started[identifier];response=files.json(payload['response']['path'])
+            try:clean=validate_response(response,request['questions'])
+            except (ValueError,RuntimeError,KeyError,TypeError):
+                raise VerificationError('Category response fails strict probability/schema validation') from None
+            category=payload['category'];answer=clean['answers'].get('task_category',{})
+            _require(answer.get('type')=='choice' and isinstance(category,dict) and category.get('id')==answer.get('choice'),
+                     'Category differs from the actual returned model choice')
+            _plan_category_binding(category,request,saves,latest_save_sha256)
+            _require(payload['task']==category['sole_target'],'Category response invents a concrete target')
+            plan_categories[identifier]={'category':category,'response':response}
+            if payload['task'] is not None:plans[identifier]={'task':payload['task'],'response':response}
+            else:category_pending=identifier
         elif kind == 'model_plan':
             identifier = payload.get('decision')
-            _require(identifier in started and identifier not in plans and identifier not in decisions and identifier not in failed_inferences
+            _require(identifier in started and identifier not in plans and identifier not in decisions and identifier not in failed_inferences and identifier not in plan_categories
                      and stages[identifier] == 'planning' and payload.get('executes_input') is False
                      and payload.get('selected_question') == 'task_choice'
                      and events[0]['payload'].get('planning_enabled') is True,
@@ -1831,6 +1956,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      and task.get('label') == request['questions']['task_choice']['criteria'][answer['choice']],
                      'Plan differs from the actual selected model task')
             _plan_binding(task, request, saves)
+            if hierarchical:
+                _require(target_categories.get(identifier)==category_pending,'Target response lost its actual pending category')
+                _plan_target_binding(request,category_pending,plan_categories,started,latest_save_sha256)
+                category_pending=None
             plans[identifier] = {'task':task,'response':response}
         elif kind == 'plan_status':
             _require(payload.get('executes_input') is False, 'Plan status cannot authorize a game input')
@@ -1852,7 +1981,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             plan_statuses[identifier] = plan
         elif kind == 'model_decision':
             identifier, question = payload.get('decision'), payload.get('selected_question')
-            _require(identifier in started and identifier not in decisions and identifier not in plans and identifier not in failed_inferences
+            _require(identifier in started and identifier not in decisions and identifier not in plans and identifier not in failed_inferences and identifier not in plan_categories
                      and stages[identifier] == 'command', 'Model decision has no unique prior command inference')
             request = started[identifier]; response = files.json(payload['response']['path'])
             try:
@@ -1951,8 +2080,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
             # Sequence bounds are not reconstructed receipts, an input count,
             # a model dispatch, or completion/cancellation of a transaction.
         elif kind == 'controller_update':
-            _require(set(payload)=={'reason','scope'} and all(isinstance(payload[k],str)
-                     and 0<len(payload[k])<=512 for k in ('reason','scope')),
+            _require(set(payload) in ({'reason'},{'reason','scope'}) and all(isinstance(value,str)
+                     and 0<len(value)<=512 for value in payload.values()),
                      'Controller update must be a bounded diagnostic note')
             # Narrative only: never authorizes input, resets pending state,
             # verifies source code, or establishes any claimed gameplay effect.
@@ -2246,7 +2375,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     _require(checks is not None, 'Initial native setup evidence is absent')
     outcome = _terminal(files, terminal_review, chain)
     complete = len(stops) == 1 and recording is not None and not unknown and not input_gaps and not mechanical_input_gaps and navigation_pending is None
-    responses = [d['response'] for group in (decisions,plans) for d in group.values()]
+    returned={**decisions,**plans,**plan_categories}
+    responses = [d['response'] for d in returned.values()]
     numeric_metadata = ('rejected_response_attempts', 'rejected_input_tokens',
                         'rejected_output_tokens', 'rejected_usage_unavailable_attempts')
     totals = {key: 0 for key in numeric_metadata}
@@ -2260,8 +2390,10 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     return {'schema_version': 1, 'integrity': 'passed', 'journal': chain,
             'initial_setup': {'checks': checks, **prefixed_revision(initial_state)},
             'artifacts': {'verified_count': len(files.checked), 'files': sorted(files.checked.values(), key=lambda x: x['path'])},
-            'decisions': {'inferences_started': len(started), 'validated_responses': len(decisions)+len(plans),
-                          'command_decisions':len(decisions), 'planning_decisions':len(plans),
+            'decisions': {'inferences_started': len(started), 'validated_responses': len(returned),
+                          'command_decisions':len(decisions), 'planning_decisions':len(set(plans)|set(plan_categories)),
+                          'planning_category_decisions':len(plan_categories),
+                          'concrete_plans':len(plans),'invalidated_planning_categories':category_invalidations,
                           'planning_dispatches':0,
                           'planning_note':'Planning choices and observed plan-status changes are context only, not commands or native effects.',
                           'model_dispatches': len(dispatched), 'ordinary_input_events': inputs,
@@ -2275,7 +2407,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'unverified_input_gaps': [{'decision':i,'observed_input_sequence_after':input_gaps[i]} for i in sorted(input_gaps)],
                           'unverified_mechanical_input_gaps':mechanical_input_gaps,
                           'mechanical_input_gap_note':'Declared missing receipts are not reconstructed, counted or attributed to model decisions. Image integrity and sequence bounds only; no input or native effect is certified.',
-                          'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)-set(failed_inferences)),
+                          'inferences_without_response': sorted(set(started)-set(returned)-set(failed_inferences)),
                           'failed_calls':len(failed_inferences),
                           'failed_inferences':[failed_inferences[i] for i in sorted(failed_inferences)],
                           'failed_call_usage':{'calls_with_unavailable_usage':len(failed_inferences),
@@ -2324,11 +2456,12 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                              'pending_trade_continuation':trade_pending is not None,
                              'pending_unit_activation':activation_pending is not None,
                              'pending_city_navigation':navigation_pending is not None,
+                             'pending_planning_category':category_pending is not None,
                              'release_review_ready': complete and recording['ffprobe']['status'] == 'passed'
                               and outcome['status'] in ('human_reviewed','assistant_reviewed') and len(dispatched) == len(decisions)
-                              and len(started) == len(decisions)+len(plans)+len(failed_inferences) and forced_pending is None and not recoveries
+                              and len(started) == len(returned)+len(failed_inferences) and forced_pending is None and not recoveries
                               and city_pending is None and forced_city_pending is None and labor_refresh is None and trade_pending is None
-                              and activation_pending is None},
+                              and activation_pending is None and category_pending is None},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
                            'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
                            'This verifier performs no OCR, live game calls or automatic victory recognition.',

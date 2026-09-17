@@ -132,6 +132,94 @@ def request_for(state, rules=None, recent_actions=None, limit=64):
     return {'state':projection, 'questions':{'task_choice':question}}, candidates
 
 
+_CATEGORY_LABELS = {
+    'hold':'Hold this unit for one turn, then reassess',
+    'survey':'Explore toward a known frontier to observe more terrain',
+    'settle':'Establish another city at an observed proposed site',
+    'road':'Build a useful road on an observed tile',
+    'irrigate':'Improve food production by irrigating an observed tile',
+    'mine':'Improve shield production by mining an observed tile',
+    'defend':'Defend an observed owned city',
+    'engage':'Engage a currently visible hostile unit',
+    'approach_city':'Approach a remembered foreign city to reassess its situation',
+}
+
+
+def _categories(candidates):
+    """Partition the unchanged offered leaves; never rank or prune targets."""
+    groups = {}
+    for candidate in candidates.values():
+        groups.setdefault(candidate['task'], []).append(candidate)
+    result = {}
+    for task, leaves in groups.items():
+        first = leaves[0]
+        if len(leaves) == 1:
+            label = first['label']+'; sole offered target in this category, selected by this choice'
+        else:
+            label = _CATEGORY_LABELS[task]+f'; {len(leaves)} offered targets; a separate Jev choice selects the target'
+        result[task] = dict(id=task, kind='plan_category', task=task, label=label,
+            actor=deepcopy(first['actor']), preconditions=deepcopy(first['preconditions']),
+            target_ids=[leaf['id'] for leaf in leaves], target_count=len(leaves),
+            sole_target=deepcopy(first) if len(leaves)==1 else None)
+    return result
+
+
+def category_request_for(state, rules=None, recent_actions=None, limit=64):
+    """Choose the task kind in a real non-dispatch model call.
+
+    Every leaf produced by the existing candidate builder remains represented.
+    Counts are availability facts, not weights or combined probabilities.
+    """
+    request, candidates = request_for(state, rules, recent_actions, limit)
+    categories = _categories(candidates)
+    if len(categories) < 2:
+        raise PlanningError('Only one task category is available; no fabricated singleton Choice')
+    request['state']['planning'].update(stage='category', categories=deepcopy(categories),
+        target_criteria=deepcopy(request['questions']['task_choice']['criteria']),
+        scope='Choose a task category for the current observed actor. Multiple targets require a later independent target choice. A sole target is fully stated in its category criterion. This call executes no game input; later unit-action calls choose every command.')
+    request['questions'] = {'task_category':dict(type='choice',
+        instructions='Choose the useful current task kind for this selected unit, considering settlement, exploration, productive tile work, military roles, support and visible threats. Each category is one choice regardless of how many targets it contains; target counts describe availability, not strategic priority. Hold only for a useful reason. A category with multiple targets leads to a separate Jev target choice. This objective does not choose a route or authorize a native command.',
+        criteria={key:c['label'] for key,c in categories.items()})}
+    return request, categories
+
+
+def _category_leaves(state, category, rules, limit):
+    candidates, _ = task_candidates(state, rules, limit)
+    categories = _categories(candidates)
+    if not isinstance(category, dict) or categories.get(category.get('id')) != category:
+        raise PlanningError('Task category differs from the current actor-bound offered candidates')
+    return {key:candidates[key] for key in category['target_ids']}
+
+
+def selected_category_target(state, category, rules=None, limit=64):
+    """Resolve only a fully stated sole leaf after a genuine category choice."""
+    candidates = _category_leaves(state, category, rules, limit)
+    return deepcopy(next(iter(candidates.values()))) if len(candidates)==1 else None
+
+
+def target_request_for(state, category, category_decision, rules=None, recent_actions=None, limit=64):
+    """Choose among every original leaf in the prior model-selected category."""
+    if type(category_decision) is not int or category_decision < 1:
+        raise PlanningError('Target selection requires an actual category decision identifier')
+    candidates = _category_leaves(state, category, rules, limit)
+    if len(candidates) < 2:
+        raise PlanningError('The category already states its sole target; no fabricated singleton Choice')
+    request, _ = request_for(state, rules, recent_actions, limit)
+    request['state']['planning'].update(stage='target',
+        category_selection={'decision':category_decision, 'category':deepcopy(category)},
+        selected_category_target_count=len(candidates),
+        targets={key:{'task':c['task'],'target':deepcopy(c['target'])} for key,c in candidates.items()},
+        scope='Choose a target within the actual prior Jev-selected category for this same observed actor. Every originally offered target in that category is present. This call executes no input; independent unit-action calls choose every later command.')
+    request['questions']['task_choice']['instructions'] = (
+        'Choose the useful concrete observed target for the prior Jev-selected task category. '
+        'Compare known terrain, cities, support, visible threats and observed route limitations. '
+        'Every original target offered in this category is present; other categories were addressed by the prior genuine category choice. '
+        'Targets are proposals, not proven routes or guaranteed safe/legal sites. '
+        'This objective executes no input, and the later unit-action model may detour, wait or request a new plan.')
+    request['questions']['task_choice']['criteria'] = {key:c['label'] for key,c in candidates.items()}
+    return request, candidates
+
+
 def make_plan(candidate, state, rules=None, limit=64, max_turns=8):
     if type(max_turns) is not int or not 1 <= max_turns <= 20:
         raise PlanningError('Plan review interval must be 1–20 turns')

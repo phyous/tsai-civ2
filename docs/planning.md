@@ -158,3 +158,11 @@ while its target `(50,6)` required a six-edge known-land detour. The scout left
 that loop at decisions 148 and 154, before the land-distance context first
 appeared at decision 168. Subsequent travel therefore does not establish that
 the new context caused the improvement; its previous plan also changed.
+
+## Category and target choices
+
+The optional `task-category-target-v1` mode asks Jev to choose a task category
+before choosing its destination. This prevents a singleton Hold option from
+competing directly with dozens of separate settlement or worker targets. Both
+stages use actual model responses, preserve the original candidates and execute
+no game input. See [the contracts, retry behavior and audit checks](hierarchical-planning.md).
