@@ -136,3 +136,13 @@ selects an order; the next selection of that unit permits a new Jev task choice.
 
 Tests cover offline choice contracts, stage accounting and conservative
 continuity. They do not establish that the resulting strategy can win.
+
+## Destination arithmetic
+
+The unit-action request includes the geometric distance from its current location
+and every offered movement destination to its existing Jev-selected target.
+This helps expose back-and-forth movement without requiring the model to decode
+the doubled-x coordinates. Distances respect horizontal world wrapping. The
+harness does not sort commands by distance, supply a route, or force progress:
+terrain and tactical circumstances can justify a detour. Hold plans and actors
+whose current fingerprint differs from the plan receive no distance context.

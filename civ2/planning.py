@@ -142,6 +142,28 @@ def make_plan(candidate, state, rules=None, limit=64, max_turns=8):
         expires_turn=state['turn']+max_turns, observations=0, status='active', reason='Jev-selected task; no input executed')
 
 
+def target_geometry(plan, state, actions):
+    """Compare offered destinations with the prior model target, without routing."""
+    actor = _unit(state)
+    if (not actor or plan.get('status') != 'active' or plan.get('actor') != _actor(actor)
+            or plan['candidate'].get('task') == 'hold'):
+        return None
+    target = plan['candidate'].get('target', {})
+    if any(type(target.get(key)) is not int for key in ('x','y')):
+        return None
+    distance = _grid_distance(state, actor, target)
+    destinations = {}
+    for identifier, action in actions.items():
+        if action.get('kind') != 'move':
+            continue
+        point = action['parameters']['destination']
+        after = _grid_distance(state, point, target)
+        destinations[identifier] = dict(destination=deepcopy(point),
+            geometric_steps_to_target=after, change_in_geometric_steps=after-distance)
+    return dict(current_geometric_steps_to_target=distance, offered_moves=destinations,
+        note='Arithmetic for the prior Jev-selected target only, in the original wrapped grid. Negative change means geometrically closer. This is not a route, movement cost, safety assessment or command ranking. Terrain, blockers and exploration can justify moving farther away; Jev chooses every command.')
+
+
 def advance_plan(plan, before, after, action=None, rules=None):
     """Conservative observation-only continuity; no guessed unit-ID remapping.
 

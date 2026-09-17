@@ -276,7 +276,7 @@ def labor_refresh_step(session,context,observation,dialog,resources):
     return failed('Unknown labor refresh phase')
 
 
-def _native_map_fallback(session, observation, dialog, resources, _attempt=0):
+def _native_map_fallback(session, observation, dialog, resources, _attempt=0, *, attempts=3, phase=0):
     """Bounded read-only attempts for a map proof still visible on the canvas."""
     from .native_map import LEFT_MAP_REASON, archive_read
     from .observe import recognize
@@ -290,7 +290,7 @@ def _native_map_fallback(session, observation, dialog, resources, _attempt=0):
     changed_frame=False
     try:
         value = session.observer.read(rules_text=session.rules_text,
-                                      middle_settle=(0.0,.25,.5)[_attempt])
+                                      middle_settle=(0.0,.25,.5)[(_attempt+phase)%3])
         status = session.game.rpc('status')
         if status.get('paused') is not True or status.get('heldKeys') or status.get('buttons'):
             raise ValueError('Native map context must return paused with no held input')
@@ -322,8 +322,8 @@ def _native_map_fallback(session, observation, dialog, resources, _attempt=0):
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         session.journal.append('native_map_observation_failed',trigger_image=trigger,
             trigger_reason=LEFT_MAP_REASON,error_type=type(error).__name__)
-        if changed_frame and _attempt<2:
-            return _native_map_fallback(session,observation,dialog,resources,_attempt+1)
+        if changed_frame and _attempt+1<attempts:
+            return _native_map_fallback(session,observation,dialog,resources,_attempt+1,attempts=attempts,phase=phase)
         return observation, dialog
 
 
@@ -355,6 +355,7 @@ def observe_ready(session, resources):
         'Unexpected text over the native map playfield; possible unrecognized modal',
     }
     extended = (.83, .31, .67, .23, .89, .41, .59, .17, .79, .53, .71, .37)
+    proof_waits=(0,3,6,10,14,19)
     for index, delay in enumerate(delays + extended):
         if dialog['supported']:
             break
@@ -367,12 +368,13 @@ def observe_ready(session, resources):
         observation = session.ui.observe()
         dialog = classify_dialog(observation, rules=session.rules, game_text=resources, labels_text=labels_text(),
                                  state=classification_state(session))
-    # A blink can invalidate the first bracketed image while the subsequent
-    # paint waits stabilize the canvas. Give that final eligible map frame one
-    # bounded proof attempt; the same current-image and modal guards apply.
-    if (not dialog.get('supported') and dialog.get('kind') == 'unknown'
-            and dialog.get('reason') == 'Unexpected text over the native map playfield; possible unrecognized modal'):
-        observation, dialog = _native_map_fallback(session, observation, dialog, resources)
+        # Map artwork will not vanish during painting. Interleave at most six
+        # fresh single proofs with these waits instead of only checking the
+        # last blink phase. Never reuse an earlier topology or screenshot.
+        if (index in proof_waits and not dialog.get('supported') and dialog.get('kind') == 'unknown'
+                and dialog.get('reason') == 'Unexpected text over the native map playfield; possible unrecognized modal'):
+            observation, dialog = _native_map_fallback(session, observation, dialog, resources,
+                attempts=1,phase=proof_waits.index(index)%3)
     return observation, dialog
 
 

@@ -13,7 +13,7 @@ from .engine import Game
 from .empire import empire_candidates, empire_request_for, validate_empire_action
 from .evidence import Journal, canonical
 from .policy import unit_candidates, unit_request_for, dialog_request_for, validate_action
-from .planning import advance_plan, make_plan, request_for as planning_request_for, task_candidates
+from .planning import advance_plan, make_plan, request_for as planning_request_for, task_candidates, target_geometry
 from .recording import Recorder
 from .save import parse_save, parse_rules
 from .revision import observation_digest, prefixed_revision, revision_digest
@@ -643,6 +643,9 @@ class Session:
                 'actor':deepcopy(plan['actor']), 'status':plan['status'],
                 'created_turn':plan['created_turn'], 'expires_turn':plan['expires_turn'],
                 'note':'A prior independent Jev task choice; context only. This call alone chooses the next native command.'}
+            geometry = target_geometry(plan, self.state, actions)
+            if geometry is not None:
+                request['state']['persistent_plan']['target_geometry'] = geometry
             request['questions']['unit_action']['instructions'] += (
                 ' Consider the persistent Jev-selected task and observed target when choosing this next step.'
                 ' No path is supplied or executed automatically. You may detour, wait or choose another legal'

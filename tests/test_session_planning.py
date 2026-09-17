@@ -183,6 +183,7 @@ class SessionPlanningTests(unittest.TestCase):
         self.assertEqual(len(events(s,'model_plan')),1)
         self.assertEqual(len(events(s,'model_decision')),2)
         self.assertEqual(s.client.requests[2]['state']['persistent_plan']['actor']['x'],10)
+        self.assertEqual(s.client.requests[2]['state']['persistent_plan']['target_geometry']['current_geometric_steps_to_target'],0)
         self.assertEqual(s.pending_decisions,[3])
 
     def test_unexplained_actor_movement_invalidates_instead_of_guessing_identity(self, sleep):
