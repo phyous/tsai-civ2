@@ -34,3 +34,11 @@ expansion pipeline. The empire review reports observed garrisons and current
 worker builds, and labels the city route as an opportunity to change production.
 Jev decides whether that intervention is worthwhile; the harness does not switch
 the queue or impose a garrison target.
+
+Revision v5 adds the original home-city support arithmetic and the risk of a
+Settler completion reducing both population and output. Revision v6 clarifies
+the original emissary workflow: receiving the audience is a decision to hear
+the proposal, not acceptance of a treaty, tribute, technology transfer or war
+demand. The subsequent terms remain separate observed model choices. This
+addresses a possible decision-framing problem; the earlier American attack
+does not prove that refusing its audience caused the loss.

@@ -10,7 +10,7 @@ class StrategyGuideTests(unittest.TestCase):
         state=fixture(unit_type=1);original=deepcopy(state);r=rules()
         actions=policy.unit_candidates(state,rules=r)
         request=policy.unit_request_for(state,actions,r)
-        self.assertEqual(request['state']['strategy_guide']['revision'],'civ2-prince-guide-2026-09-17-v5')
+        self.assertEqual(request['state']['strategy_guide']['revision'],'civ2-prince-guide-2026-09-17-v6')
         self.assertEqual(request['state']['strategy_guide']['sources'],strategy.SOURCES)
         advice=request['state']['strategic_playbook']['garrison_and_surplus']
         self.assertIn('observed city garrisons',advice)

@@ -679,6 +679,32 @@ def _recover_history_rows(image,rows,executable,directory,evidence):
             rows[index]['provenance']+=b[0]['provenance']
 
 
+def _recover_history_title(image,rows,executable,directory,evidence):
+    """Re-read a historian window title; keep both actual crop readings."""
+    if image.size!=(640,480):return
+    headers=[r for r in rows if re.fullmatch(r'.{1,40} completes his epic history:',r['text'])]
+    controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help','close','exit')]
+    if len(headers)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    header=headers[0];y=header['center'][1]
+    categories=[r for r in rows if 'Civilizations in the World' in r['text']
+                and 16<=r['center'][1]-y<=26 and abs(r['center'][0]-header['center'][0])<=8]
+    if len(categories)!=1:return
+    from .history_notice import _distance,_normal
+    for index,old in enumerate(rows):
+        x,_,w,h=old['bounds']
+        if (not 270<=x<=290 or not 65<=w<=100 or h>24
+                or not 16<=y-old['center'][1]<=30
+                or abs(old['center'][0]-header['center'][0])>8
+                or _distance(_normal(old['text']),'civilization ii')<=3):continue
+        a=_crop_text(image,old,'history_title_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
+        b=_crop_text(image,old,'history_title_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
+        if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']
+                and min(a[0]['confidence'],b[0]['confidence'])>=.8
+                and _distance(_normal(a[0]['text']),'civilization ii')<=3
+                and _same_location(a[0],b[0]) and _same_location(old,b[0])):
+            if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
+
+
 def _recover_acquisition_line(image,rows,executable,directory,evidence):
     if image.size!=(640,480):return
     controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Close')]
@@ -1338,7 +1364,7 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_history_rows,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+            for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
                             _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
