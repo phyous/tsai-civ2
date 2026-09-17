@@ -367,6 +367,26 @@ def _recover_city_section_labels(image,rows,executable,directory,evidence):
                 rows[index]['provenance']+=second[0]['provenance']
 
 
+def _recover_name_city_title(image,rows,executable,directory,evidence):
+    """Read the original default-name form's title; never supply its value."""
+    if image.size!=(640,480):return
+    expected='What Shall We Name This City?'
+    controls=[r for r in rows if r['text'].strip().casefold() in ('ok','cancel','yes','no','help','goal','auto')]
+    fields=[r for r in rows if r['text'].strip().casefold()=='city name:']
+    if (len(controls)!=2 or {r['text'].casefold() for r in controls}!={'ok','cancel'}
+            or len(fields)!=1 or abs(controls[0]['center'][1]-controls[1]['center'][1])>8):return
+    for index,row in enumerate(rows):
+        if (row['text']==expected or row['confidence']<.8 or not 100<=row['center'][1]<=350
+                or not 280<=row['center'][0]<=360 or not _near_text(row['text'],expected,3)
+                or not row['center'][1]<fields[0]['center'][1]<min(r['center'][1] for r in controls)):continue
+        first=_crop_text(image,row,'name_city_title_3x',executable,directory,evidence,padding=(3,3))
+        second=_crop_text(image,row,'name_city_title_gray_3x',executable,directory,evidence,padding=(3,3),grayscale=True)
+        if (len(first)==len(second)==1 and first[0]['text']==second[0]['text']==expected
+                and second[0]['confidence']>=.8 and _same_location(row,second[0])
+                and _replace_crop_row(rows,index,first,lambda old,new:new==expected)):
+            rows[index]['provenance']+=second[0]['provenance']
+
+
 def _recover_governance_labels(image,rows,executable,directory,evidence):
     """Read damaged government headings/council prose from the same pixels."""
     if image.size!=(640,480):return
@@ -1033,17 +1053,32 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
     heading=lambda text:re.fullmatch(r'what shall (?:we|me) ([a-z]{3,7}) in (.{1,60})',text.strip().rstrip('?'),re.I)
     old_heading=re.fullmatch(r'wh(?:at|ait) shall (?:we|me) ([a-z]{3,7}) in (.{1,60})',title['text'].strip().rstrip('?'),re.I)
     if old_heading and (not heading(title['text']) or not _near_text(old_heading[1].casefold(),'build',2)):
+        city_readings=[]
         for scale,padding in ((3,(6,6)),(2,(6,6)),(2,(3,3))):
             first=_crop_text(image,title,f'production_title_{scale}x',executable,directory,evidence,padding=padding,scale=scale)
             second=_crop_text(image,title,f'production_title_gray_{scale}x',executable,directory,evidence,padding=padding,grayscale=True,scale=scale)
             if len(first)==len(second)==1 and first[0]['text']==second[0]['text']:
                 fresh=heading(first[0]['text'])
-                if (fresh and fresh[2].casefold()==old_heading[2].casefold()
+                if (fresh and _near_text(fresh[2].casefold(),old_heading[2].casefold(),1)
                         and _near_text(fresh[1].casefold(),'build',2)
-                        and second[0]['confidence']>=.8 and _same_location(title,second[0])):
+                        and min(first[0]['confidence'],second[0]['confidence'])>=.8
+                        and _same_location(title,first[0]) and _same_location(title,second[0])):
+                    changed_city=fresh[2].casefold()!=old_heading[2].casefold()
+                    if changed_city:
+                        # Never replace a city suffix from one crop pair.
+                        # Two distinct scales must agree on the same observed
+                        # one-glyph correction; no state name is consulted.
+                        city_readings.append((fresh[2].casefold(),scale,first[0],second[0]))
+                        agrees=[v for v in city_readings if v[0]==fresh[2].casefold()]
+                        if len({v[1] for v in agrees})<2:continue
+                        first=[dict(agrees[0][2])]
+                        first[0]['provenance']=[p for _,_,a,b in agrees for row in(a,b) for p in row['provenance']]
                     index=rows.index(title)
                     if _replace_crop_row(rows,index,first,lambda old,new:True):
-                        rows[index]['provenance']+=second[0]['provenance'];title=rows[index];break
+                        if changed_city:
+                            rows[index]['production_title_identity_consensus']={'city_text':fresh[2],'independent_scales':2}
+                        else:rows[index]['provenance']+=second[0]['provenance']
+                        title=rows[index];break
     vocabulary=_production_names()
     for index,row in enumerate(rows):
         if not (title['center'][1]+8<row['center'][1]<bottom-8
@@ -1303,7 +1338,7 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_history_rows,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+            for recover in (_recover_history_rows,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
                             _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_herald_panel,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
