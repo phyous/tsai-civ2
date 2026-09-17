@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from PIL import Image
 from .ocr_worker import run_ocr
+from .gdi_text import recover_quoted_herald
 from .map_badges import annotate_badges
 from .tax_controls import annotate_tax_controls
 from .notice_icons import annotate_notice_icons
@@ -726,6 +727,31 @@ def _recover_acquisition_line(image,rows,executable,directory,evidence):
         if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
 
 
+def _recover_discovery_punctuation(image,rows,executable,directory,evidence):
+    """Read the final period twice without changing the observed advance name."""
+    if image.size!=(640,480):return
+    controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help')]
+    titles=[r for r in rows if _near_text(r['text'].casefold(),'civilization advance',3)
+            and r['confidence']>=.8 and 280<=r['center'][0]<=360]
+    prose=[r for r in rows if re.fullmatch(r'.{1,40} wise men discover the secret of',r['text'])
+           and r['confidence']>=.8]
+    if (len(controls)!=1 or controls[0]['text']!='OK' or len(titles)!=1 or len(prose)!=1
+            or not titles[0]['center'][1]<prose[0]['center'][1]<controls[0]['center'][1]):return
+    names=_research_names()
+    for index,row in enumerate(rows):
+        text=row['text'];x,y,w,h=row['bounds']
+        if (row['confidence']<.8 or not text.endswith(':') or text[:-1].casefold() not in names
+                or not prose[0]['center'][1]<row['center'][1]<controls[0]['center'][1]
+                or not 185<=x<=215 or not 200<=y<=280 or w>310 or h>24):continue
+        expected=text[:-1]+'.'
+        first=_crop_text(image,row,'discovery_period_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
+        second=_crop_text(image,row,'discovery_period_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
+        if (len(first)==len(second)==1 and first[0]['text']==second[0]['text']==expected
+                and min(first[0]['confidence'],second[0]['confidence'])>=.8
+                and _same_location(row,second[0]) and _same_location(first[0],second[0])):
+            if _replace_crop_row(rows,index,first,lambda old,new:new==expected):rows[index]['provenance']+=second[0]['provenance']
+
+
 def _recover_gape_boundary(image,rows,executable,directory,evidence):
     """Recover only an independently read sentence boundary in GAPE prose."""
     if image.size!=(640,480):return
@@ -1141,6 +1167,40 @@ def _recover_split_production_title(image,rows,executable,directory,evidence):
         rows[rows.index(left)]=a[0];rows.remove(right)
 
 
+def _recover_founded_production_title(image,rows,executable,directory,evidence):
+    """Broader suffix reading still needs a separate native founding notice."""
+    if image.size!=(640,480):return
+    pattern=r'What shall (?:we|me) ([a-z]{3,7}) in (.{1,60})\?'
+    titles=[r for r in rows if re.fullmatch(pattern,r['text'],re.I) and r['confidence']>=.8 and 70<r['center'][1]<350]
+    captions=[re.match(r'^Ci(?:ty|sy|cy) of .+?,\s*(\d{1,5}\s*(?:B\.?\s*C\.?|A\.?\s*D\.?))',r['text'],re.I)
+              for r in rows if r['confidence']>=.8 and 32<=r['bounds'][1]<=56]
+    years=[m[1] for m in captions if m]
+    if len(titles)!=1 or len(years)!=1:return
+    title=titles[0];original=re.fullmatch(pattern,title['text'],re.I)
+    if _near_text(original[1].casefold(),'build',2):return
+    controls=[r for r in rows if r['text'].casefold() in ('auto','help','ok') and r['center'][1]>title['center'][1]]
+    if len(controls)!=3 or {r['text'].casefold() for r in controls}!={'auto','help','ok'}:return
+    if max(r['center'][1] for r in controls)-min(r['center'][1] for r in controls)>8:return
+    readings=[]
+    for scale,pad,max_verb_error in ((3,8,2),(4,3,3)):
+        a=_crop_text(image,title,f'founded_production_rgb{scale}',executable,directory,evidence,padding=(pad,pad),scale=scale)
+        b=_crop_text(image,title,f'founded_production_gray{scale}',executable,directory,evidence,padding=(pad,pad),scale=scale,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(title,a[0]) or not _same_location(a[0],b[0])):return
+        match=re.fullmatch(pattern,a[0]['text'],re.I)
+        if (not match or not _near_text(match[1].casefold(),'build',max_verb_error)
+                or not _near_text(match[2].casefold(),original[2].casefold(),2)):return
+        readings.append((a[0],b[0],match[2]))
+    if readings[0][2].casefold()!=readings[1][2].casefold():return
+    selected=dict(readings[0][0])
+    selected['provenance']=[p for a,b,_ in readings for r in (a,b) for p in r['provenance']]
+    index=rows.index(title)
+    if _replace_crop_row(rows,index,[selected],lambda old,new:True):
+        rows[index]['production_title_identity_consensus']={'city_text':readings[0][2],
+            'independent_scales':2,'requires_founding_notice':True,'observed_year':years[0]}
+
+
 def _recover_city_and_production_rows(image, rows, executable, directory, evidence):
     """Narrow native city/list layouts; no rules names or dates are invented."""
     if image.size!=(640,480):return
@@ -1515,8 +1575,8 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_herald_panel,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+            for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+                            _recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

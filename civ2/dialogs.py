@@ -111,6 +111,9 @@ def _rows(observation):
             raise DialogObservationError('Invalid OCR confidence')
         prepared=dict(text=text,normal=_normal(text),center=list(center),bounds=list(bounds),
                       source_line=index,confidence=confidence)
+        production_proof=row.get('production_title_identity_consensus')
+        if isinstance(production_proof,dict) and production_proof.get('requires_founding_notice') is True:
+            prepared['production_founding_year']=production_proof.get('observed_year')
         if proven_badge(row,observation['sha256']):
             prepared['original_city_badge']=True
             prepared['original_city_badge_bounds']=list(row['map_badge_pixels']['bounds'])
@@ -969,6 +972,9 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             names=[name for name in city_names if _edit_distance(m[2],_normal(name))<=1]
             if len(names)!=1:
                 continue
+            if 'production_founding_year' in title:
+                founded=_recent_founded_name(m[2],title['production_founding_year'],state)
+                if founded is None or _normal(founded['name'])!=_normal(names[0]):continue
             body,buttons,_=body_rows(title,{'ok','auto','help'},440)
             icons=_production_icon_rows(body,rule_names)
             body=[r for r in body if r not in icons]
@@ -992,6 +998,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     if matches:
         kind,title=matches[0]
         if title['confidence']<.8:return unknown('Low-confidence title',kind,title['text'])
+        if kind=='production_choice' and 'production_founding_year' in title:
+            suffix=re.fullmatch(r'what shall (?:we|me) [a-z]{3,7} in (.{1,60})',title['normal'])
+            founded=_recent_founded_name(suffix[1],title['production_founding_year'],state) if suffix else None
+            if founded is None:return unknown('Production title needs one same-year original founding notice',kind,title['text'])
         source_width={'research_choice':300,'production_choice':440,'government_choice':240,
                       'new_city_name':460,'diplomacy':440,'tax_rate':260,'luxury_rate':260,
                       'revolution_choice':240,'revolution_offer':440,'city_locator':360}[kind]

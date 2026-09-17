@@ -152,3 +152,9 @@ land to the target. This makes known-water detours visible. Unknown tiles are
 excluded; a missing connection is not a claim that a route is impossible.
 The calculation ignores roads, movement costs, units, zones of control,
 treaties and transport. All original actions remain available to Jev.
+
+In development attempt 010, one scout oscillated between `(52,4)` and `(53,5)`
+while its target `(50,6)` required a six-edge known-land detour. The scout left
+that loop at decisions 148 and 154, before the land-distance context first
+appeared at decision 168. Subsequent travel therefore does not establish that
+the new context caused the improvement; its previous plan also changed.
