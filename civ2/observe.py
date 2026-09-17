@@ -12,6 +12,7 @@ from .ocr_worker import run_ocr
 from .map_badges import annotate_badges
 from .tax_controls import annotate_tax_controls
 from .notice_icons import annotate_notice_icons
+from .footer_pixels import annotate_footer
 
 ROOT = Path(__file__).resolve().parents[1]
 SHORT_CONTROLS = {text.casefold(): text for text in
@@ -874,26 +875,31 @@ def _recover_diplomacy_intro(image,rows,executable,directory,evidence):
     options=[r for r in rows if r['bounds'][0]>=330 and old['center'][1]<r['center'][1]<controls[0]['center'][1]
              and r['text'].startswith('"') and r['text'].endswith('"') and r['confidence']>=.8]
     if not 2<=len(options)<=9:return
-    x,y,w,h=old['bounds'];readings=[]
-    for pad,right in ((3,14),(2,16)):
-        box=(x-pad,y-pad,min(640,x+w+right),min(480,y+h+pad));crop=image.crop(box)
-        name='diplomacy_intro_black_3x_pad'+str(pad);target=Path(directory)/(name+'.png')
-        crop.convert('L').point(lambda value:255 if value>70 else 0).resize(
-            (crop.width*3,crop.height*3),Image.Resampling.BICUBIC).save(target)
-        evidence['passes'].append(name);raw=_run_ocr(executable,target)
-        if len(raw)!=1 or raw[0]['text']!='You respond: "We..."' or raw[0]['confidence']<.8:return
-        local=_prepare_rows(raw,crop.width,crop.height,name)[0]
-        nx,ny,nw,nh=local['provenance'][0]['normalized_bounds']
-        mapped=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
-            x=(box[0]+nx*crop.width)/640,y=(box[1]+ny*crop.height)/480,
-            width=nw*crop.width/640,height=nh*crop.height/480)],640,480,name)[0]
-        mapped['provenance'][0].update(crop=list(box),scale=3,normalized_crop_bounds=[nx,ny,nw,nh],
-            transform='L<=70 retained black, others white; bicubic enlargement')
-        if not _same_location(old,mapped):return
-        readings.append(mapped)
-    if not _same_location(*readings):return
-    first,second=readings;first['provenance']=old['provenance']+first['provenance']+second['provenance']
-    rows[rows.index(old)]=first
+    x,y,w,h=old['bounds']
+    for framings in (((3,14),(2,16)),((3,20),(4,20))):
+        readings=[]
+        for pad,right in framings:
+            box=(x-pad,y-pad,min(640,x+w+right),min(480,y+h+pad));crop=image.crop(box)
+            name=f'diplomacy_intro_black_3x_pad{pad}_right{right}';target=Path(directory)/(name+'.png')
+            crop.convert('L').point(lambda value:255 if value>70 else 0).resize(
+                (crop.width*3,crop.height*3),Image.Resampling.BICUBIC).save(target)
+            evidence['passes'].append(name);raw=_run_ocr(executable,target)
+            if len(raw)!=1 or raw[0]['text']!='You respond: "We..."' or raw[0]['confidence']<.8:break
+            try:
+                local=_prepare_rows(raw,crop.width,crop.height,name)[0]
+                nx,ny,nw,nh=local['provenance'][0]['normalized_bounds']
+                mapped=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
+                    x=(box[0]+nx*crop.width)/640,y=(box[1]+ny*crop.height)/480,
+                    width=nw*crop.width/640,height=nh*crop.height/480)],640,480,name)[0]
+            except ValueError:break
+            mapped['provenance'][0].update(crop=list(box),scale=3,normalized_crop_bounds=[nx,ny,nw,nh],
+                transform='L<=70 retained black, others white; bicubic enlargement')
+            if not _same_location(old,mapped):break
+            readings.append(mapped)
+        if len(readings)!=2 or not _same_location(*readings):continue
+        first,second=readings;first['provenance']=old['provenance']+first['provenance']+second['provenance']
+        rows[rows.index(old)]=first
+        return
 
 
 def _recover_audience_radio(image,rows,executable,directory,evidence):
@@ -1027,6 +1033,32 @@ def _recover_herald_options(image,rows,executable,directory,evidence):
             index=rows.index(old)
             if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
             break
+
+
+def _recover_treaty_closing_rows(image,rows,executable,directory,evidence):
+    """Read the printed withdrawal sentence of a source-bound treaty notice."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary') and 330<=r['center'][1]<=380]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    heading=headings[0];ok=controls[0]
+    body=[r for r in rows if heading['center'][1]<r['center'][1]<ok['center'][1]-12 and 302<=r['bounds'][0]<=320]
+    if (len(body)!=4 or body[0]['text']!='"We affirm this treaty of eternal friendship and'
+            or not body[1]['text'].startswith('goodwill between the people of the ')
+            or not body[1]['text'].endswith(' and')):return
+    match=re.fullmatch(r'([A-Za-z -]+ civilizations\. We shall withdraw) ou[r]?',body[2]['text'])
+    last='forces from your territory at once."'
+    if match is None or not _near_text(body[3]['text'],last,2):return
+    for old,wanted in ((body[2],match[1]+' our'),(body[3],last)):
+        if old['text']==wanted:continue
+        name='treaty_closing_'+str(rows.index(old))
+        a=_crop_text(image,old,name+'_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+        b=_crop_text(image,old,name+'_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=wanted or b[0]['text']!=wanted
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):continue
+        index=rows.index(old)
+        if _replace_crop_row(rows,index,a,lambda previous,fresh:True):rows[index]['provenance']+=b[0]['provenance']
 
 
 def _recover_greeting_body(image,rows,executable,directory,evidence):
@@ -1471,6 +1503,8 @@ def recognize(path: str | Path) -> dict:
                             rows[rows.index(previous)] = candidate
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name='bicubic_3x', error=type(error).__name__))
+            if annotate_footer(image,rows,original_hash):
+                evidence['passes'].append('exact_original_gray_footer_rgb_sha256')
             if _status_recovery_needed(rows, width, height):
                 name = 'status_white_4x'
                 try:
@@ -1482,7 +1516,7 @@ def recognize(path: str | Path) -> dict:
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
             for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_split_production_title,_recover_city_and_production_rows,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_herald_panel,_recover_herald_options,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+                            _recover_saved_caption,_recover_acquisition_line,_recover_support_notice,_recover_travellers_title,_recover_population_notice,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_radio,_recover_herald_panel,_recover_herald_options,_recover_treaty_closing_rows,_recover_greeting_body,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:
