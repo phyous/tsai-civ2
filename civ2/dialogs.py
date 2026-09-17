@@ -27,6 +27,8 @@ from .acquisition_notice import classify_acquisition_notice
 from .history_notice import classify_history_notice
 from .native_map import evidence_for as native_map_evidence
 
+CDROM_TEMPLATE_SHA256='28a50ae19b7eaf7abf51d1c97ab591c3f03abff2e7a19fc18dcb623914666fd7'
+
 
 class DialogObservationError(ValueError):
     pass
@@ -531,6 +533,35 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         limit=min(r['bounds'][1] for r in bottom_buttons)
         return [r for r in below if r['bounds'][1]+r['bounds'][3]<=limit+2],bottom_buttons,limit
     full=' '.join(r['normal'] for r in rows)
+    # Original optional-media notice can reappear when a movie is requested.
+    # Its default OK continues this session without media; Repeat Search is
+    # auxiliary. Pin the complete original resource, not a generic Please Note.
+    if game_text and (width,height)==(640,480):
+        media=[t for t in dialog_resources(game_text) if t['tag']=='CDROMNOTFOUND'
+               and hashlib.sha256(json.dumps(t,sort_keys=True).encode()).hexdigest()==CDROM_TEMPLATE_SHA256]
+        headings=[r for r in rows if r['normal'] in ('please note','please lfote') and r['confidence']>=.8]
+        if len(media)==len(headings)==1:
+            title=headings[0];body,controls,_=body_rows(title,{'ok','repeat search','cancel','yes','no'},320)
+            global_controls=[r for r in rows if r['normal'] in ('ok','repeat search','cancel','yes','no')]
+            def media_text(text):
+                text=_normal(text)
+                # Measured009/589 product-title glyphs and quote punctuation;
+                # all other words in the full original paragraph stay exact.
+                text=re.sub(r'\b(?:civilization (?:iit|i)|ciyilization ii)\b','civilization ii',text)
+                return text.replace('"\'repeat search"','"repeat search"')
+            if (len(controls)==2 and {r['normal'] for r in controls}=={'repeat search','ok'}
+                    and controls==global_controls and all(r['confidence']>=.8 for r in body+controls)
+                    and abs(controls[0]['center'][1]-controls[1]['center'][1])<=4
+                    and abs(sum(r['center'][0] for r in controls)/2-title['center'][0])<=8
+                    and media_text(' '.join(r['text'] for r in body))==media_text(media[0]['body'])):
+                buttons=[_option(r,'button') for r in controls];ok=[r for r in buttons if _normal(r['text'])=='ok']
+                result['resource_tag']='CDROMNOTFOUND'
+                result['evidence']['cdrom_notice']={'source':'Complete original GAME.TXT CDROMNOTFOUND optional-media notice',
+                    'template_sha256':CDROM_TEMPLATE_SHA256,'title_source_line':title['source_line'],
+                    'body_source_lines':[r['source_line'] for r in body],
+                    'observed_body':'\n'.join(r['text'] for r in body)}
+                return finish('information',title['text'],ok,buttons,mechanical='acknowledge_information',
+                              reason='Continue without optional CD multimedia using the original default OK')
     # Original tax scrollbars expose six observed arrow buttons, not a guessed
     # percentage-to-pixel mapping. One model click is followed by a fresh read.
     tax_labels={'How Shall We Distribute The Wealth','Government','Maximum Rate','Taxes','Science','Luxuries','Lock'}

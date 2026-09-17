@@ -106,7 +106,7 @@ def _observe(game, *, diagnostics=None):
         return cursor
 
 
-def locate_clipped_cursor(image: Image.Image) -> tuple[int, int]:
+def locate_clipped_cursor(image: Image.Image, *, minimum_visible=85) -> tuple[int, int]:
     """Recognize a substantial exact arrow fragment only at a canvas edge.
 
     This never authorizes a click. Its sole use is moving away from the edge,
@@ -114,15 +114,17 @@ def locate_clipped_cursor(image: Image.Image) -> tuple[int, int]:
     """
     if image.size != (640, 480):
         raise CursorError('Expected the original 640x480 game image')
+    if minimum_visible not in (44,85):
+        raise ValueError('Only calibrated original arrow-fragment thresholds are supported')
     pixels = image.convert('RGB').load()
     candidates = []
-    for y in range(469):
+    for y in range(473 if minimum_visible==44 else 469):
         for x in range(633):
             if x <= 627 and y <= 460:
                 continue
             visible = [(dx,dy,value) for dx,dy,value in CONSTRAINTS
                        if x+dx < 640 and y+dy < 480]
-            if len(visible) < 85 or pixels[x,y] != (0,0,0):
+            if len(visible) < minimum_visible or pixels[x,y] != (0,0,0):
                 continue
             if all(pixels[x+dx,y+dy] == value for dx,dy,value in visible):
                 candidates.append((x,y))
@@ -141,7 +143,16 @@ def _initial_observe(game, inputs, diagnostics=None):
         data=error.frame
     try:
         with Image.open(BytesIO(data)) as image:
-            clipped = locate_clipped_cursor(image)
+            minimum_visible=85
+            try:
+                clipped = locate_clipped_cursor(image)
+            except CursorError as error:
+                if str(error)!='No sufficiently complete clipped original arrow is visible':raise
+                # Original010/38 retained exactly44 head pixels at y472.
+                # This weaker edge-only proof permits a pointer retreat only;
+                # the full unique arrow remains mandatory before any click.
+                minimum_visible=44
+                clipped=locate_clipped_cursor(image,minimum_visible=minimum_visible)
     except CursorError as error:
         error.frame=data
         raise
@@ -150,7 +161,8 @@ def _initial_observe(game, inputs, diagnostics=None):
     time.sleep(.1)
     restored = _observe(game,diagnostics=diagnostics)  # Full arrow is mandatory before any click.
     return restored, {'clipped_cursor':list(clipped), 'delta':list(delta),
-                      'restored_full_cursor':list(restored), 'button_pressed':False}
+                      'restored_full_cursor':list(restored), 'button_pressed':False,
+                      'fragment_minimum_pixels':minimum_visible}
 
 
 def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: bool = True, timeout: float = 20, _trace=None) -> dict:
@@ -180,6 +192,7 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
     gains = [INITIAL_GAIN, INITIAL_GAIN]
     trace=_trace if _trace is not None else {'inputs':[],'checkpoints':[],'cursor_repaints':[]}
     inputs, checkpoints, repaints = trace['inputs'],trace['checkpoints'],trace['cursor_repaints']
+    step_edges=trace.setdefault('post_step_edge_recoveries',[])
     deadline = time.monotonic() + timeout
     cursor, edge_recovery = _initial_observe(game, inputs, repaints)
     for step in range(81):
@@ -196,13 +209,31 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
                 value = 1 if error[index] > 0 else -1
             # Use the full bounded host-input range. Every step still requires
             # a freshly observed guest cursor before another move or click.
-            delta.append(max(-32, min(32, value)))
+            value=max(-32,min(32,value))
+            # Windows accelerates larger relative requests: a measured gain
+            # from a 2-pixel request cannot safely size a 12-pixel edge step.
+            # Keep edge-directed motion small and reobserve every step.
+            margin=([627,460][index]-cursor[index]) if value>0 else cursor[index]
+            if margin<=32:
+                limit=1 if margin<=8 else 2
+                value=max(-limit,min(limit,value))
+            delta.append(value)
         actual_delta = tuple(delta)
         if actual_delta == (0, 0):
             raise CursorError('Cursor movement is below the supported resolution')
         inputs.append(game.rpc('moveRelative', *actual_delta))
         time.sleep(.045)
-        after = _observe(game,diagnostics=repaints)
+        recovery=None
+        try:
+            after = _observe(game,diagnostics=repaints)
+        except CursorError as error:
+            if str(error)!='The original Windows arrow is not fully visible' or len(step_edges)>=2:
+                raise
+            # Native acceleration can clip the arrow after a measured move,
+            # not just at entry. The same exact partial-raster proof must
+            # restore a full arrow before another movement or any button.
+            after,recovery=_initial_observe(game,inputs,repaints)
+            if recovery is not None:step_edges.append({'after_step':step+1,**recovery})
         # Permit a slow original frame, with no second input until it is observed.
         for _ in range(3):
             if after != cursor:
@@ -212,6 +243,11 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
         if after == cursor:
             raise CursorError('Original guest cursor did not acknowledge mouse movement')
         for index in range(2):
+            if recovery is not None:
+                # The recovery moved too: its net displacement cannot measure
+                # the gain of the original step. Restart conservatively.
+                gains[index]=INITIAL_GAIN
+                continue
             if actual_delta[index]:
                 gain = (after[index] - cursor[index]) / actual_delta[index]
                 if math.isfinite(gain) and .25 <= gain <= 8:
@@ -224,6 +260,7 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
         host_x, host_y, cursor = host_position['x'], host_position['y'], after
     # No further mousemove here: SDL canvas positions are not guest positions.
     if press:
+        trace['button_down_attempted']=True
         try:
             inputs.append(game.rpc('mouse', {'type':'mousedown','x':host_x,'y':host_y,'button':button}))
             time.sleep(.09)
@@ -233,11 +270,22 @@ def _move(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, press: b
             'tolerance':tolerance,'movement_steps':len(checkpoints)-1,
             'checkpoints':checkpoints, 'inputs':inputs,
             **({'cursor_repaints':repaints} if repaints else {}),
-            **({'edge_recovery':edge_recovery} if edge_recovery else {})}
+            **({'edge_recovery':edge_recovery} if edge_recovery else {}),
+            **({'post_step_edge_recoveries':step_edges} if step_edges else {})}
 
 
 def move_and_click(game, x: int, y: int, button: int = 0, *, tolerance: int = 3, timeout: float = 20) -> dict:
-    return _move(game,x,y,button,tolerance=tolerance,timeout=timeout)
+    trace={'inputs':[],'checkpoints':[],'cursor_repaints':[],'button_down_attempted':False}
+    try:
+        return _move(game,x,y,button,tolerance=tolerance,timeout=timeout,_trace=trace)
+    except Exception as error:
+        # Preserve actual returned receipts even when a later capture or RPC
+        # fails. A button attempt without an acknowledged completion is
+        # explicitly uncertain, never silently reported as no click.
+        error.cursor_receipt={'issued':None if trace['button_down_attempted'] else False,
+            'status':'failed','target':[x,y],'tolerance':tolerance,
+            'error':str(error),'error_type':type(error).__name__,**trace}
+        raise
 
 
 def move_cursor(game, x: int, y: int, *, tolerance: int = 3) -> dict:

@@ -38,7 +38,7 @@ DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_
 KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'screen_observed', 'mechanical_input', 'open_city_control',
                 'native_map_observed', 'native_map_observation_failed',
-                'model_command_not_dispatched', 'controller_error', 'controller_update',
+                'model_command_not_dispatched', 'controller_error', 'controller_update', 'controller_input_gap',
                 'navigate_selected_city', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
@@ -1177,6 +1177,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     refused_commands = set()
     controller_errors = set()
     controller_update_notes = 0
+    input_gaps = {}
     checks, initial_state = None, None
     initial_memory_inventory=None
     initial_campaign_start=None
@@ -1444,6 +1445,27 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                          and _revision_digest(plan,'current_') == _revision_digest(action['preconditions']),
                          'Command planning context differs from the current observed model plan')
             decisions[identifier] = {'action': action, 'question': question, 'response': response}
+        elif kind == 'controller_input_gap':
+            identifier=payload.get('decision')
+            _require(set(payload)=={'decision','action','before','after','input_sequence_after','reason'}
+                     and type(identifier) is int and identifier in decisions
+                     and identifier not in dispatched and identifier not in input_gaps
+                     and payload.get('action')==decisions[identifier]['action']
+                     and payload.get('reason')=='cursor_positioning_failed_partial_receipts_unavailable'
+                     and _int(payload.get('input_sequence_after')) and payload['input_sequence_after']>=latest_runtime_input,
+                     'Input gap must identify an unused model choice and observed sequence')
+            before,after=files.descriptor(payload['before']),files.descriptor(payload['after'])
+            _require(before['path'].startswith('screens/') and after['path'].startswith('screens/')
+                     and before['sha256']==decisions[identifier]['action']['preconditions'].get('image_sha256'),
+                     'Input gap lacks its selected source image and retained current image')
+            from PIL import Image
+            for descriptor in (before,after):
+                with Image.open(files.root/descriptor['path']) as image:
+                    _require(image.format=='PNG' and image.size==(640,480),'Invalid input-gap image')
+            # This is an explicit limitation, not recovered input evidence.
+            # Do not count unknown movements or certify command execution.
+            input_gaps[identifier]=payload['input_sequence_after']
+            latest_runtime_input=payload['input_sequence_after']
         elif kind == 'controller_update':
             _require(set(payload)=={'reason','scope'} and all(isinstance(payload[k],str)
                      and 0<len(payload[k])<=512 for k in ('reason','scope')),
@@ -1513,7 +1535,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     forced_city += 1; forced_city_pending = None
                     continue
             if identifier is None and question == 'empire_action':
-                matches = [i for i, d in decisions.items() if i not in dispatched and i not in refused_commands
+                matches = [i for i, d in decisions.items() if i not in dispatched and i not in refused_commands and i not in input_gaps
                            and d['action'] == payload.get('action') and d['question'] == question]
                 if len(matches) == 1:
                     identifier = matches[0]
@@ -1522,7 +1544,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                     last_finish={'turn':forced_pending['preconditions']['turn']}
                     forced += 1; forced_pending = None
                     continue
-            _require(identifier in decisions and identifier not in dispatched and identifier not in refused_commands
+            _require(identifier in decisions and identifier not in dispatched and identifier not in refused_commands and identifier not in input_gaps
                      and decisions[identifier]['question'] == question,
                      'Dispatch has no unique prior selected model decision')
             selected=decisions[identifier]['action']
@@ -1738,7 +1760,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
              'Controller error needs separate source-bound no-dispatch evidence')
     _require(checks is not None, 'Initial native setup evidence is absent')
     outcome = _terminal(files, terminal_review, chain)
-    complete = len(stops) == 1 and recording is not None and not unknown
+    complete = len(stops) == 1 and recording is not None and not unknown and not input_gaps
     responses = [d['response'] for group in (decisions,plans) for d in group.values()]
     numeric_metadata = ('rejected_response_attempts', 'rejected_input_tokens',
                         'rejected_output_tokens', 'rejected_usage_unavailable_attempts')
@@ -1762,6 +1784,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'source_image_refusals': sorted(refused_commands),
                           'controller_error_diagnostics': sorted(controller_errors),
                           'controller_update_notes': controller_update_notes,
+                          'input_coverage': 'incomplete' if input_gaps else 'recorded inputs checked',
+                          'unverified_input_gaps': [{'decision':i,'observed_input_sequence_after':input_gaps[i]} for i in sorted(input_gaps)],
                           'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)),
                           'forced_empire_dispatches': forced,
                           'forced_city_exit_dispatches':forced_city,

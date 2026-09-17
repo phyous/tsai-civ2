@@ -140,6 +140,21 @@ class RefusalEvidenceTests(unittest.TestCase):
                     self.assertEqual(report['decisions']['controller_update_notes'],1)
                     self.assertEqual(report['decisions']['model_dispatches'],0)
 
+    def test_unavailable_motion_receipts_are_an_explicit_incomplete_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            e=self.refusal(directory)
+            def change(rows):
+                event=next(r for r in rows if r['kind']=='model_command_not_dispatched')
+                p=event['payload'];event['kind']='controller_input_gap'
+                event['payload']={k:p[k] for k in ('decision','action','before','after')}
+                event['payload'].update(input_sequence_after=5,
+                    reason='cursor_positioning_failed_partial_receipts_unavailable')
+            e.rewrite(change);report=verify_run(e.directory,ffprobe=None)
+            self.assertEqual(report['decisions']['input_coverage'],'incomplete')
+            self.assertEqual(report['decisions']['unverified_input_gaps'],[{'decision':1,'observed_input_sequence_after':5}])
+            self.assertEqual(report['decisions']['model_dispatches'],0)
+            self.assertFalse(report['completeness']['release_review_ready'])
+
     def test_batch_cannot_include_undispatched_duplicate_or_refused_choice(self):
         for mode in ('undispatched','duplicate','refused'):
             with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory:

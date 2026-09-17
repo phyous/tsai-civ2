@@ -209,13 +209,13 @@ class CursorTests(unittest.TestCase):
         self.assertEqual(game.inputs,[])
 
     @patch('civ2.cursor.time.sleep')
-    def test_measured_gain_two_reproduces_old_bottom_overshoot_without_click(self,_):
+    def test_edge_step_cap_prevents_old_underestimated_gain_overshoot(self,_):
         game=MeasuredEdgeGame((500,447))
         with patch('civ2.cursor.INITIAL_GAIN',1.0):
-            with self.assertRaisesRegex(CursorError,'not fully visible'):
-                move_and_click(game,500,458)
-        self.assertEqual(game.cursor,(500,469))
-        self.assertTrue(all(event['type']=='mousemove' for event in game.inputs))
+            receipt=move_and_click(game,500,458)
+        self.assertTrue(receipt['issued'])
+        self.assertTrue(all(y<=460 for x,y in game.positions))
+        self.assertTrue(all(abs(event['dy'])<=2 for event in game.inputs if event['type']=='mousemove'))
 
     @patch('civ2.cursor.time.sleep')
     def test_conservative_first_step_keeps_measured_bottom_and_right_arrows_visible(self,_):
@@ -266,6 +266,88 @@ class CursorTests(unittest.TestCase):
         with self.assertRaises(CursorError):move_and_click(game,280,110)
         self.assertEqual(len(game.inputs),1)
         self.assertEqual(game.inputs[0]['type'],'mousemove')
+
+    @patch('civ2.cursor.time.sleep')
+    def test_small_edge_fragment_permits_only_retreat_until_full_arrow(self,_):
+        game=MeasuredEdgeGame((616,472));receipt=move_and_click(game,606,460)
+        self.assertEqual(receipt['edge_recovery']['fragment_minimum_pixels'],44)
+        self.assertEqual(receipt['edge_recovery']['restored_full_cursor'],[616,456])
+        self.assertFalse(receipt['edge_recovery']['button_pressed'])
+        self.assertEqual([e['type'] for e in game.inputs[-2:]],['mousedown','mouseup'])
+        self.assertTrue(all(e['type']=='mousemove' for e in game.inputs[:-2]))
+        image=Image.new('RGB',(640,480),(131,118,93))
+        for x,y in ((500,472),(616,472)):
+            for dx,dy,color in CONSTRAINTS:
+                if x+dx<640 and y+dy<480:image.putpixel((x+dx,y+dy),color)
+        with self.assertRaisesRegex(CursorError,'ambiguous'):locate_clipped_cursor(image,minimum_visible=44)
+
+    def test_optional_original_deep_fragment_is_unique_and_cannot_authorize_click(self):
+        path=Path(__file__).resolve().parents[1]/'.runtime/attempt-010-cursor38/failure.png'
+        if not path.exists():self.skipTest('Private original clipped cursor unavailable')
+        with Image.open(path) as image:
+            with self.assertRaises(CursorError):locate_cursor(image)
+            with self.assertRaises(CursorError):locate_clipped_cursor(image)
+            self.assertEqual(locate_clipped_cursor(image,minimum_visible=44),(616,472))
+
+    @patch('civ2.cursor.time.sleep')
+    def test_post_step_clipping_recovers_before_any_button(self,_):
+        class OvershootOnce(MeasuredEdgeGame):
+            def __init__(self):super().__init__((590,450));self.overshot=False
+            def rpc(self,command,*args):
+                value=super().rpc(command,*args)
+                if command=='moveRelative' and not self.overshot:
+                    self.cursor=(599,463);self.overshot=True
+                return value
+        game=OvershootOnce();receipt=move_and_click(game,607,459)
+        self.assertTrue(receipt['issued'])
+        self.assertEqual(receipt['post_step_edge_recoveries'][0]['clipped_cursor'],[599,463])
+        self.assertEqual(receipt['post_step_edge_recoveries'][0]['delta'],[0,-8])
+        self.assertTrue(all(e['type']=='mousemove' for e in game.inputs[:-2]))
+        self.assertEqual([e['type'] for e in game.inputs[-2:]],['mousedown','mouseup'])
+        self.assertLessEqual(max(abs(a-b) for a,b in zip(receipt['observed_cursor'],[607,459])),3)
+
+    @patch('civ2.cursor.time.sleep')
+    def test_small_request_gain_is_not_extrapolated_to_accelerated_edge_step(self,_):
+        class AcceleratedEdge(MeasuredEdgeGame):
+            def rpc(self,command,*args):
+                if command=='moveRelative':
+                    dx,dy=args;event={'type':'mousemove','dx':dx,'dy':dy};self.inputs.append(event)
+                    move=lambda value:value*(1 if abs(value)<=2 else 2)
+                    self.cursor=(min(639,self.cursor[0]+move(dx)),min(479,self.cursor[1]+move(dy)))
+                    self.positions.append(self.cursor);return event
+                return super().rpc(command,*args)
+        game=AcceleratedEdge((594,446));receipt=move_and_click(game,606,460)
+        self.assertTrue(receipt['issued'])
+        self.assertTrue(all(x<=627 and y<=460 for x,y in game.positions))
+        self.assertTrue(all(abs(event['dy'])<=2 for event in game.inputs if event['type']=='mousemove'))
+
+    @patch('civ2.cursor.time.sleep')
+    def test_failed_click_position_preserves_actual_motion_receipts(self,_):
+        class Vanished(FakeGame):
+            def request(self,path,binary=False):
+                if self.inputs:
+                    out=BytesIO();picture().save(out,format='PNG');return out.getvalue()
+                return super().request(path,binary)
+        game=Vanished()
+        with self.assertRaises(CursorError) as caught:move_and_click(game,607,459)
+        receipt=caught.exception.cursor_receipt
+        self.assertFalse(receipt['issued']);self.assertFalse(receipt['button_down_attempted'])
+        self.assertEqual(receipt['inputs'],[{'type':'mouse',**e} for e in game.inputs])
+        self.assertEqual(len(receipt['inputs']),1)
+        self.assertTrue(caught.exception.frame.startswith(b'\x89PNG'))
+        self.assertTrue(all(e['type']=='mousemove' for e in game.inputs))
+
+    @patch('civ2.cursor.time.sleep')
+    def test_failed_button_release_is_uncertain_not_unissued(self,_):
+        class ReleaseFailure(FakeGame):
+            def rpc(self,command,*args):
+                if command=='mouse' and args[0]['type']=='mouseup':raise RuntimeError('TEST transport unavailable')
+                return super().rpc(command,*args)
+        game=ReleaseFailure()
+        with self.assertRaises(RuntimeError) as caught:move_and_click(game,*game.cursor)
+        receipt=caught.exception.cursor_receipt
+        self.assertIsNone(receipt['issued']);self.assertTrue(receipt['button_down_attempted'])
+        self.assertEqual([e['type'] for e in receipt['inputs']],['mousedown'])
 
 
 if __name__=='__main__':unittest.main()
