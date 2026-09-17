@@ -447,6 +447,43 @@ def _civilopedia_reference(rows, observation, rules):
             'anchor_lines':[r['source_line'] for r in [title,allows[0],repeated[0],*controls.values()]]}
 
 
+def _city_layout_without_supported_caption(rows, observation):
+    """Identify the complete original pane when its supported-unit caption is blank.
+
+    This supplies layout evidence only. It does not infer the absent caption,
+    city statistics, a control's enabled state, or the absence of arbitrary
+    windows. The caller retains all existing foreground-modal guards.
+    """
+    if (observation['width'], observation['height']) != (640, 480):
+        return None
+    if any(r['normal'].startswith('units sup') for r in rows):
+        return None  # A clipped caption can be an occluded background window.
+    titles=[r for r in rows if 32<=r['bounds'][1]<=56 and r['confidence']>=.8
+            and re.match(r'^City of .+?,\s*\d{1,5}\s*(?:B\.?\s*C\.?|A\.?\s*D\.?)',r['text'],re.I)]
+    if len(titles)!=1:
+        return None
+    # Native 640x480 pane regions, corroborated by the actual original labels.
+    regions={
+        'food storage':(440,58,639,90), 'citizens':(5,92,202,130),
+        'city resources':(202,92,438,130), 'resource map':(5,235,202,268),
+        'units present':(202,266,438,303), 'city improvements':(5,342,194,375),
+        'buy':(444,235,514,267), 'change':(560,235,639,267),
+        'info':(463,420,518,446), 'map':(520,420,577,446),
+        'rename':(579,420,639,446), 'happy':(463,447,518,479),
+        'view':(520,447,577,479), 'exit':(579,447,639,479),
+    }
+    anchors={}
+    for label,(left,top,right,bottom) in regions.items():
+        matches=[r for r in rows if r['normal']==label and r['confidence']>=.8
+                 and left<=r['center'][0]<=right and top<=r['center'][1]<=bottom]
+        if len(matches)!=1:
+            return None
+        anchors[label]={key:matches[0][key] for key in ('text','center','bounds','source_line')}
+    return {'source':'Complete original city pane: exact title, six section labels and eight city controls in their native regions',
+            'source_sha256':observation['sha256'], 'missing_caption':'Units Supported',
+            'title_source_line':titles[0]['source_line'], 'observed_anchors':anchors}
+
+
 def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None, state=None, native_map_context=None):
     """Return supported/unknown classification with exact visible option targets.
 
@@ -1270,13 +1307,18 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
            and r['confidence']>=.8 for r in rows):
         labels.add('unitssupported')
     city_markers={'foodstorage','cityresources','unitssupported','unitspresent','resourcemap'}
-    if city_markers<=labels:
+    city_layout=None
+    if city_markers-labels=={'unitssupported'}:
+        city_layout=_city_layout_without_supported_caption(rows,observation)
+    if city_markers<=labels or city_layout is not None:
         if re.search(r'\b(?:select|choose|emissary|confirmation|warning|please|really|are you sure)\b',full):
             return unknown('Possible unrecognized foreground modal over the city screen','city_screen')
         buttons=[_option(r,'button') for r in rows if r['normal'] in ('buy','change','info','map','happy','view','rename','exit')
                  and r['center'][0]>width*.65 and r['center'][1]>height*.45]
         if not {'buy','change','exit'}<={_normal(b['text']) for b in buttons}:
             return unknown('City controls incomplete','city_screen')
+        if city_layout is not None:
+            result['evidence']['city_layout']=city_layout
         anchors={key:[r for r in rows if r['normal']==label and r['confidence']>=.8]
                  for key,label in (('resource_map','resource map'),('citizens','citizens'))}
         if all(len(matches)==1 for matches in anchors.values()):

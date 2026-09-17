@@ -68,10 +68,36 @@ class LocatorPixels(unittest.TestCase):
         wrong=prepared('City of TEST Rome, 3200 B.C.',120,40,400,16)
         correct=prepared('City of TEST Rome, 3800 B.C.',120,40,400,16)
         rows=[original]
-        with patch.object(observe,'_crop_text',side_effect=[[wrong],[wrong],[correct],[correct],[correct],[correct]]):
+        with patch.object(observe,'_crop_text',side_effect=[[wrong],[wrong],[correct],[correct],[correct],[correct],
+                                                        [correct],[correct],[correct],[correct]]):
             observe._recover_city_and_production_rows(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
         self.assertIn('3800 B.C.',rows[0]['text'])
         self.assertEqual(rows[0]['caption_identity_consensus']['independent_scales'],2)
+
+    def test_narrow_crop_consensus_cannot_overwrite_independently_confirmed_native_date(self):
+        original=prepared('City of TEST Rome, 2600 B.C.',120,40,400,16)
+        wrong=prepared('City of TEST Rome, 2000 B.C.',120,40,400,16)
+        for case in ('native_confirmed','alternate_conflict','candidate_confirmed'):
+            rows=[copy.deepcopy(original)];other=original if case!='candidate_confirmed' else wrong
+            last=other if case!='alternate_conflict' else wrong
+            with patch.object(observe,'_crop_text',side_effect=[[wrong],[wrong],[wrong],[wrong],
+                                                             [other],[other],[last],[last]]):
+                observe._recover_city_and_production_rows(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],wrong['text'] if case=='candidate_confirmed' else original['text'])
+            if case=='native_confirmed':
+                self.assertEqual(rows[0]['caption_identity_consensus']['year_text'],'2600')
+                self.assertIn(wrong['text'],[p['text'] for p in rows[0]['provenance']])
+
+    def test_optional_original_native2600_survives_systematic_narrow_crop_error(self):
+        root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-008/screens/ui-0000279.png'
+        if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original city frame unavailable')
+        o=observe.recognize(p);r=next(r for r in o['lines'] if r['text'].startswith('City of Rome,'))
+        self.assertIn('2600 B.C.',r['text'])
+        self.assertIn('2600 B.C.',r['provenance'][0]['text'])
+        self.assertEqual(r['caption_identity_consensus']['year_text'],'2600')
+        self.assertTrue({'city_caption_datecheck_3x','city_caption_datecheck_gray_3x',
+                         'city_caption_datecheck_4x','city_caption_datecheck_gray_4x'}
+                       <={v['preprocessing'] for v in r['provenance']})
     def test_optional_original_city_years_are_read_from_pixels(self):
         root=Path(__file__).resolve().parents[1]
         cases=[(68,'3950','3950'),(91,'3900','3900')]

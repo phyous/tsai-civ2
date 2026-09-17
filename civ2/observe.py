@@ -799,6 +799,32 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
                 agrees=[v for v in readings if v[0]==identity(ma)]
                 scales={v[3] for v in agrees}
                 if len(scales)>=2:
+                    # Two narrow crops can share a systematic date error.
+                    # Before changing a native date, check two wider framings
+                    # at distinct scales. A native date is preferred only if
+                    # both independent pairs actually confirm it.
+                    if ma[2]!=previous[2]:
+                        alternatives=[]
+                        for check_scale,check_padding in ((3,(8,6)),(4,(12,6))):
+                            aa=_crop_text(image,row,f'city_caption_datecheck_{check_scale}x',executable,directory,evidence,
+                                          padding=check_padding,scale=check_scale)
+                            bb=_crop_text(image,row,f'city_caption_datecheck_gray_{check_scale}x',executable,directory,evidence,
+                                          padding=check_padding,scale=check_scale,grayscale=True)
+                            if len(aa)!=1 or len(bb)!=1:continue
+                            am,bm=re.match(caption,aa[0]['text'],re.I),re.match(caption,bb[0]['text'],re.I)
+                            if (not am or not bm or identity(am)!=identity(bm) or min(aa[0]['confidence'],bb[0]['confidence'])<.8
+                                    or not _same_location(row,aa[0]) or not _same_location(row,bb[0])
+                                    or not same_caption(row['text'],aa[0]['text']) or not same_caption(row['text'],bb[0]['text'])):continue
+                            alternatives.append((identity(am),aa[0],bb[0],check_scale))
+                        readings+=alternatives
+                        native_agrees=[v for v in alternatives if v[0]==identity(previous)]
+                        if len({v[3] for v in native_agrees})==2:
+                            agrees=native_agrees;ma=re.match(caption,agrees[0][1]['text'],re.I)
+                            scales={v[3] for v in agrees}
+                        elif any(v[0]!=identity(ma) for v in alternatives):
+                            # Conflicting complete paired date reads cannot
+                            # authorize a numeric replacement.
+                            break
                     selected=agrees[0][1]
                     selected['provenance']=[p for _,aa,bb,_ in readings for r in (aa,bb) for p in r['provenance']]
                     if _replace_crop_row(rows,index,[selected],same_caption):
