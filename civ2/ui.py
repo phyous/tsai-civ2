@@ -6,6 +6,9 @@ mechanical names and acknowledges explicitly recognized informational dialogs.
 from __future__ import annotations
 import json
 import difflib
+import hashlib
+from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 import time
 from .engine import Game
@@ -29,12 +32,33 @@ class UI:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.counter = 0
         self.latest = None
+        self._recognition_cache = OrderedDict()
 
     def observe(self):
         self.counter += 1
         path = self.directory / f'ui-{self.counter:07d}.png'
         self.game.capture(path)
-        observation = recognize(path)
+        # Capture every time. Reuse only analysis of identical original PNG
+        # bytes, never an old screen, path, cursor state or model decision.
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        executable = Path(__file__).resolve().parents[1]/'.runtime/ocr'
+        stat = executable.stat() if executable.is_file() else None
+        key = (digest, recognize, None if stat is None else
+               (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        if not hasattr(self, '_recognition_cache'):
+            self._recognition_cache = OrderedDict()
+        cache = self._recognition_cache
+        if key in cache:
+            observation = deepcopy(cache[key])
+            cache.move_to_end(key)
+        else:
+            observation = recognize(path)
+            if observation.get('sha256') != digest:
+                raise ValueError('Recognized image differs from captured screen')
+            if not observation.get('ocr', {}).get('fallback_errors'):
+                cache[key] = deepcopy(observation)
+                while len(cache) > 16:
+                    cache.popitem(last=False)
         observation['path'] = str(path)
         from .cursor import locate_cursor, CursorError
         from PIL import Image
