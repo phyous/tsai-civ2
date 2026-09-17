@@ -38,7 +38,7 @@ DISPATCHES = {'command_dispatched': 'unit_action', 'dialog_dispatched': 'dialog_
 KNOWN_EVENTS = {'begin', 'checkpoint', 'inference_started', 'model_decision',
                 'screen_observed', 'mechanical_input', 'open_city_control',
                 'native_map_observed', 'native_map_observation_failed',
-                'model_command_not_dispatched',
+                'model_command_not_dispatched', 'controller_error', 'controller_update',
                 'navigate_selected_city', 'batch_observed_effect',
                 'forced_empire_command', 'session_stopped', 'recording_finalized',
                 'dialog_keyboard_recovery',
@@ -68,6 +68,7 @@ PUBLIC_NOTICE_NOTE = (
     'Only the most recent bounded notices are retained; absence is not evidence that an event did not occur.'
 )
 PUBLIC_NOTICE_RESOURCES = {'ADJACENTCITY': 'd7a2b9c34bc0aeba6a1debda44e8a02691579cc0d56bed16d1784addbedab834',
+ 'SNEAK':'89320dbf8910be6fc34bd3452a15911bbe32cdd42cdd190354d20f03448affad',
  'SURPRISESCROLLS':'70dbeae8b4336f362d5b3d9fa07ca294e93831d26d78553ac5db40690304fdef',
  'GREETINGS00':'950585acaf81ab9ce622ac94efd3915f89db60c2919745118cfd9ed08e57a682',
  'GREETINGS01':'6e1950c896d141797f7ed9923065a16350a1bcd3d8793e01c1f464890ee60ec0',
@@ -1174,6 +1175,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
     trade_pending=None;trade_eligible=None;trade_seen=set();trade_confirmations=0
     stops, recoveries, unknown = [], [], Counter()
     refused_commands = set()
+    controller_errors = set()
+    controller_update_notes = 0
     checks, initial_state = None, None
     initial_memory_inventory=None
     initial_campaign_start=None
@@ -1441,6 +1444,21 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                          and _revision_digest(plan,'current_') == _revision_digest(action['preconditions']),
                          'Command planning context differs from the current observed model plan')
             decisions[identifier] = {'action': action, 'question': question, 'response': response}
+        elif kind == 'controller_update':
+            _require(set(payload)=={'reason','scope'} and all(isinstance(payload[k],str)
+                     and 0<len(payload[k])<=512 for k in ('reason','scope')),
+                     'Controller update must be a bounded diagnostic note')
+            # Narrative only: never authorizes input, resets pending state,
+            # verifies source code, or establishes any claimed gameplay effect.
+            controller_update_notes+=1
+        elif kind == 'controller_error':
+            identifier=payload.get('decision')
+            _require(set(payload)=={'decision','error','reason','scope'}
+                     and type(identifier) is int and identifier in decisions and identifier not in dispatched
+                     and payload.get('error')=='RuntimeError'
+                     and all(isinstance(payload.get(k),str) and 0<len(payload[k])<=256 for k in ('reason','scope')),
+                     'Controller diagnostic is not bound to an unused model decision')
+            controller_errors.add(identifier)
         elif kind == 'model_command_not_dispatched':
             from PIL import Image
             identifier = payload.get('decision')
@@ -1716,6 +1734,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                      and all(type(i) is int and i in dispatched for i in identifiers)
                      and len(set(identifiers)) == len(identifiers),
                      'Native effect batch includes an undispatched or non-command planning decision')
+    _require(controller_errors<=refused_commands,
+             'Controller error needs separate source-bound no-dispatch evidence')
     _require(checks is not None, 'Initial native setup evidence is absent')
     outcome = _terminal(files, terminal_review, chain)
     complete = len(stops) == 1 and recording is not None and not unknown
@@ -1740,6 +1760,8 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'model_dispatches': len(dispatched), 'ordinary_input_events': inputs,
                           'undispatched_decisions': sorted(set(decisions)-dispatched),
                           'source_image_refusals': sorted(refused_commands),
+                          'controller_error_diagnostics': sorted(controller_errors),
+                          'controller_update_notes': controller_update_notes,
                           'inferences_without_response': sorted(set(started)-set(decisions)-set(plans)),
                           'forced_empire_dispatches': forced,
                           'forced_city_exit_dispatches':forced_city,

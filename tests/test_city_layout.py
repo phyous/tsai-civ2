@@ -16,6 +16,24 @@ def complete_city():
 
 
 class CityLayoutTests(unittest.TestCase):
+    def test_joined_section_words_keep_exact_letters_and_geometry(self):
+        o=complete_city()
+        item=next(r for r in o['lines'] if r['text']=='City Improvements')
+        item['text']='CityImprovements'
+        result=classify_dialog(o)
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['evidence']['city_layout']['observed_anchors']['city improvements']['text'],'CityImprovements')
+        item['text']='CityImprovement'
+        self.assertFalse(classify_dialog(o)['supported'])
+
+    def test_actual_joined_city_improvements(self):
+        from civ2.observe import recognize
+        path=Path('runs/attempt-009/screens/ui-0000546.png')
+        if not path.exists():self.skipTest('Private original capture unavailable')
+        result=classify_dialog(recognize(path))
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['kind'],'city_screen')
+
     def test_blank_caption_does_not_invent_heading_or_city_values(self):
         o=complete_city();result=classify_dialog(o)
         self.assertTrue(result['supported'],result);self.assertEqual(result['kind'],'city_screen')

@@ -19,6 +19,7 @@ EVENT_TITLES = {
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
     'DESTROYED': 'defense minister',
+    'SNEAK': 'defense minister',
     'SURPRISESCROLLS': 'village',
     **dict.fromkeys(('STARTWONDER','SWITCHWONDER','ABANDONWONDER','ALMOSTWONDER'), 'travellers report'),
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
@@ -37,7 +38,9 @@ TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
                  # sole OK. Preserve this observed title, not guessed glyphs.
                  'CIVADVANCE': {'ciadization advance', 'cialization advance'},
                  # Original006/608: complete destruction notice and sole OK.
-                 'DESTROYED': {'detense ifinister'}}
+                 'DESTROYED': {'detense ifinister'},
+                 # Original009/570: full sneak-attack body and sole OK.
+                 'SNEAK': {'detense mfinister'}}
 RULE_REJECTIONS = {'ADJACENTCITY': 'Cities cannot be built in adjacent squares.'}
 OBSERVED_EVENT_TITLES = set(EVENT_TITLES.values()) | set().union(*TITLE_ALIASES.values())
 CONTROLS = {'ok', 'cancel', 'yes', 'no', 'help', 'continue', 'back', 'next', 'done', 'close'}

@@ -481,7 +481,7 @@ def _city_layout_without_unit_captions(rows, observation, missing):
         if key not in missing:regions[label]=region
     anchors={}
     for label,(left,top,right,bottom) in regions.items():
-        matches=[r for r in rows if r['normal']==label and r['confidence']>=.8
+        matches=[r for r in rows if r['normal'].replace(' ','')==label.replace(' ','') and r['confidence']>=.8
                  and left<=r['center'][0]<=right and top<=r['center'][1]<=bottom]
         if len(matches)!=1:
             return None

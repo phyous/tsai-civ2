@@ -1,6 +1,7 @@
 """Run observed native-game decisions; pause on a screen requiring new support."""
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -269,8 +270,8 @@ def labor_refresh_step(session,context,observation,dialog,resources):
     return failed('Unknown labor refresh phase')
 
 
-def _native_map_fallback(session, observation, dialog, resources):
-    """One read-only attempt for left-map artwork; never change native state."""
+def _native_map_fallback(session, observation, dialog, resources, _attempt=0):
+    """Bounded read-only attempts for a map proof still visible on the canvas."""
     from .native_map import LEFT_MAP_REASON, archive_read
     from .observe import recognize
     if (getattr(session, 'observer', None) is None or dialog.get('supported')
@@ -280,6 +281,7 @@ def _native_map_fallback(session, observation, dialog, resources):
                                        Path(observation['path']).read_bytes())
     if trigger['sha256'] != observation['sha256']:
         raise ValueError('Native map trigger image changed')
+    changed_frame=False
     try:
         value = session.observer.read(rules_text=session.rules_text)
         status = session.game.rpc('status')
@@ -290,10 +292,19 @@ def _native_map_fallback(session, observation, dialog, resources):
         fresh = recognize(middle);fresh['path'] = str(middle)
         classified = classify_dialog(fresh,rules=session.rules,game_text=resources,labels_text=labels_text(),
                                      state=state,native_map_context=context)
+        # The observer's middle image is bracketed by its native snapshots,
+        # but later frames can finish a blink or helper-window repaint before
+        # pause. Never send an already stale middle image to inference.
+        current_png=session.game.request('/bridge/capture/game',binary=True)
+        current_hash=hashlib.sha256(current_png).hexdigest()
         final_status=session.game.rpc('status')
         if (final_status.get('paused') is not True or final_status.get('inputSequence') != status['inputSequence']
                 or final_status.get('heldKeys') or final_status.get('buttons')):
             raise ValueError('Ordinary input changed during native map classification')
+        if current_hash != fresh['sha256']:
+            session.journal.artifact(f'screens/native-map-current-{session.journal.sequence+1:06d}-{current_hash}.png',current_png)
+            changed_frame=True
+            raise ValueError('Bracketed native map image is no longer the paused canvas')
         if not classified.get('supported') or classified.get('kind') not in ('normal_map','end_turn'):
             raise ValueError('Native map proof did not establish original map/status cues')
         session.journal.append('native_map_observed',trigger_image=trigger,trigger_reason=LEFT_MAP_REASON,
@@ -304,6 +315,8 @@ def _native_map_fallback(session, observation, dialog, resources):
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         session.journal.append('native_map_observation_failed',trigger_image=trigger,
             trigger_reason=LEFT_MAP_REASON,error_type=type(error).__name__)
+        if changed_frame and _attempt<2:
+            return _native_map_fallback(session,observation,dialog,resources,_attempt+1)
         return observation, dialog
 
 

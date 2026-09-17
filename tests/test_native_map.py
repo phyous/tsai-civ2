@@ -2,12 +2,14 @@
 import base64
 from copy import deepcopy
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 import zlib
+from PIL import Image
 from civ2.dialogs import classify_dialog
 from civ2.evidence import canonical
 from civ2.memory import MemoryObservationError,parse_memory
@@ -86,6 +88,7 @@ class NativeMapRunnerVerifierTests(unittest.TestCase):
         original=classify_dialog(o,state=s.state)
         status=dict(paused=True,inputSequence=7,heldKeys=[],buttons=0)
         s.game.rpc.return_value=status
+        s.game.request.return_value=picture()
         with mock.patch('civ2.observe.recognize',return_value=deepcopy(o)):
             fresh,result=_native_map_fallback(s,o,original,'')
         return fresh,result
@@ -122,6 +125,7 @@ class NativeMapRunnerVerifierTests(unittest.TestCase):
                 e=LiveEvidence(directory,decide=False);s=e.session;_,o,_=fixture()
                 o['path']=str(e.directory/'screens/memory-000000-0.png');d=classify_dialog(o,state=s.state)
                 status=dict(paused=True,inputSequence=7,heldKeys=[],buttons=0)
+                s.game.request.return_value=picture()
                 if mode=='input':s.game.rpc.side_effect=[status,{**status,'inputSequence':8}]
                 else:e.observer.failure=MemoryObservationError('TEST failed helper')
                 with mock.patch('civ2.observe.recognize',return_value=deepcopy(o)):
@@ -138,6 +142,25 @@ class NativeMapRunnerVerifierTests(unittest.TestCase):
             for _ in range(2):self.assertEqual(_native_map_fallback(s,o,d,''),(o,d))
             e.finish(checkpoint=False)
             self.assertEqual(verify_run(e.directory,ffprobe=None)['decisions']['native_map_observation_failures'],2)
+
+    def test_stale_middle_frame_retries_before_returning_a_model_context(self):
+        for persistent in (False,True):
+            with tempfile.TemporaryDirectory() as directory:
+                e=LiveEvidence(directory,decide=False);s=e.session;_,o,_=fixture()
+                o['path']=str(e.directory/'screens/memory-000000-0.png');d=classify_dialog(o,state=s.state)
+                s.game.rpc.return_value=dict(paused=True,inputSequence=7,heldKeys=[],buttons=0)
+                image=Image.open(BytesIO(picture())).convert('RGB');image.putpixel((1,1),(255,0,0))
+                output=BytesIO();image.save(output,format='PNG');changed=output.getvalue()
+                s.game.request.side_effect=[changed,changed,changed] if persistent else [changed,picture()]
+                before=e.observer.calls
+                with mock.patch('civ2.observe.recognize',return_value=deepcopy(o)):
+                    fresh,result=_native_map_fallback(s,o,d,'')
+                self.assertEqual(e.observer.calls-before,3 if persistent else 2)
+                self.assertEqual(result['supported'],not persistent)
+                s.game.click.assert_not_called();s.ui.key.assert_not_called()
+                e.finish(checkpoint=False)
+                report=verify_run(e.directory,ffprobe=None)
+                self.assertEqual(report['decisions']['native_map_observation_failures'],3 if persistent else 1)
 
     def test_offline_tamper_of_image_sequence_ocr_or_boundary_refuses(self):
         for mode in ('image','sequence','status','receipt','trigger','inventory'):

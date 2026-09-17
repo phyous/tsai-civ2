@@ -121,6 +121,25 @@ class RefusalEvidenceTests(unittest.TestCase):
             self.assertEqual(result['decisions']['undispatched_decisions'],[1])
             self.assertEqual(result['decisions']['model_dispatches'],0)
 
+    def test_controller_diagnostic_requires_independent_refusal_proof(self):
+        for missing in (False,True):
+            with tempfile.TemporaryDirectory() as directory:
+                e=self.refusal(directory)
+                def change(rows):
+                    if missing:rows[:]=[r for r in rows if r['kind']!='model_command_not_dispatched']
+                    rows.insert(-1,dict(kind='controller_error',elapsed_ms=rows[-1]['elapsed_ms'],payload=dict(
+                        decision=1,error='RuntimeError',reason='TEST stale image',scope='TEST diagnostic only')))
+                    rows.insert(-1,dict(kind='controller_update',elapsed_ms=rows[-1]['elapsed_ms'],payload=dict(
+                        reason='TEST source update',scope='TEST narrative only')))
+                e.rewrite(change)
+                if missing:
+                    with self.assertRaisesRegex(VerificationError,'separate source-bound'):verify_run(e.directory,ffprobe=None)
+                else:
+                    report=verify_run(e.directory,ffprobe=None)
+                    self.assertEqual(report['decisions']['controller_error_diagnostics'],[1])
+                    self.assertEqual(report['decisions']['controller_update_notes'],1)
+                    self.assertEqual(report['decisions']['model_dispatches'],0)
+
     def test_batch_cannot_include_undispatched_duplicate_or_refused_choice(self):
         for mode in ('undispatched','duplicate','refused'):
             with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory:
