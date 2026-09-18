@@ -130,6 +130,36 @@ def _render(text):
     return black.width,black.height,_maskrows(black),_maskrows(gray)
 
 
+def annotate_production_crop_anchor(image,rows):
+    """Exact literal prefix locates OCR crops; it never supplies a city/title."""
+    if image.size!=(640,480):return
+    controls=_controls(rows)
+    if controls is None:return
+    candidates=[r for r in rows if _caption_row(r,controls)]
+    if len(candidates)!=1:return
+    row=candidates[0];prefix=TITLE_TEMPLATE['title'].split('%STRING0')[0].rstrip()
+    try:w,h,black,gray=_render(prefix)
+    except ValueError:return
+    x,y,rw,rh=row['bounds']
+    if rw<w:return
+    image=image.convert('RGB');matches=[]
+    for ox in range(max(100,x-6),min(540-w,x+6)+1):
+        for oy in range(max(65,y-4),min(210-h,y+4)+1):
+            crop=image.crop((ox,oy-3,ox+w,oy+h+3));colors=crop.getcolors(crop.width*crop.height)
+            if not colors or any(r!=g or r!=b or r not in PALETTE for _,(r,g,b) in colors):continue
+            channel=crop.getchannel('R')
+            if _maskrows(channel.point(lambda v:255 if v==0 else 0))!=[0]*3+black+[0]*3:continue
+            measured_gray=_maskrows(channel.point(lambda v:255 if v==134 else 0))
+            if all((v&measured_gray[3+i])==v for i,v in enumerate(gray)):
+                matches.append(([ox,oy,w,h],_sha(crop.tobytes())))
+    if len(matches)!=1:return
+    bounds,digest=matches[0]
+    row['production_crop_anchor']={'literal_prefix':prefix,'bounds':bounds,
+        'region_rgb_sha256':digest,'template_sha256':TEMPLATE_SHA256,
+        'atlas_sha256':REGULAR_ATLAS_SHA256,'metrics_sha256':REGULAR_METRICS_SHA256,
+        'scope':'Crop locator only. Raw caption unchanged; full source/GDI title and complete options still required.'}
+
+
 def exact_production_title(observation,rows,state,resources):
     """Return one pixel-proven prepared title row and evidence, or None.
 

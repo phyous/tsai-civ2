@@ -20,10 +20,15 @@ class ProductionDisplayMarkers(unittest.TestCase):
             self.assertEqual(observe._stat_reading(raw),raw)
             self.assertTrue(_production_stat(raw.casefold()))
             self.assertFalse(observe._stat_numbers_compatible(raw,'(20 Turns, ADM: 1/2/1 HP: 1/1)'))
+            extra=raw.rstrip(',')+')'
+            self.assertTrue(_production_stat(extra.casefold()))
+            self.assertEqual(observe._stat_reading(extra),raw.rstrip(','))
         for raw in ('(20 Turns, ADM: 1%/2/1 HP: 1/1)',
                     '(20 Turns, ADM: 1/2/1% HP: 1/1)',
                     '(20 Turns, ADM: 1/2%%/1 HP: 1/1)',
-                    '(20 Turns, ADM: 1/2%/1 HP: 1/1) Cancel'):
+                    '(20 Turns, ADM: 1/2%/1 HP: 1/1) Cancel',
+                    '(20 Turns, ADM: 1/2%/1 HP: 1/1)))',
+                    '(20 Turns, ADM: 1/2%/1) HP: 1/1)'):
             self.assertIsNone(observe._stat_reading(raw));self.assertFalse(_production_stat(raw.casefold()))
 
     def test_unicode_vertical_art_requires_measured_color_and_complete_peer_rows(self):
@@ -82,5 +87,23 @@ class ProductionDisplayMarkers(unittest.TestCase):
                     self.assertIn('unresolved_displayed_stat_suffixes',d['evidence'])
                     self.assertIn('béN2',[r['text']for r in d['evidence']['production_artwork']])
                 else:self.assertIn('Ane ael 3',[r['text']for r in d['evidence']['production_artwork']])
+
+    def test_actual_byzantium_retains_opaque_marker_and_extra_parenthesis(self):
+        path=Path('runs/attempt-010/screens/ui-0003224.png')
+        if not path.exists():self.skipTest('Private original image unavailable')
+        from civ2.run import game_text,labels_text
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        o=observe.recognize(path);o['path']=str(path.resolve())
+        state={'cities':[{'name':'Byzantium'}],'recent_founding_notices':[dict(name='Byzantium',year_text='A.D. 620',source_tag='FOUNDED',
+            image_sha256='b037c5277264fa9369a3daf9eab2408ec395c12eaebb470aa3c2cefe17997ba5')]}
+        d=classify_dialog(o,state=state,rules=parse_rules(original_rules()),game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model'])
+        self.assertEqual([r['text']for r in d['options']],['Settlers','Archers','Pikemen','Horsemen','Catapult','Trireme','Diplomat','Caravan',
+            'Explorer','Palace','Barracks','Granary','Temple','MarketPlace','Library','Courthouse'])
+        stat=next(r for r in o['lines'] if '1/2%' in r['text'])
+        self.assertEqual(stat['text'],'(10 Tums, ADM: 1/2%/1 HP: 1/1))')
+        self.assertEqual(stat['text'],stat['provenance'][0]['text'])
+        self.assertEqual(d['evidence']['unresolved_displayed_stat_suffixes']['rows'][0]['raw_text'],stat['text'])
 
 if __name__=='__main__':unittest.main()

@@ -135,8 +135,13 @@ def classify_exchange_picker(observation, rows, resources, rules, state=None):
     for index,option in enumerate(options):
         if not (309<=option['bounds'][0]<=316 and 168+17*index<=option['bounds'][1]<=173+17*index
                 and 173+17*index<=option['center'][1]<=180+17*index and option['bounds'][2]<=260):return None
+        # OCR capitalization is display text, not a different advance. Keep
+        # the observed label unchanged and require one exact ASCII name match
+        # apart from case; no glyph, punctuation or spacing repair is allowed.
         matches=[a for a in rules.get('advances',[]) if isinstance(a,dict)
-                  and type(a.get('id')) is int and a.get('name')==option['text']]
+                  and type(a.get('id')) is int and isinstance(a.get('name'),str)
+                  and a['name'].isascii() and option['text'].isascii()
+                  and a['name'].casefold()==option['text'].casefold()]
         if len(matches)!=1:return None
         advances.append({'id':matches[0]['id'],'name':matches[0]['name']})
     if len({a['id'] for a in advances})!=len(advances):return None

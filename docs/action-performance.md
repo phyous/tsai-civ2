@@ -105,3 +105,16 @@ found 67 native-map middle images identical to their already-recognized trigger.
 Six offline image measurements took 239–696 ms for cold OCR and 51–55 ms for
 cached analysis. These are component measurements, not a claimed end-to-end
 speedup; development pauses and newly encountered dialogs still dominate.
+
+Large repeated arrays, especially city labor radii, can also use lossless column
+matrices. Each column is either a full vector or an explicit default with indexed
+exceptions. The submitted prompt explains the format; decoding preserves every
+value, type, null, row order and choice. It is selected only when the complete
+state including those instructions becomes at least 1% smaller. Both older
+record-table formats remain readable.
+
+An offline roundtrip check of 90 retained successful requests (30 per campaign)
+preserved every question and decoded state exactly. Median JSON character savings
+were 6.26%, 4.42% and 4.28% for attempts 010–012 respectively; encoding took a
+median 7.6–9.1 ms. These are character and local processing measurements, not
+measured API-token savings or an end-to-end speedup.

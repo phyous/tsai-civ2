@@ -24,6 +24,21 @@ def fixture(directory):
 
 
 class ExchangePickerTests(TestCase):
+    def test_case_only_rule_binding_preserves_raw_label_and_rejects_ambiguity(self):
+        for case in ('case','spacing','glyph','unicode','ambiguous'):
+            with self.subTest(case=case),TemporaryDirectory() as directory:
+                o,rules,resources=fixture(directory);o['lines'][1]['text']='TEST advance'
+                if case=='spacing':o['lines'][1]['text']='TEST  advance'
+                if case=='glyph':o['lines'][1]['text']='TEST advanee'
+                if case=='unicode':o['lines'][1]['text']='TEſT advance'
+                if case=='ambiguous':rules['advances'].append({'id':99,'name':'TEST ADVANCE'})
+                result=classify_exchange_picker(o,_rows(o),resources,rules)
+                if case=='case':
+                    self.assertEqual(result['options'][0]['text'],'TEST advance')
+                    self.assertEqual(result['advance'],{'id':12,'name':'TEST Advance'})
+                    self.assertTrue(result['requires_model']);self.assertIsNone(result['mechanical_action'])
+                else:self.assertIsNone(result)
+
     def test_singleton_is_observation_proof_never_a_mechanical_permission(self):
         with TemporaryDirectory() as directory:
             o,rules,resources=fixture(directory)
@@ -108,6 +123,22 @@ class AcceptedTradeTests(TestCase):
 
 
 class MultipleExchangeTests(TestCase):
+    def test_actual_four_advances_preserve_ocr_capitalization(self):
+        from civ2.observe import recognize
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        p=Path('runs/attempt-010/screens/ui-0003299.png')
+        if not p.exists():self.skipTest('Private original capture absent')
+        o=recognize(p);o['path']=str(p)
+        result=classify_dialog(o,game_text=game_text(),rules=parse_rules(original_rules()))
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['kind'],'exchange_picker')
+        self.assertEqual([r['text'] for r in result['options']],['Construction','Iron working','Polytheism','The Wheel'])
+        self.assertTrue(result['requires_model']);self.assertIsNone(result['mechanical_action'])
+        self.assertIn('Iron working',[r['text']for r in o['lines']])
+
     def fixture(self,directory):
         o,rules,resources=fixture(directory)
         for i,name in ((1,'TEST Second'),(2,'TEST Third')):

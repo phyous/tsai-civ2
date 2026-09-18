@@ -36,6 +36,7 @@ from .spaceship_report import classify_spaceship_report
 from .native_map import evidence_for as native_map_evidence
 from .gdi_titles import exact_production_title
 from .city_locator import foreign_locator_context
+from .production_artwork import exact_fragment as exact_production_fragment
 
 CDROM_TEMPLATE_SHA256='28a50ae19b7eaf7abf51d1c97ab591c3f03abff2e7a19fc18dcb623914666fd7'
 
@@ -221,11 +222,14 @@ def _clipped_city_label(row,state):
     try: observation_digest(state)
     except (ValueError,TypeError):return False
     text=row['normal'];x,y,w,h=row['bounds']
-    if (row['confidence']<.8 or not re.fullmatch('[a-z]{3,25}',text)
-            or text in {'yes','exit','help','buy','next','back','auto','done','save','load','menu','quit','warning'}
+    if (row['confidence']<.8 or not re.fullmatch('[a-z]{2,25}',text)
+            or text in {'no','ok','yes','exit','help','buy','next','back','auto','done','save','load','menu','quit','warning'}
             or not 70<=y<=440 or not 1<=h<=24 or not 1<=w<=160):return False
     left=0<=x<=8;right=452<=x+w<=460
     if left==right:return False
+    # Original012/2824 clips Antium to An at the right map border. The
+    # shorter fragment has a tighter measured edge band and no left alias.
+    if len(text)==2 and not (right and 453<=x+w<=455):return False
     names={_normal(c['name']) for key in ('cities','known_cities') for c in state.get(key,[])
            if isinstance(c,dict) and isinstance(c.get('name'),str)
            and all(type(c.get(k)) is int for k in ('x','y'))}
@@ -235,10 +239,12 @@ def _clipped_city_label(row,state):
 
 
 def _production_stat(text):
-    return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+[*%]?/\d+\s+hp:\s*\d+/\d+)?\),?',text))
+    # Original selected-row border ink can read as one extra close-paren.
+    # Keep it as opaque displayed text; no numeric or ability value is derived.
+    return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+[*%]?/\d+\s+hp:\s*\d+/\d+)?\)\)?,?',text))
 
 
-def _production_icon_rows(body, names):
+def _production_icon_rows(body, names, observation=None):
     """Colored original artwork left of a fully read production label/stat pair.
 
     The color fraction was validated against this observation's image hash in
@@ -249,6 +255,14 @@ def _production_icon_rows(body, names):
     icons=[]
     for row in body:
         x,y,w,h=row['bounds']
+        paired=[r for r in labels if 2<=r['bounds'][0]-(x+w)<=48
+                and abs(r['center'][1]-row['center'][1])<=8
+                and any(s['bounds'][0]>r['bounds'][0]+r['bounds'][2]
+                        and abs(s['center'][1]-r['center'][1])<=8 for s in stats)]
+        if len(paired)==1 and re.fullmatch(r'[0-9]{1,3}',row['text']):
+            proof=exact_production_fragment(observation,row)
+            if proof is not None:
+                row['production_artwork_pixels']=proof;icons.append(row);continue
         # A vertical OCR fragment may span several unit sprites in the same
         # native icon column. It remains wholly left of every complete label;
         # each overlapping row must already have its independently read stat.
@@ -1094,9 +1108,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         if kind=='production_choice' and isinstance(rules,dict):
             names={_normal(r['name']) for table in ('units','improvements') for r in rules.get(table,[])
                    if r.get('name') and r['name']!='Nothing'}
-            icons=_production_icon_rows(body,names)
+            icons=_production_icon_rows(body,names,observation)
             if icons:
-                result['evidence']['production_artwork']=[dict(text=r['text'],bounds=r['bounds'],source_line=r['source_line']) for r in icons]
+                result['evidence']['production_artwork']=[dict(text=r['text'],bounds=r['bounds'],source_line=r['source_line'],
+                    **({'exact_pixels':r['production_artwork_pixels']} if r.get('production_artwork_pixels') else {})) for r in icons]
                 body=[r for r in body if r not in icons]
         buttons=[_option(r,'button') for r in button_rows]
         if not _unique(buttons):return unknown('Ambiguous duplicate dialog buttons',kind,title['text'])
@@ -1262,7 +1277,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             if not choices:return unknown('No complete authentic option labels recognized',kind,title['text'])
             if kind=='production_choice':
                 unresolved=[{'source_line':r['source_line'],'raw_text':r['text']} for r in body
-                    if _production_stat(r['normal']) and re.search(r'adm:\s*\d+/\d+[*%]/\d+',r['normal'])]
+                    if _production_stat(r['normal']) and (re.search(r'adm:\s*\d+/\d+[*%]/\d+',r['normal'])
+                                                          or r['normal'].rstrip(',').endswith('))'))]
                 if unresolved:
                     result['evidence']['unresolved_displayed_stat_suffixes']={
                         'rows':unresolved,'interpretation':'Unresolved displayed stat suffix; preserve the raw marker without assigning an ability or numeric meaning. Original RULES specifications remain the numeric source.'}
