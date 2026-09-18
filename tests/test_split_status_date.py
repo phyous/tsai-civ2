@@ -17,9 +17,11 @@ class SplitStatusDate(unittest.TestCase):
             crop.assert_not_called()
 
     def test_lettered_year_requires_six_complete_agreeing_reads(self):
-        for case in ('valid','disagree','era','position','incomplete','raw_numeric'):
+        for case in ('valid','valid_joined','disagree','era','position','incomplete','raw_numeric','mixed_digits'):
             old=prepared('ALD. BED',476,218,52,10);old['confidence']=.3
+            if case=='valid_joined':old['text']='ALD.BED'
             if case=='raw_numeric':old['text']='ALD. 100'
+            if case=='mixed_digits':old['text']='ALD.B2D'
             rows=[deepcopy(old)]
             reads=[prepared('A.D. 1110',476,215,51,14) for _ in range(6)]
             if case=='disagree':reads[-1]['text']='A.D. 1100'
@@ -30,13 +32,21 @@ class SplitStatusDate(unittest.TestCase):
             if case=='incomplete':values[-1]=[]
             with patch.object(observe,'_crop_text',side_effect=values):
                 observe._recover_lettered_status_year(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
-            self.assertEqual(rows[0]['text'],'A.D. 1110' if case=='valid' else old['text'])
+            self.assertEqual(rows[0]['text'],'A.D. 1110' if case in ('valid','valid_joined') else old['text'])
 
     def test_original_lettered_ad1110(self):
         p=Path('runs/attempt-012/screens/ui-0003171.png')
         if not p.exists():self.skipTest('Private original image unavailable')
         row=next(r for r in observe.recognize(p)['lines'] if r['text']=='A.D. 1110')
         self.assertEqual([r['text'] for r in row['provenance']],['ALD. BED']+['A.D. 1110']*6)
+
+    def test_original_joined_lettered_ad1110(self):
+        p=Path('runs/attempt-011/screens/ui-0003718.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        row=next(r for r in observe.recognize(p)['lines'] if r['text']=='A.D. 1110')
+        self.assertEqual([r['text'] for r in row['provenance']],['ALD.BED']+['A.D. 1110']*6)
+        self.assertEqual({r['preprocessing'] for r in row['provenance'][1:]},
+                         {f'status_letter_year_{mode}{scale}'for mode in ('rgb','gray')for scale in (2,3,4)})
 
     def test_punctuated_year_requires_six_matching_complete_reads(self):
         for case in ('valid','last_disagrees','era','trailing_digits','leading_digit','position'):

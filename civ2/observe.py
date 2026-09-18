@@ -1276,9 +1276,9 @@ def _recover_production_upgrade_city(image,rows,executable,directory,evidence):
 def _recover_support_notice(image,rows,executable,directory,evidence):
     """Two real crops restore an observed support-loss report, not an action."""
     if image.size!=(640,480):return
-    choices=[r for r in rows if re.fullmatch(r'(?:[Oo0•○●]\s+)?(?:Zoom to City|Continue)',r['text'])]
+    choices=[r for r in rows if re.fullmatch(r'(?:[Oo0•○●©]\s+)?(?:Zoom to City|Continue)',r['text'])]
     controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help')]
-    if (len(choices)!=2 or {re.sub(r'^[Oo0•○●]\s+','',r['text']) for r in choices}!={'Zoom to City','Continue'}
+    if (len(choices)!=2 or {re.sub(r'^[Oo0•○●©]\s+','',r['text']) for r in choices}!={'Zoom to City','Continue'}
             or len(controls)!=1 or controls[0]['text']!='OK'):return
     body=[(i,r,m) for i,r in enumerate(rows)
           if (m:=re.fullmatch(r"(.+) can't support (.+)[,.] Unit dis[bh]anded\.",r['text']))
@@ -1295,7 +1295,7 @@ def _recover_support_notice(image,rows,executable,directory,evidence):
     tasks=[(*titles[0],'Military Advisor','title'),(bi,br,expected_body,'body')]
     # A lowercase radio glyph is only a crop locator: require both actual
     # readings of the complete original label before the classifier sees it.
-    tasks.extend((rows.index(r),r,r['text'][2:],'option') for r in choices if r['text'].startswith('o '))
+    tasks.extend((rows.index(r),r,r['text'][2:],'option') for r in choices if r['text'].startswith(('o ','© ')))
     for index,row,expected,name in tasks:
         a=_crop_text(image,row,'support_'+name+'_rgb2',executable,directory,evidence,padding=(6,6),scale=2)
         b=_crop_text(image,row,'support_'+name+'_gray2',executable,directory,evidence,padding=(6,6),scale=2,grayscale=True)
@@ -1561,7 +1561,7 @@ def _recover_lettered_status_year(image,rows,executable,directory,evidence):
     """Unreadable year letters need six complete source-pixel date readings."""
     for index,old in enumerate(rows):
         x,y,w,h=old['bounds']
-        if (not re.fullmatch(r'ALD\. [A-Za-z]{1,5}',old['text'])
+        if (not re.fullmatch(r'ALD\.\s*[A-Za-z]{1,5}',old['text'])
                 or not 470<=x<=485 or not 210<=y<=232
                 or not 35<=w<=85 or not 8<=h<=20):continue
         readings=[]

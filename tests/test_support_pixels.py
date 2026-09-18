@@ -110,5 +110,18 @@ class SupportPixelTests(unittest.TestCase):
         self.assertEqual([v['text'] for v in d['options']],['Zoom to City','Continue'])
         self.assertEqual(next(v for v in o['lines'] if v['text']=='Military Advisor')['provenance'][0]['text'],'Iflitary Advisor')
 
+    def test_actual_copyright_radio_support_warning(self):
+        p=Path('runs/attempt-012/screens/ui-0003330.png')
+        if not p.exists():self.skipTest('Private original notice unavailable')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text(),
+            state={'cities':[{'name':'Neapolis'}]},rules={'units':[{'name':'Warriors'}]})
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model'])
+        self.assertEqual(d['resource_tag'],'SUPPORT')
+        self.assertEqual([r['text']for r in d['options']],['Zoom to City','• Continue'])
+        row=next(r for r in o['lines']if r['text']=='Zoom to City')
+        self.assertEqual([p['text']for p in row['provenance']],['© Zoom to City','Zoom to City','Zoom to City'])
+
 
 if __name__=='__main__':unittest.main()
