@@ -938,6 +938,23 @@ def _recover_gape_boundary(image,rows,executable,directory,evidence):
                 and _same_location(row,b[0]) and _same_location(a[0],b[0])):
             if _replace_crop_row(rows,index,a,lambda old,new:True):rows[index]['provenance']+=b[0]['provenance']
 
+    prose=sorted([r for r in rows if titles[0]['center'][1]<r['center'][1]<controls[0]['center'][1]-12
+                  and 302<=r['bounds'][0]<=316],key=lambda r:r['center'][1])
+    if (len(prose)!=4 or prose[0]['text']!='"You are invited to gape with awe and'
+            or not re.fullmatch(r'amazement as the [A-Za-z ]{2,40} demonstrate the',prose[1]['text'])
+            or not re.fullmatch(r'wonders of [A-Za-z ]{2,60}\. Absolutely no scribes',prose[2]['text'])
+            or prose[3]['text']!='will he allowed."'
+            or any(r['confidence']<.8 for r in prose)
+            or any(not 16<=b['center'][1]-a['center'][1]<=26 for a,b in zip(prose,prose[1:]))):return
+    old=prose[3]
+    a=_crop_text(image,old,'gape_tail_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+    b=_crop_text(image,old,'gape_tail_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+    if (len(a)==len(b)==1 and a[0]['text']==b[0]['text']=='will be allowed."'
+            and min(a[0]['confidence'],b[0]['confidence'])>=.8
+            and _same_location(old,b[0]) and _same_location(a[0],b[0])):
+        index=rows.index(old)
+        if _replace_crop_row(rows,index,a,lambda before,after:True):rows[index]['provenance']+=b[0]['provenance']
+
 
 def _recover_support_notice(image,rows,executable,directory,evidence):
     """Two real crops restore an observed support-loss report, not an action."""
