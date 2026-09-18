@@ -1,7 +1,8 @@
-"""Punctuation-only herald paragraphs, proven against original GDI pixels.
+"""Source-backed herald paragraphs, proven against original GDI pixels.
 
-The four measured native layouts are intentionally finite. No word, variable,
-number, option or control is supplied by state, and no font asset is bundled.
+The measured native layouts are intentionally finite. Only punctuation and at
+most two one-edit fixed source words may change. Variables, numbers and choices
+are never supplied by state, and no font asset is bundled.
 """
 from copy import deepcopy
 import re
@@ -16,6 +17,8 @@ SOURCE_PINS = {
     'CRUSADE': 'dfa03aa4eb5e386351d27874d5c9b6ed1d871dff7f1ad881678fe28c2250322b',
     'GREETINGS00': '950585acaf81ab9ce622ac94efd3915f89db60c2919745118cfd9ed08e57a682',
     'GREETINGS03': '8bbba02ad91b19004b568fcd7c7ce74c0b1018304b0636df041525afe6708cd4',
+    'GAPE': '8d54778744abe523a5779c126082405b0c520ff522c4bbe072712391170260a0',
+    'CANCELTREATY1': 'ab31597cd519240587740b360c00ec991b2aa607f4749d47e07941a1f8f65552',
 }
 # left/top of complete native window; text inset; body rows; radio count;
 # exact original sole-OK widget RGB digest (including its entire perimeter).
@@ -24,54 +27,94 @@ LAYOUTS = {
     'CRUSADE': (234, 297, 79, 3, 2, 'ae2a6d6f17973d0d0b07e1457bf78cd316fe264d161b7dc70c2f2e6318446da1'),
     'GREETINGS00': (298, 371, 11, 2, 0, '807e29fc9be24409c3a5cbf604eced96277543228750281944fa8ba3eed95a40'),
     'GREETINGS03': (298, 371, 11, 2, 0, '807e29fc9be24409c3a5cbf604eced96277543228750281944fa8ba3eed95a40'),
+    'GAPE': (298, 331, 11, 4, 0, '807e29fc9be24409c3a5cbf604eced96277543228750281944fa8ba3eed95a40'),
+    'CANCELTREATY1': (294, 297, 11, 3, 2, 'b7c2cd17ba9c6e9153f0e68dd7b50125671250d9d148032db7640d2b600c054c'),
 }
 PALETTE = (ROW_PALETTE - {(0, 0, 0)}) | {(48, 48, 48)}
 
 
+def _one_edit_word(a, b):
+    """Candidate generation only: a pixel comparison must still prove the word."""
+    if (not a.isascii() or not b.isascii() or not a.isalpha() or not b.isalpha()
+            or max(len(a),len(b)) > 32 or a.casefold() == b.casefold()):
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x,y in zip(a,b)) == 1
+    if abs(len(a)-len(b)) != 1:
+        return False
+    shorter,longer = (a,b) if len(a) < len(b) else (b,a)
+    return any(longer[:i]+longer[i+1:] == shorter for i in range(len(longer)))
+
+
 def _binding(template, raw):
-    """Unique literal-token/observed-variable binding; never correct a word."""
+    """Unique observed-variable binding with <=2 candidate fixed-word edits.
+
+    Each edit retains its global observed token index. No variable is corrected,
+    numeric literals are immutable, and case-only guesses are excluded.
+    """
     if not raw.isascii() or len(raw) > 600:
         return None
     observed = _words(raw)
     parts = re.findall(r'%STRING\d+|%NUMBER\d+|[A-Za-z0-9]+', template)
     if not 1 <= len(observed) <= 90:
         return None
-    found = []
+    found = []; visits = 0; exhausted = False
 
-    def visit(i, j, values):
-        if len(found) > 1:
+    def visit(i, j, values, corrections):
+        nonlocal visits, exhausted
+        visits += 1
+        if visits > 10000:
+            exhausted = True
+        if exhausted or len(found) > 1:
             return
         if i == len(parts):
             if j == len(observed):
-                found.append(values)
+                found.append((values,corrections))
             return
         token = parts[i]
         if not token.startswith('%'):
             if j < len(observed) and token == observed[j]:
-                visit(i + 1, j + 1, values)
+                visit(i + 1, j + 1, values, corrections)
+            elif j < len(observed) and len(corrections) < 2 and _one_edit_word(observed[j],token):
+                visit(i + 1,j + 1,values,corrections + [dict(word_index=j,observed=observed[j],source=token)])
             return
         if token in values:
             words = values[token].split()
             if observed[j:j + len(words)] == words:
-                visit(i + 1, j + len(words), values)
+                visit(i + 1, j + len(words), values, corrections)
             return
         for count in range(1, min(8, len(observed) - j) + 1):
             words = observed[j:j + count]
             if token.startswith('%NUMBER') and (count != 1 or not words[0].isdigit()):
                 continue
-            visit(i + 1, j + count, {**values, token: ' '.join(words)})
+            visit(i + 1, j + count, {**values, token: ' '.join(words)}, corrections)
 
-    visit(0, 0, {})
-    if len(found) != 1:
+    visit(0, 0, {}, [])
+    if exhausted or len(found) != 1:
         return None
+    values,corrections = found[0]
     rendered = template.replace('_._._.', ' . . .')
-    rendered = re.sub(r'%(?:STRING|NUMBER)\d+', lambda m: found[0][m[0]], rendered)
-    return (rendered, found[0]) if _words(rendered) == observed else None
+    rendered = re.sub(r'%(?:STRING|NUMBER)\d+', lambda m: values[m[0]], rendered)
+    # The original paragraph formatter collapses source whitespace. This only
+    # generates a candidate; the complete actual glyph mask must prove spacing.
+    rendered = re.sub(r'\s+', ' ', rendered).strip()
+    expected = list(observed)
+    for edit in corrections:
+        expected[edit['word_index']] = edit['source']
+    return (rendered,values,corrections) if _words(rendered) == expected else None
 
 
-def _wrap_observed(text, body):
+def _wrap_observed(text, body, corrections=()):
     """Retain observed word-to-row partition; source punctuation stays intact."""
     spans = list(re.finditer(r'[A-Za-z0-9]+', text))
+    observed = _words(' '.join(r['text'] for r in body));expected = list(observed)
+    for edit in corrections:
+        index = edit['word_index']
+        if not 0 <= index < len(expected) or expected[index] != edit['observed']:
+            return None
+        expected[index] = edit['source']
+    if _words(text) != expected:
+        return None
     counts = [len(_words(r['text'])) for r in body]
     if not all(counts) or sum(counts) != len(spans):
         return None
@@ -88,7 +131,7 @@ def _wrap_observed(text, body):
         result.append(text[start:end].strip())
         start = end
     result.append(text[start:].strip())
-    return result if all(_words(a) == _words(b['text']) for a, b in zip(result, body)) else None
+    return result if [len(_words(r)) for r in result] == counts else None
 
 
 def _frame(image, layout):
@@ -113,7 +156,7 @@ def _frame(image, layout):
             if (all(p[x + dx, y + dy] == (255, 255, 255) for dx, dy in WHITE_RING)
                     and all(p[x + dx, y + dy] == (0, 0, 0) for dx, dy in BLACK_RING)):
                 centers.append([x, y])
-    expected = [[left + 95, 402], [left + 95, 427]] if radios else []
+    expected = [[left + inset + 16, 402], [left + inset + 16, 427]] if radios else []
     if centers != expected:
         return None
     return dict(frame_bounds=[left, top, 640, 479], button_bounds=list(button),
@@ -192,7 +235,7 @@ def recover_herald_paragraph(image, rows, executable=None, directory=None, evide
         binding = _binding(template['body'], ' '.join(r['text'] for r in body))
         if binding is None:
             continue
-        texts = _wrap_observed(binding[0], body)
+        texts = _wrap_observed(binding[0], body, binding[2])
         if texts is None:
             continue
         normalized = [t.replace(' . . .', '...') for t in texts]
@@ -225,7 +268,8 @@ def recover_herald_paragraph(image, rows, executable=None, directory=None, evide
                 normalized_bounds=[x / 640, y / 480, w / 640, h / 480],
                 atlas_id=ATLAS_ID, atlas_sha256=ATLAS_SHA256, metrics_sha256=METRICS_SHA256,
                 source_template=tag, source_sha256=SOURCE_PINS[tag],
-                observed_variable_bindings=binding[1], **proof, **frame)]
+                observed_variable_bindings=binding[1],static_word_corrections=deepcopy(binding[2]),
+                **proof, **frame)]
             proposed[rows.index(old)] = row
         # Temporary RGB identity only: normal recognition/classification later
         # retains and binds the unchanged original captured PNG SHA256.

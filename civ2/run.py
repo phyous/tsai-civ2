@@ -67,7 +67,8 @@ def classification_state(session):
     cities += [{'name':name} for name in context['observed_city_names'] if name.casefold() not in names]
     return {**session.state,'cities':cities,
             'recent_founding_notices':deepcopy(context['recent_founding_notices']),
-            'pending_trade':deepcopy(context['pending_trade'])}
+            'pending_trade':deepcopy(context['pending_trade']),
+            'pending_disband':deepcopy(getattr(session,'pending_disband',None))}
 
 
 def observed_city_identity(dialog):
@@ -435,7 +436,8 @@ def _checkpoint_token(session):
     if (not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
             or type(checkpoint) is not int or checkpoint < 1 or type(sequence) is not int
             or type(state.get('turn')) is not int or type(state.get('year_raw')) is not int
-            or getattr(session, 'pending_decisions', None) != []):
+            or getattr(session, 'pending_decisions', None) != []
+            or not _map_selection_ready(state)):
         return None
     return dict(checkpoint=checkpoint, **prefixed_revision(state), turn=state['turn'],
                 year=state['year_raw'], journal_sequence=sequence)
@@ -497,7 +499,7 @@ def _await_turn_resolution(session,context,observation,dialog,resources):
             return observation,dialog,None
         session.checkpoint()
         turn=session.state['turn']
-        if turn>pending['source_turn']:
+        if turn>pending['source_turn'] and _map_selection_ready(session.state):
             observation,dialog=observe_ready(session,resources)
             if dialog.get('supported') and dialog.get('kind') in ('normal_map','end_turn'):
                 context['pending_turn']=None
@@ -575,6 +577,11 @@ def navigate_city(session,context,observation,dialog,resources):
     if context['pending_labor_refresh'] and context['pending_labor_refresh']['phase']=='await_locator':
         context['pending_labor_refresh']['phase']='await_reopened'
     return None
+
+
+def _map_selection_ready(state):
+    """A painted End of Turn is stale while a foreign/dead actor is selected."""
+    return state.get('selected_unit_id') is None or _selected_living_owned_unit(state)
 
 
 def _selected_living_owned_unit(state):
@@ -666,6 +673,8 @@ def run_steps(session, *, max_decisions=10000):
             return {'status':'paused','reason':'Original screen requires a controller update.',
                     'screen':observation['path'],'classification':dialog}
         kind = dialog['kind']
+        if dialog['supported'] and kind not in ('disband_confirmation','normal_map','end_turn'):
+            session.pending_disband=None
         handled,labor_error = labor_refresh_step(session,context,observation,dialog,resources)
         if labor_error:return {'status':'paused','reason':labor_error,'screen':observation['path']}
         if handled:continue
@@ -879,7 +888,7 @@ def run_steps(session, *, max_decisions=10000):
                 # original save rather than treating an unchanged kind as a
                 # failed turn or blindly sending Enter again.
                 session.checkpoint()
-                if session.state['turn'] > previous_turn:
+                if session.state['turn'] > previous_turn and _map_selection_ready(session.state):
                     context['pending_turn']=None
                     verified_endturn_checkpoint = _checkpoint_token(session)
             continue

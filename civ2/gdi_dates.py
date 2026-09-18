@@ -46,6 +46,17 @@ def _pixels(image, x, y, rendered, right=0, palette=PALETTE):
             'palette':sorted(v[0] for _,v in colors)}
 
 
+def _date_field(text, context=None):
+    """Compose the preceding observed glyph's shadow before field extraction."""
+    rendered=_render(text)
+    if context is None:return rendered
+    w,h,_,_=rendered
+    cw,ch,black,gray=_render(context+text)
+    if ch!=h or not 0<cw-w<=24:raise ValueError('Uncalibrated adjacent glyph geometry')
+    shift=cw-w;mask=(1<<w)-1
+    return w,h,[(v>>shift)&mask for v in black],[(v>>shift)&mask for v in gray]
+
+
 def recover_caption_date(image, rows, executable=None, directory=None, evidence=None):
     """Change only the observed year digits after one unique complete match."""
     if image.size != (640,480) or (evidence or {}).get('conflicts') or _controls(rows) is None:
@@ -87,27 +98,32 @@ def recover_caption_date(image, rows, executable=None, directory=None, evidence=
     left,right = px+pw+1,min(x+w,635)
     band = image.crop((left,py-3,right,py+25))
     black_rows = _maskrows(band.getchannel('R').point(lambda v:255 if v == 0 else 0))
-    candidates = _numbers(raw);matches = []
-    for number in candidates:
-        text = f', A.D. {number},' if era == 'AD' else f', {number} B.C.,'
-        try:
-            rendered = _render(text)
-        except ValueError:
-            return False
-        rw,rh,black,gray = rendered
-        if not 1 <= rw <= 130 or not 1 <= rh <= 22:
-            continue
-        expected = [0]*3+black+[0]*3
-        mask = (1 << (rw+3))-1
-        for shift in range(band.width-rw-3+1):
-            if any(((black_rows[i] >> shift) & mask) != value for i,value in enumerate(expected)):
+    candidates = _numbers(raw);matches = [];used_context=None
+    contexts=[None]
+    if re.fullmatch('[A-Za-z]',match[1][-1:]):contexts.append(match[1][-1])
+    for context in contexts:
+        for number in candidates:
+            text = f', A.D. {number},' if era == 'AD' else f', {number} B.C.,'
+            try:
+                rendered = _date_field(text,context)
+            except ValueError:
                 continue
-            proof = _pixels(image,left+shift,py,rendered,right=3)
-            if proof is not None:
-                matches.append((number,proof))
+            rw,rh,black,gray = rendered
+            if not 1 <= rw <= 130 or not 1 <= rh <= 22:continue
+            expected = [0]*3+black+[0]*3
+            mask = (1 << (rw+3))-1
+            for shift in range(band.width-rw-3+1):
+                if any(((black_rows[i] >> shift) & mask) != value for i,value in enumerate(expected)):continue
+                proof = _pixels(image,left+shift,py,rendered,right=3)
+                if proof is not None:matches.append((number,proof,context))
+    unique={}
+    for number,proof,context in matches:
+        key=(number,tuple(proof['bounds']),proof['region_rgb_sha256'])
+        unique.setdefault(key,(number,proof,context))
+    matches=list(unique.values())
     if len(matches) != 1 or matches[0][0] == raw:
         return False
-    number,date_proof = matches[0]
+    number,date_proof,used_context = matches[0]
     digits = re.search(r'[0-9]+',match[2])
     start,end = match.start(2)+digits.start(),match.start(2)+digits.end()
     row = deepcopy(old)
@@ -120,6 +136,9 @@ def recover_caption_date(image, rows, executable=None, directory=None, evidence=
                  comparison='complete black date mask with both commas and blank margins; all predicted gray134 pixels; calibrated grayscale palette',
                  extra_black_pixels=0,missing_black_pixels=0,missing_predicted_gray_pixels=0,
                  scope='Date digits only. City name, era and remaining observed caption bytes unchanged.')
+    if used_context is not None:
+        proof['adjacent_observed_city_glyph']=used_context
+        proof['adjacent_glyph_scope']='Compose the observed last city glyph before extracting the complete date field, preserving its shadow overlap at the leading comma. No date pixels are ignored; the city name is not decoded or changed.'
     row['provenance'] = deepcopy(old.get('provenance',[]))+[proof]
     row['caption_year_gdi'] = deepcopy(proof)
     if 'normal' in row:

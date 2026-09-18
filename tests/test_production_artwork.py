@@ -10,6 +10,44 @@ from tests.test_herald import prepared
 
 
 class ProductionArtworkTests(unittest.TestCase):
+    def test_medium_icon_column_requires_five_complete_spaced_peers(self):
+        names=('Settlers','Archers','Legion','Pikemen','Horsemen')
+        rows=[prepared('What shall we build in TEST City?',220,80,220,14)]
+        for i,name in enumerate(names):
+            rows += [prepared(name,178,102+i*17,60,14),prepared('(10 Turns)',340,102+i*17,90,14)]
+        icon=prepared('Fe BeNEe',112,101,24,93);icon['confidence']=.3
+        icon['map_patch_colors']={'source_sha256':'a'*64,'bounds':list(icon['bounds']),
+            'rgb_spread_threshold':24,'pixel_count':2232,'chromatic_pixels':494}
+        rows += [icon,prepared('Auto',150,390,30,16),prepared('Help',300,390,30,16),prepared('OK',465,390,24,16)]
+        base={'width':640,'height':480,'sha256':'a'*64,'lines':rows};rules={'units':[{'name':n} for n in names],'improvements':[]}
+        for case in ('valid','gap','missing_stat','few_rows','color','hash','control','long'):
+            o=copy.deepcopy(base);art=o['lines'][11]
+            if case=='gap':del o['lines'][5:7]
+            if case=='missing_stat':o['lines'].pop(8)
+            if case=='few_rows':del o['lines'][9:11]
+            if case=='color':art['map_patch_colors']['chromatic_pixels']=0
+            if case=='hash':art['map_patch_colors']['source_sha256']='b'*64
+            if case=='control':art['text']='No BeNEe'
+            if case=='long':art['bounds'][3]=97;art['map_patch_colors'].update(bounds=list(art['bounds']),pixel_count=2328)
+            d=classify_dialog(o,rules=rules)
+            self.assertEqual(d['supported'],case=='valid',(case,d))
+            if case=='valid':self.assertEqual([r['text'] for r in d['options']],list(names))
+
+    def test_actual_viroconium_keeps_all_sixteen_choices(self):
+        path=Path('runs/attempt-011/screens/ui-0003560.png')
+        if not path.exists():self.skipTest('Private original production frame unavailable')
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        from civ2.run import game_text,labels_text
+        state={'recent_founding_notices':[dict(name='Viroconium',year_text='A.D. 980',source_tag='FOUNDED',
+               image_sha256='fe98c9a3480c9e22bcfb9b22605093f4cfdfeaddca9d7e749b8ceeafcaab3ca2')]}
+        o=observe.recognize(path)
+        d=classify_dialog(o,state=state,rules=parse_rules(original_rules()),game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model']);self.assertEqual(len(d['options']),16)
+        self.assertEqual(d['options'][0]['text'],'Settlers');self.assertEqual(d['options'][-1]['text'],'Library')
+        self.assertEqual(d['evidence']['production_artwork'][0]['text'],'Fe BeNEe')
+        self.assertEqual(d['evidence']['production_artwork'][0]['bounds'],[112,101,24,93])
+
     def test_damaged_first_word_requires_two_actual_title_reads(self):
         original=prepared('Whait shall me bood in TEST?',226,96,188,16)
         good=prepared('What shall me buokd in TEST?',226,96,188,16)

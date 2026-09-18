@@ -51,5 +51,27 @@ class CouncilTitlePixels(unittest.TestCase):
         self.assertTrue({'council_title_rgb3','council_title_gray3'}<={p['preprocessing'] for p in row['provenance']})
         self.assertEqual(path.read_bytes(),original)
 
+    def test_original_later_council_missing_colon_needs_its_actual_paired_title(self):
+        from civ2.run import game_text,labels_text
+        path=Path('runs/attempt-011/screens/ui-0003601.png')
+        if not path.exists():self.skipTest('Private original council frame unavailable')
+        o=observe.recognize(path);d=classify_dialog(o,game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model'])
+        self.assertEqual(d['resource_tag'],'COUNCILTIME');self.assertIsNone(d['mechanical_action'])
+        self.assertEqual(d['title'],'The High Coocil A.D. 1000')
+        self.assertEqual([r['text'] for r in d['options']],['Consult High Council.','• No thanks, too busy.'])
+        row=next(r for r in o['lines'] if r['text']==d['title'])
+        self.assertEqual(row['provenance'][0]['text'],'The Fligh Comcl A D. 1000')
+        self.assertEqual(row['council_title_recovery']['date_parts'],['1000','AD'])
+        for mode in ('missing_proof','stale_hash','missing_gray','wrong_date','missing_option','missing_body'):
+            wrong=deepcopy(o);title=next(r for r in wrong['lines'] if r['text']==d['title'])
+            if mode=='missing_proof':title.pop('council_title_recovery')
+            elif mode=='stale_hash':title['council_title_recovery']['source_image_sha256']='c'*64
+            elif mode=='missing_gray':title['provenance']=[p for p in title['provenance'] if p['preprocessing']!='council_title_gray3']
+            elif mode=='wrong_date':title['council_title_recovery']['date_parts']=['1001','AD']
+            elif mode=='missing_option':wrong['lines']=[r for r in wrong['lines'] if r['text']!='Consult High Council.']
+            else:wrong['lines']=[r for r in wrong['lines'] if r['text']!='their views on the state of your realm.']
+            with self.subTest(mode=mode):self.assertFalse(classify_dialog(wrong,game_text=game_text(),labels_text=labels_text())['supported'])
+
 
 if __name__=='__main__':unittest.main()

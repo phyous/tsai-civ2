@@ -16,12 +16,19 @@ SOURCES = {
              ['"No, not interested."', 'Yes, declare war on %STRING1.']),
  'GREETINGS00': ('"Greetings from the most exalted %STRING1: %STRING2 of the %STRING3_._._."', []),
  'GREETINGS03': ('"I speak for %STRING5 who makes mortals tremble: %STRING2 %STRING1 of the %STRING3_._._."', []),
+ 'GAPE': ('"You are invited to gape with awe and amazement as the %STRING1 demonstrate the wonders of %STRING2. Absolutely no scribes will be allowed."', []),
+ 'CANCELTREATY1': ('"You have made peace with our evil neighbors: the %STRING1.  We %STRING2 you cancel this treaty at once!"',
+                  ['"Never! The %STRING1 are our friends."', '"Yes! Let us teach the %STRING1 a lesson!"']),
 }
 TEXTS = {
  'PROPOSECEASE': ['"The TEST people grow weary of this endless', 'war. We suggest a cease fire."'],
  'CRUSADE': ['"We invite you to join our crusade to rid the', 'world of the evil TEST. We will sign an alliance', 'for the duration of the hostilities."'],
  'GREETINGS00': ['"Greetings from the most exalted TEST:', 'King of the TEST . . ."'],
  'GREETINGS03': ['"I speak for she who makes mortals tremble:', 'Empress TEST of the TEST . . ."'],
+ 'GAPE': ['"You are invited to gape with awe and', 'amazement as the TEST demonstrate the',
+          'wonders of TEST. Absolutely no scribes', 'will be allowed."'],
+ 'CANCELTREATY1': ['"You have made peace with our evil neighbors:',
+                   'the TEST. We request you cancel this treaty', 'at once!"'],
 }
 
 
@@ -67,7 +74,7 @@ def fixture(tag='PROPOSECEASE'):
         raw = text.replace(' . . .', '..').replace('"', '')
         rows.append(prepared(raw, ox + x, oy + y, right - x, bottom - y))
     for i, option in enumerate(SOURCES[tag][1]):
-        cx, cy = left + 95, 402 + 25 * i
+        cx, cy = left + inset + 16, 402 + 25 * i
         for dx, dy in g.WHITE_RING:
             p[cx + dx, cy + dy] = (255, 255, 255)
         for dx, dy in g.BLACK_RING:
@@ -88,7 +95,7 @@ def recover(image, rows, atlas, layout, tag='PROPOSECEASE', evidence=None, game_
 
 
 class ParagraphTests(unittest.TestCase):
-    def test_four_sources_keep_words_provenance_and_original_decisions(self):
+    def test_six_sources_keep_words_provenance_and_original_decisions(self):
         for tag in SOURCES:
             with self.subTest(tag=tag):
                 image, rows, atlas, layout = fixture(tag)
@@ -166,8 +173,69 @@ class ParagraphTests(unittest.TestCase):
         self.assertIsNone(g._binding('"%STRING0 %STRING1."', 'One Two Three'))
         self.assertIsNone(g._binding('"%STRING0 meets %STRING0."', 'TEST meets OTHER'))
         self.assertIsNone(g._binding('"Pay %NUMBER0 gold."', 'Pay ten gold'))
-        self.assertEqual(g._binding('"Pay %NUMBER0 gold."', 'Pay 17 gold'), ('"Pay 17 gold."', {'%NUMBER0': '17'}))
+        self.assertEqual(g._binding('"Pay %NUMBER0 gold."', 'Pay 17 gold'), ('"Pay 17 gold."', {'%NUMBER0': '17'}, []))
         self.assertIsNone(g._wrap_observed('"do-not"', [dict(text='do'), dict(text='not')]))
+
+    def test_two_static_word_candidates_need_complete_actual_pixels(self):
+        image,rows,atlas,layout=fixture('CANCELTREATY1')
+        rows[1]['text']=rows[1]['text'].replace('neighbors','neighhors')
+        rows[3]['text']=rows[3]['text'].replace('once','oncel')
+        before=deepcopy(rows)
+        self.assertTrue(recover(image,rows,atlas,layout,'CANCELTREATY1'))
+        self.assertEqual([r['text'] for r in rows[1:4]],TEXTS['CANCELTREATY1'])
+        self.assertEqual(rows[4:],before[4:])
+        proof=rows[1]['provenance'][-1]
+        self.assertEqual([(v['observed'],v['source']) for v in proof['static_word_corrections']],
+                         [('neighhors','neighbors'),('oncel','once')])
+        self.assertEqual(proof['observed_variable_bindings'],{'%STRING1':'TEST','%STRING2':'request'})
+        self.assertEqual(proof['extra_pixels'],0)
+        # A plausible source correction cannot pass if the pixels spell the
+        # OCR candidate instead of the exact source candidate.
+        image,rows,atlas,layout=fixture('CANCELTREATY1')
+        row=rows[1];row['text']=row['text'].replace('neighbors','neighhors')
+        image.paste((190,)*3,(305,327,637,345))
+        glyph=atlas.render(TEXTS['CANCELTREATY1'][0].replace('neighbors','neighhors'))
+        glyph.paste(0,(0,0,4,glyph.height));image.paste((48,)*3,(301,323),glyph)
+        before=deepcopy(rows)
+        self.assertFalse(recover(image,rows,atlas,layout,'CANCELTREATY1'))
+        self.assertEqual(rows,before)
+
+    def test_static_binding_limits_do_not_correct_variables_numbers_or_case(self):
+        template='"We invite %STRING0 to pay 17 gold now."'
+        self.assertIsNone(g._binding(template,'We invile TEST lo pay 17 gold naw'))
+        self.assertIsNone(g._binding(template,'We invxxe TEST to pay 17 gold now'))
+        self.assertIsNone(g._binding(template,'We invite TEST to pay 18 gold now'))
+        self.assertIsNone(g._binding(template,'we invite TEST to pay 17 gold now'))
+        self.assertIsNone(g._binding(template,'We invite TEST topay 17 gold now'))
+        for tag,old,new in [('GAPE','TEST','TAST'),('CANCELTREATY1','request','reguest')]:
+            image,rows,atlas,layout=fixture(tag)
+            for r in rows[1:1+layout[3]]:
+                r['text']=r['text'].replace(old,new)
+            before=deepcopy(rows)
+            self.assertFalse(recover(image,rows,atlas,layout,tag));self.assertEqual(rows,before)
+        bound=g._binding('"We invite %STRING0 to pay."','We invile TEST to pay')
+        self.assertEqual(bound[1],{'%STRING0':'TEST'})
+        self.assertEqual(g._wrap_observed(bound[0],[dict(text='We invile TEST'),dict(text='to pay')],bound[2]),
+                         ['"We invite TEST','to pay."'])
+
+    def test_added_layouts_keep_full_frame_and_every_control_guard(self):
+        for tag in ('GAPE','CANCELTREATY1'):
+            for mode in ('frame','extra_ink','black','colored','missing_ok','source','extra_radio','missing_radio','target'):
+                if tag=='GAPE' and mode in ('missing_radio','target'):continue
+                with self.subTest(tag=tag,mode=mode):
+                    image,rows,atlas,layout=fixture(tag);text=source(tag);left,top,inset,count,radios,_=layout
+                    if mode=='frame':image.putpixel((left,top+30),(190,)*3)
+                    elif mode in ('extra_ink','black','colored'):
+                        image.putpixel((634,top+40),{'extra_ink':(48,)*3,'black':(0,)*3,'colored':(48,0,0)}[mode])
+                    elif mode=='missing_ok':rows.pop()
+                    elif mode=='source':text=text.replace('width=320','width=300')
+                    elif mode=='extra_radio':
+                        for dx,dy in g.WHITE_RING:image.putpixel((560+dx,425+dy),(255,)*3)
+                        for dx,dy in g.BLACK_RING:image.putpixel((560+dx,425+dy),(0,)*3)
+                    elif mode=='missing_radio':image.putpixel((left+inset+16,394),(190,)*3)
+                    else:rows[-2]['text']=rows[-2]['text'].replace('TEST','OTHER')
+                    before=deepcopy(rows)
+                    self.assertFalse(recover(image,rows,atlas,layout,tag,game_text=text));self.assertEqual(rows,before)
 
     def test_crusade_body_and_actual_option_must_name_the_same_target(self):
         image, rows, atlas, layout = fixture('CRUSADE')
@@ -216,6 +284,41 @@ class ParagraphTests(unittest.TestCase):
                 # Extra ink after the last word still belongs to the full ROI.
                 bad = image.convert('RGB'); bad.putpixel((634,t+35), (48,48,48))
                 self.assertFalse(g.recover_herald_paragraph(bad, raw))
+
+    def test_optional_actual_static_treaty_words_and_gape_layout(self):
+        if g.load_atlas() is None or not Path('.runtime/ocr').exists():
+            self.skipTest('Private original atlas/OCR absent')
+        from civ2.observe import recognize
+        for attempt,number,tag in [('010',3351,'CANCELTREATY1'),('010',2684,'GAPE'),('011',3189,'GAPE')]:
+            with self.subTest(attempt=attempt,tag=tag):
+                path=Path(f'runs/attempt-{attempt}/screens/ui-{number:07d}.png')
+                if not path.exists():self.skipTest('Private original screenshot absent')
+                original_bytes=path.read_bytes();image=Image.open(path);o=recognize(path);rows=o['lines']
+                left,top,inset,count,radios,_=g.LAYOUTS[tag]
+                body=sorted([r for r in rows if left+3<=r['center'][0]<637 and top+24<=r['center'][1]<(390 if radios else 447)],key=lambda r:r['center'][1])
+                if tag=='CANCELTREATY1':
+                    for row in body:row['text']=row['provenance'][0]['text']
+                    self.assertIn('neighhors',body[0]['text']);self.assertIn('oncel',body[-1]['text'])
+                else:
+                    # The actual GAPE body already reads correctly. Inject one
+                    # TEST OCR typo against unchanged original pixels to prove
+                    # this new layout and the fixed-word-only correction.
+                    body[-1]['text']=body[-1]['text'].replace('be','he')
+                before=deepcopy(rows);e={}
+                self.assertTrue(g.recover_herald_paragraph(image,rows,evidence=e))
+                d=classify_dialog(dict(width=640,height=480,sha256=g._sha(original_bytes),lines=rows),game_text=g._sources()[0])
+                self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],tag)
+                self.assertEqual(d['requires_model'],bool(radios))
+                self.assertEqual(len(d['options']),radios or 1)
+                proof=next(r for r in rows if any(p.get('preprocessing')=='original_gdi_paragraph_exact' for p in r['provenance']))['provenance'][-1]
+                expected=[('neighhors','neighbors'),('oncel','once')] if radios else [('he','be')]
+                self.assertEqual([(v['observed'],v['source']) for v in proof['static_word_corrections']],expected)
+                self.assertEqual(e['gdi_paragraph'][0]['missing_pixels'],0)
+                self.assertEqual(e['gdi_paragraph'][0]['extra_pixels'],0)
+                for old in before:
+                    if old not in body and not top+24<=old['center'][1]<(390 if radios else 447):
+                        self.assertIn(old,rows)
+                self.assertEqual(path.read_bytes(),original_bytes)
 
 
 if __name__ == '__main__':

@@ -37,6 +37,8 @@ from .native_map import evidence_for as native_map_evidence
 from .gdi_titles import exact_production_title
 from .city_locator import foreign_locator_context
 from .production_artwork import exact_fragment as exact_production_fragment
+from .founding_frame import exterior_body as founding_exterior_body
+from .unit_economy import classify_disband
 
 CDROM_TEMPLATE_SHA256='28a50ae19b7eaf7abf51d1c97ab591c3f03abff2e7a19fc18dcb623914666fd7'
 
@@ -121,6 +123,15 @@ def _rows(observation):
             raise DialogObservationError('Invalid OCR confidence')
         prepared=dict(text=text,normal=_normal(text),center=list(center),bounds=list(bounds),
                       source_line=index,confidence=confidence)
+        council=row.get('council_title_recovery')
+        if (isinstance(council,dict) and council.get('source_image_sha256')==observation['sha256']
+                and council.get('scope')=='Complete paired title reads only; full original council body and both choices still required.'):
+            reads={p.get('preprocessing') for p in row.get('provenance',[]) if isinstance(p,dict)
+                   and p.get('text')==text and type(p.get('confidence')) in (int,float) and p['confidence']>=.8}
+            match=re.fullmatch(rf'(.+?)(?::\s*|\s+)({DATE_PATTERN})',text,re.I)
+            if (match and list(date_parts(match[2]) or ())==council.get('date_parts')
+                    and {'council_title_rgb3','council_title_gray3'}<=reads):
+                prepared['paired_council_title']=True
         production_proof=row.get('production_title_identity_consensus')
         if isinstance(production_proof,dict) and production_proof.get('requires_founding_notice') is True:
             prepared['production_founding_year']=production_proof.get('observed_year')
@@ -263,6 +274,19 @@ def _production_icon_rows(body, names, observation=None):
             proof=exact_production_fragment(observation,row)
             if proof is not None:
                 row['production_artwork_pixels']=proof;icons.append(row);continue
+        # Original010/3537 reads the Palace sprite as low-confidence "nill".
+        # Its exact RGB fragment touches the independently read Palace label's
+        # bounding-box edge, so the general >=2px artwork gap does not apply.
+        # Only this pinned fragment permits zero gap; no label/stat is supplied.
+        if row['text']=='nill' and row['confidence']<.5 and row['normal'] not in names:
+            palace=[r for r in labels if r['normal']=='palace' and r['bounds'][0]==x+w
+                    and abs(r['center'][1]-row['center'][1])<=8
+                    and any(s['bounds'][0]>r['bounds'][0]+r['bounds'][2]
+                            and abs(s['center'][1]-r['center'][1])<=8 for s in stats)]
+            if len(palace)==1:
+                proof=exact_production_fragment(observation,row)
+                if proof is not None and proof['calibration']=='original-production-palace-sprite-fragment-v1':
+                    row['production_artwork_pixels']=proof;icons.append(row);continue
         # A vertical OCR fragment may span several unit sprites in the same
         # native icon column. It remains wholly left of every complete label;
         # each overlapping row must already have its independently read stat.
@@ -279,7 +303,10 @@ def _production_icon_rows(body, names, observation=None):
             # Original011/2562 merges seven unit sprites into one tall OCR
             # fragment. The longer column needs a complete, closely spaced
             # sequence of six to eight independently read label/stat rows.
-            tall_complete=(h<=80 or (6<=len(peers)<=8 and peer_y[0]-y<=14 and y+h-peer_y[-1]<=18
+            # A measured93px column ends just above the sixth label center;
+            # five complete rows cover it under the same endpoint/spacing guards.
+            minimum_peers=5 if h<=96 else 6
+            tall_complete=(h<=80 or (minimum_peers<=len(peers)<=8 and peer_y[0]-y<=14 and y+h-peer_y[-1]<=18
                             and all(15<=b-a<=19 for a,b in zip(peer_y,peer_y[1:]))))
             if tall_complete and len(peers)>=3 and all(r['bounds'][0]>=x+w+30 for r in peers) and all(any(s['bounds'][0]>r['bounds'][0]+r['bounds'][2]
                     and abs(s['center'][1]-r['center'][1])<=5 for s in stats) for r in peers):
@@ -695,6 +722,11 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             result['evidence']['template_sha256']=hashlib.sha256(expected.encode()).hexdigest()
             return finish('presentation_notice','Throne room notice',[button],[button],
                           mechanical='acknowledge_presentation')
+    disband=classify_disband(observation,rows,resources(),state)
+    if disband:
+        result['resource_tag']='DISBAND'
+        result['evidence'].update(disband['evidence'])
+        return finish(disband['kind'],disband['title'],disband['options'],disband['buttons'],model=True)
     production_change=classify_production_change(observation,rows,resources(),rules)
     if production_change:
         result['resource_tag']='PRODCHANGE'
@@ -920,6 +952,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             return unknown('Founding notice title is ambiguous','founding_notice')
         title=founded[0]
         body,button_rows,_=body_rows(title,{'ok','cancel','yes','no'},600)
+        frame_proof=None
+        if len(body)>1 and game_text:
+            foreground=founding_exterior_body(observation,title,body,button_rows,resources())
+            if foreground is not None:body,frame_proof=foreground
         # The illustrated notice can expose unrelated map labels outside its
         # horizontal body band. Only the single actual founding line establishes
         # the notice; other text inside that band would be an unknown modal.
@@ -930,6 +966,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         if len(button_rows)!=1 or button_rows[0]['normal']!='ok' or button_rows[0]['confidence']<.8:
             return unknown('Founding notice requires one observed OK button','founding_notice',title['text'])
         result['resource_tag']='FOUNDED'
+        if frame_proof is not None:result['evidence']['illustrated_founding_frame']=frame_proof
         result['founded_city']={'name':re.split(r'\s+founded\s*:',matching[0][0]['text'],maxsplit=1,flags=re.I)[0].strip(),
                                 'year_text':re.split(r'\s+founded\s*:',matching[0][0]['text'],maxsplit=1,flags=re.I)[1].strip(),'source':'Original founding notice text'}
         result['observed_city_name']=result['founded_city']['name']
@@ -944,7 +981,8 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                  and t['title']=='The High Council: %STRING2' and t['width']==320
                  and t['options']==['Consult High Council.','No thanks, too busy.']
                  and not t['buttons'] and not t['listbox']]
-        titles=[r for r in rows if (m:=re.fullmatch(rf'(.+?):\s*({DATE_PATTERN})',r['normal'],re.I))
+        titles=[r for r in rows if (m:=re.fullmatch(rf'(.+?)(?::\s*|\s+)({DATE_PATTERN})',r['normal'],re.I))
+                and (':' in r['text'] or r.get('paired_council_title') is True)
                 and date_parts(m[2]) is not None and _edit_distance(m[1],'the high council')<=4 and r['confidence']>=.8]
         if len(council)==len(titles)==1:
             title=titles[0];body,controls,_=body_rows(title,{'ok','cancel','yes','no','help'},320)

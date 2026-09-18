@@ -24,6 +24,44 @@ def frame():
 
 
 class ForeignCompletionTests(unittest.TestCase):
+    def test_missing_period_requires_four_complete_body_reads_and_preserved_variables(self):
+        for mode in ('valid','different','city','verb','build','nation','weak','title','question'):
+            rows=frame()['lines'];rows[0]['text']='Foreign Adrisor'
+            rows[1]['text']='Bapedi (Zalu) builds Great Library'
+            if mode=='question':rows[1]['text']+='?'
+            before=deepcopy(rows)
+            def crop(image,row,name,*args,**kwargs):
+                r=deepcopy(row)
+                if 'title' in name:r['text']='Foreign Adrisor' if mode=='title' else 'Foreign Advisor'
+                else:
+                    r['text']='Bapedi (Zulu) builds Great Library.'
+                    if mode=='different' and kwargs.get('scale')==2:r['text']='Bapedi (Zalu) builds Great Library.'
+                    if mode=='city':r['text']=r['text'].replace('Bapedi','Rome')
+                    if mode=='verb':r['text']=r['text'].replace('builds','completes')
+                    if mode=='build':r['text']=r['text'].replace('Great Library','Pyramids')
+                    if mode=='nation':r['text']=r['text'].replace('Zulu','German')
+                    if mode=='weak':r['confidence']=.5
+                return [r]
+            with patch.object(observe,'_crop_text',side_effect=crop):
+                observe._recover_foreign_completion_title(Image.new('RGB',(640,480)),rows,None,None,{})
+            if mode=='valid':
+                self.assertEqual(rows[0]['text'],'Foreign Advisor')
+                self.assertEqual(rows[1]['text'],'Bapedi (Zulu) builds Great Library.')
+                self.assertEqual(len(rows[1]['provenance']),5)
+            else:self.assertEqual(rows,before,mode)
+
+    def test_actual_great_library_announcement(self):
+        path=Path('runs/attempt-011/screens/ui-0003536.png')
+        if not path.exists():self.skipTest('Private original image unavailable')
+        from civ2.run import game_text,labels_text
+        o=observe.recognize(path);d=classify_dialog(o,game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'BUILT2')
+        self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        self.assertEqual(d['evidence']['observed_body'],'Bapedi (Zulu) builds Great Library.')
+        body=next(r for r in o['lines'] if r['text']=='Bapedi (Zulu) builds Great Library.')
+        self.assertEqual(body['provenance'][0]['text'],'Bapedi (Zalu) builds Great Library')
+        self.assertEqual([r['scale'] for r in body['provenance'][1:]],[3,3,2,2])
+
     def test_pinned_original_source_complete_body_and_finite_verb(self):
         r=dialog_resources(GAME)[0]
         self.assertEqual(hashlib.sha256(canonical(r)).hexdigest(),FOREIGN_NOTICE_RESOURCES['BUILT2'])

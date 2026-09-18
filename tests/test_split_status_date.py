@@ -8,6 +8,98 @@ from tests.test_herald import prepared
 
 
 class SplitStatusDate(unittest.TestCase):
+    def test_six_read_consensus_is_not_replaced_by_second_crop(self):
+        for prefix in ('status_letter_year_','status_colon_year_'):
+            row=prepared('A.D. 1110',476,218,52,10)
+            row['provenance']=[dict(preprocessing=prefix+'rgb2')]
+            with patch.object(observe,'_crop_text') as crop:
+                observe._recover_status_year(Image.new('RGB',(640,480)),[row],None,None,{'passes':[]})
+            crop.assert_not_called()
+
+    def test_lettered_year_requires_six_complete_agreeing_reads(self):
+        for case in ('valid','disagree','era','position','incomplete','raw_numeric'):
+            old=prepared('ALD. BED',476,218,52,10);old['confidence']=.3
+            if case=='raw_numeric':old['text']='ALD. 100'
+            rows=[deepcopy(old)]
+            reads=[prepared('A.D. 1110',476,215,51,14) for _ in range(6)]
+            if case=='disagree':reads[-1]['text']='A.D. 1100'
+            if case=='era':
+                for r in reads:r['text']='B.C. 1110'
+            if case=='position':reads[-1]['center'][1]+=20
+            values=[[r] for r in reads]
+            if case=='incomplete':values[-1]=[]
+            with patch.object(observe,'_crop_text',side_effect=values):
+                observe._recover_lettered_status_year(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],'A.D. 1110' if case=='valid' else old['text'])
+
+    def test_original_lettered_ad1110(self):
+        p=Path('runs/attempt-012/screens/ui-0003171.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        row=next(r for r in observe.recognize(p)['lines'] if r['text']=='A.D. 1110')
+        self.assertEqual([r['text'] for r in row['provenance']],['ALD. BED']+['A.D. 1110']*6)
+
+    def test_punctuated_year_requires_six_matching_complete_reads(self):
+        for case in ('valid','last_disagrees','era','trailing_digits','leading_digit','position'):
+            old=prepared('A.D. 18:00',476,218,52,10);rows=[deepcopy(old)]
+            readings=[prepared('A.D. 1100',476,216,51,13) for _ in range(6)]
+            if case=='last_disagrees':readings[-1]['text']='A.D. 1800'
+            if case in ('era','trailing_digits','leading_digit'):
+                for r in readings:r['text']={'era':'B.C. 1100','trailing_digits':'A.D. 1110','leading_digit':'A.D. 2100'}[case]
+            if case=='position':readings[-1]['center'][1]+=20
+            with patch.object(observe,'_crop_text',side_effect=[[r] for r in readings]):
+                observe._recover_punctuated_status_year(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],'A.D. 1100' if case=='valid' else old['text'])
+
+    def test_original_punctuated_ad1100(self):
+        p=Path('runs/attempt-012/screens/ui-0003157.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        row=next(r for r in observe.recognize(p)['lines'] if r['text']=='A.D. 1100')
+        self.assertEqual([r['text'] for r in row['provenance']],['A.D. 18:00']+['A.D. 1100']*6)
+
+    def test_valid_date_seven_requires_four_identical_complete_reads(self):
+        for case in ('valid','other_digit','era','disagree','position','split'):
+            original=prepared('A.D. 180',472,218,50,10);rows=[deepcopy(original)]
+            reads=[prepared('A.D. 780',476,216,45,13) for _ in range(4)]
+            if case=='other_digit':
+                for r in reads:r['text']='A.D. 190'
+            if case=='era':
+                for r in reads:r['text']='B.C. 780'
+            if case=='disagree':reads[-1]['text']='A.D. 180'
+            if case=='position':reads[-1]['center'][1]+=20
+            calls=[[r] for r in reads]
+            if case=='split':calls[-1]=[reads[-1],deepcopy(reads[-1])]
+            with patch.object(observe,'_crop_text',side_effect=calls):
+                observe._recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],'A.D. 780' if case=='valid' else original['text'])
+
+    def test_original_valid_looking_ad780(self):
+        p=Path('runs/attempt-011/screens/ui-0003403.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        row=next(r for r in observe.recognize(p)['lines'] if r['text']=='A.D. 780')
+        self.assertEqual([r['text'] for r in row['provenance']],['A.D. 180']+['A.D. 780']*4)
+
+    def test_ambiguous_split_era_needs_two_complete_agreeing_scales(self):
+        for case in ('valid','last_disagrees','era_disagrees','split_era_conflict','digits'):
+            old=prepared('B.D. 880',472,218,50,10);rows=[deepcopy(old)]
+            split=[prepared('A.D.',476,218,23,10),prepared('880',498,218,23,9)]
+            complete=[prepared('A.D. 880',476,216,45,13) for _ in range(4)]
+            if case=='last_disagrees':complete[-1]['text']='A.D. 890'
+            if case=='era_disagrees':
+                for r in complete[2:]:r['text']='B.C. 880'
+            if case=='split_era_conflict':
+                for r in complete:r['text']='B.C. 880'
+            if case=='digits':
+                for r in complete:r['text']='A.D. 890'
+            with patch.object(observe,'_crop_text',side_effect=[split,deepcopy(split)]+[[r] for r in complete]):
+                observe._recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],'A.D. 880' if case=='valid' else old['text'])
+
+    def test_original_ambiguous_split_ad880(self):
+        p=Path('runs/attempt-012/screens/ui-0002900.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        row=next(r for r in observe.recognize(p)['lines'] if r['text']=='A.D. 880')
+        self.assertEqual([r['text'] for r in row['provenance']],['B.D. 880']+['A.D. 880']*4)
+
     def test_double_damaged_joined_date_needs_matching_second_scale(self):
         for case in ('valid','second_disagrees','other_digit','changed_era'):
             original=prepared('8.D.180' if case!='other_digit' else '8.D.280',474,218,48,10)

@@ -97,6 +97,37 @@ class WonderNoticeTests(unittest.TestCase):
         self.assertIn('ahandoned',body['provenance'][0]['text'])
         self.assertIn('Hanging Gardens.',d['visible_text'])
 
+    def test_switch_punctuation_requires_complete_known_projects_and_two_pixel_reads(self):
+        base=[prepared('Travellers Report',264,196,112,16),
+              prepared('The TEST have changed projects from Great',200,220,308,16),
+              prepared('Library to Colossusl',200,240,180,16),prepared('OK',309,272,24,14)]
+        for case in ('valid','project','peer','weak','source','extra'):
+            rows=copy.deepcopy(base)
+            if case=='source':rows[1]['text']=rows[1]['text'].replace('changed','offered')
+            if case=='extra':rows.append(prepared('No',400,272,24,14))
+            before=copy.deepcopy(rows)
+            def crop(image,old,name,*args,**kwargs):
+                r=copy.deepcopy(old);r['text']='Library to Colossus!'
+                if case=='project':r['text']='Library to Lighthouse!'
+                if case=='peer' and kwargs.get('grayscale'):r['text']=old['text']
+                if case=='weak':r['confidence']=.5
+                return [r]
+            with patch.object(observe,'_production_names',return_value={'great library','colossus','lighthouse'}),patch.object(observe,'_crop_text',side_effect=crop):
+                observe._recover_travellers_title(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            if case=='valid':
+                self.assertEqual(rows[2]['text'],'Library to Colossus!');self.assertEqual(rows[:2],before[:2])
+            else:self.assertEqual(rows,before,case)
+
+    def test_actual_spanish_project_switch_keeps_both_wonder_names(self):
+        p=Path('runs/attempt-010/screens/ui-0003497.png')
+        if not p.exists():self.skipTest('Private original report unavailable')
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'SWITCHWONDER')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        row=next(r for r in o['lines']if r['text']=='Library to Colossus!')
+        self.assertEqual(row['provenance'][0]['text'],'Library to Colossusl')
+
     def test_optional_original_public_start_report(self):
         root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0002312.png'
         if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original report unavailable')

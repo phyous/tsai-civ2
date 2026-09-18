@@ -18,6 +18,7 @@ from .notice_icons import proven_notice_icon
 EVENT_TITLES = {
     'GOLDENAGE': 'golden age of philosophy',
     'NEWFORTRESS': 'new order: fortress',
+    'SETHOMECITY': 'civ rules: home cities',
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
     'DESTROYED': 'defense minister',
@@ -100,6 +101,7 @@ TRADE_NOTICE_RESOURCES = {
 }
 ORDER_NOTICE_RESOURCES = {
     'NEWFORTRESS': '7008caabad90b14e8e354ed60484e54359857ebf4f5da5284f35630d45028f8c',
+    'SETHOMECITY':'f472fef5070169afbafa07e7f2b7f8b08f18b1f12c7765865d478c40ad12c5cc',
 }
 PHILOSOPHY_NOTICE_RESOURCES = {
     'GOLDENAGE': 'b8fae752a1051a78b7f42dbf360d7473c55bbeb5acf8baecb5d7302987d2b135',

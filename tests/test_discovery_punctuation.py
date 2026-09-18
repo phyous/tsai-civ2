@@ -41,3 +41,27 @@ class DiscoveryPunctuationTests(TestCase):
         self.assertIn('Currency:',[x['text'] for x in line['provenance']])
         self.assertEqual([x['preprocessing'] for x in line['provenance'][-2:]],
                          ['discovery_period_rgb2','discovery_period_gray2'])
+
+    def test_discovery_title_needs_complete_body_name_and_two_reads(self):
+        for case in ('valid','disagree','wrong_name','missing_body','extra_control','position'):
+            original=rows();original[0]['text']='Civlization Adrance';original[2]['text']='TEST Currency.'
+            a=deepcopy(original[0]);a['text']='Cinlization Advance';b=deepcopy(a)
+            if case=='disagree':b['text']='Civilization Advance'
+            if case=='wrong_name':original[2]['text']='Unobserved.'
+            if case=='missing_body':original[1]['text']='Incomplete'
+            if case=='extra_control':original.append(dict(original[-1],text='Cancel'))
+            if case=='position':b['center'][1]+=30
+            with mock.patch.object(observe,'_research_names',return_value={'test currency'}), \
+                 mock.patch.object(observe,'_crop_text',side_effect=[[a],[b]]):
+                observe._recover_discovery_punctuation(Image.new('RGB',(640,480)),original,None,None,{})
+            self.assertEqual(original[0]['text'],'Cinlization Advance' if case=='valid' else 'Civlization Adrance')
+
+    def test_original_polytheism_title(self):
+        p=Path('runs/attempt-012/screens/ui-0003257.png')
+        if not p.exists():self.skipTest('Private original discovery unavailable')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'CIVADVANCE')
+        row=next(r for r in o['lines'] if r['text']=='Cinlization Advance')
+        self.assertEqual([r['text'] for r in row['provenance']],['Civlization Adrance']+['Cinlization Advance']*2)

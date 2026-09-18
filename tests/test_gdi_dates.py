@@ -41,6 +41,42 @@ def recover(image,rows,evidence=None):
 
 
 class CaptionDateTests(unittest.TestCase):
+    def test_context_is_composed_before_extracting_every_field_pixel(self):
+        def renderer(text):
+            if text=='m, A.D. 840,':return 8,2,[0b11011001,0b10100110],[0b00100110,0b01011001]
+            return 5,2,[0,0],[0,0]
+        with patch.object(d,'_render',side_effect=renderer):
+            self.assertEqual(d._date_field(', A.D. 840,','m'),
+                (5,2,[0b11011,0b10100],[0b00100,0b01011]))
+
+    def test_original_brundisium_preserves_name_and_matches_contextual_date(self):
+        p=Path('runs/attempt-010/screens/ui-0003537.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        from civ2.observe import recognize
+        result=recognize(p)
+        row=next(r for r in result['lines'] if r['text'].startswith('City of'))
+        self.assertIn('City of Brondisiom, A.D. 840,',row['text'])
+        proof=row['caption_year_gdi']
+        self.assertEqual(proof['adjacent_observed_city_glyph'],'m')
+        self.assertEqual(proof['date']['bounds'],[217,41,70,14])
+        self.assertEqual(proof['extra_black_pixels'],0)
+        self.assertEqual(proof['missing_black_pixels'],0)
+        with Image.open(p) as source:image=source.convert('RGB')
+        # Altering a pixel inside the complete field still invalidates it.
+        old=[deepcopy(row)]+[r for r in result['lines'] if r['text'] in ('Auto','Help','OK')]
+        old[0]['text']=old[0]['text'].replace('840','340',1)
+        before=deepcopy(old);image.putpixel((230,45),(255,0,0))
+        self.assertFalse(d.recover_caption_date(image,old));self.assertEqual(old,before)
+        with Image.open(p) as source:unchanged=source.convert('RGB')
+        wrong=deepcopy(before);wrong[0]['text']=wrong[0]['text'].replace('Brondisiom','Brondisiox')
+        self.assertFalse(d.recover_caption_date(unchanged,wrong))
+        for value in (0,190):
+            modified=unchanged.copy()
+            point=next((x,y) for x in range(242,275) for y in range(43,52)
+                       if modified.getpixel((x,y))[0]!=(value) and modified.getpixel((x,y))[0] in (0,190))
+            modified.putpixel(point,(value,)*3);rows=deepcopy(before)
+            self.assertFalse(d.recover_caption_date(modified,rows));self.assertEqual(rows,before)
+
     def test_only_digit_replaced_with_original_text_and_prior_readings_preserved(self):
         image,rows=fixture();before=deepcopy(rows);e={}
         rows[0]['caption_year_consensus']={'digits':'340'}

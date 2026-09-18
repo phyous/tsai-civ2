@@ -10,7 +10,7 @@ class StrategyGuideTests(unittest.TestCase):
         state=fixture(unit_type=1);original=deepcopy(state);r=rules()
         actions=policy.unit_candidates(state,rules=r)
         request=policy.unit_request_for(state,actions,r)
-        self.assertEqual(request['state']['strategy_guide']['revision'],'civ2-prince-guide-2026-09-17-v7')
+        self.assertEqual(request['state']['strategy_guide']['revision'],'civ2-prince-guide-2026-09-17-v8')
         self.assertEqual(request['state']['strategy_guide']['sources'],strategy.SOURCES)
         advice=request['state']['strategic_playbook']['garrison_and_surplus']
         self.assertIn('observed city garrisons',advice)
@@ -25,7 +25,11 @@ class StrategyGuideTests(unittest.TestCase):
         self.assertIn('does not transfer its home-city support',support)
         self.assertIn('removes a population point',support)
         self.assertIn('Food stores do not cover a shield-support shortage',support)
-        self.assertIn('use only offered commands',support)
+        self.assertIn('use only offered commands',support.casefold())
+        economy=request['state']['strategic_playbook']['unit_economy']
+        self.assertIn('decide No or Yes separately',economy)
+        self.assertIn('half its production cost',economy)
+        self.assertIn('trade units cannot change home city',economy)
 
 
 if __name__=='__main__':unittest.main()

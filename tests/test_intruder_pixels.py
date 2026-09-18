@@ -26,6 +26,34 @@ def notice():
 
 
 class IntruderPixelsTests(TestCase):
+    def test_damaged_title_suffix_requires_full_prefix_and_atomic_body_reads(self):
+        for mode in ('valid','nation','attitude','suffix','disagree','body'):
+            rows=notice();rows[0]['text']='TEST German Emisoary'
+            title=deepcopy(rows[0]);title['text']='TEST German Emissary';other=deepcopy(title)
+            if mode=='nation':title['text']=other['text']='TEST Zulu Emissary'
+            if mode=='attitude':title['text']=other['text']='OTHER German Emissary'
+            if mode=='suffix':title['text']=other['text']='TEST German Emisoary'
+            if mode=='disagree':other['text']='TEST German Emisoary'
+            first=deepcopy(rows[1]);first['text']+='r';second=deepcopy(first)
+            if mode=='body':second['text']=second['text'].replace('troops','ships')
+            with mock.patch.object(observe,'_crop_text',side_effect=[[title],[other],[first],[second]]):
+                observe._recover_intruder_notice(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[0]['text'],'TEST German Emissary' if mode=='valid' else 'TEST German Emisoary')
+            self.assertEqual(rows[1]['text'],first['text'] if mode=='valid' else notice()[1]['text'])
+
+    def test_original_011_damaged_suffix_preserves_observed_nation(self):
+        path=Path('runs/attempt-011/screens/ui-0003354.png')
+        if not path.exists():self.skipTest('Private original calibration unavailable')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text,labels_text
+        o=observe.recognize(path);d=classify_dialog(o,game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'INTRUDER')
+        self.assertEqual(d['mechanical_action'],'acknowledge_information');self.assertFalse(d['requires_model'])
+        title=next(r for r in o['lines'] if r['text']=='Uncooperative Zuln Emissary')
+        self.assertEqual(title['provenance'][0]['text'],'Uncooperative Zuln Emisoary')
+        self.assertEqual([p['preprocessing'] for p in title['provenance'][1:]],
+                         ['intruder_title_rgb2','intruder_title_gray2'])
+
     def test_source_bound_warning_can_enter_existing_public_notice_history(self):
         import hashlib,json,tempfile
         from civ2.dialogs import classify_dialog,dialog_resources

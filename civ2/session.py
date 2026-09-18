@@ -166,6 +166,7 @@ class Session:
         self.planning = planning
         self.hierarchical_planning = hierarchical_planning
         self.pending_plan_category = None
+        self.pending_disband = None
         self.planning_category_decisions = 0
         self.plans = {}
         self.plan_actions = []
@@ -457,6 +458,7 @@ class Session:
         if getattr(self, 'planning', False):
             self._advance_plans(state)
         self.state = state
+        self.pending_disband = None
         return state
 
     def _evaluate(self, request, actions, question, *, stage='command'):
@@ -742,11 +744,18 @@ class Session:
         validate_action(action, self.state, self.rules)
         self.game.rpc('resume')
         before = self.ui.observe()
-        inputs = self.ui.key(action['parameters']['key'], settle=.4)
+        parameters=action['parameters']
+        if parameters.get('modifiers'):
+            inputs=self.game.chord(*parameters['modifiers'],parameters['key'],hold_ms=120)
+            time.sleep(.4)
+        else:
+            inputs = self.ui.key(parameters['key'], settle=.4)
         after = self.ui.observe(retain_unreadable=True)
         self.journal.append('command_dispatched', decision=self.decisions, action=action,
                             before=before['sha256'],after=after['sha256'],inputs=inputs)
         self._mark_dispatched(decision_id, 'unit_action', action, inputs)
+        from .unit_economy import request_context
+        self.pending_disband=request_context(action,self.state,decision_id)
         if getattr(self, 'planning', False):
             self.plan_actions.append(deepcopy(action))
         self.history.append({'turn':self.state['turn'],'actor':action['actor'],
@@ -778,6 +787,15 @@ class Session:
         self._dialog_repeat_records=records[-24:]
 
     def choose_dialog(self, dialog):
+        if dialog.get('kind')=='disband_confirmation':
+            from .unit_economy import valid_context
+            pending=getattr(self,'pending_disband',None)
+            if (not valid_context(self.state,pending)
+                    or dialog.get('evidence',{}).get('disband_confirmation',{}).get('request')!=pending
+                    or pending['decision'] not in self.pending_decisions):
+                raise RuntimeError('Disband warning lacks its still-pending selected-unit request')
+        else:
+            self.pending_disband=None
         self.observe_dialog_feedback(dialog)
         request, actions = dialog_request_for(self.state, dialog, self.rules,
                                              recent_actions=list(self.history),
@@ -821,6 +839,7 @@ class Session:
         self.journal.append('dialog_dispatched',decision=self.decisions,action=action,receipt=receipt,
                             after=after['sha256'])
         self._mark_dispatched(decision_id, 'dialog_action', action, inputs)
+        self.pending_disband=None
         panel=dialog_panel_signature(dialog)
         self._pending_dialog_repeat=(dict(panel=panel,revision=revision(self.state),decision=decision_id,
             option=action['label'],history=deepcopy(self._dialog_repeat_records)) if panel is not None else None)
@@ -831,6 +850,7 @@ class Session:
         return action, after
 
     def choose_empire(self, screen, reviewed):
+        self.pending_disband=None
         actions = empire_candidates(self.state,screen,reviewed,self.rules)
         decision_id = None
         if len(actions) == 1:
@@ -868,6 +888,7 @@ class Session:
 
     def choose_city_control(self, screen, reviewed, *, labor_ready=False,
                             observation=None, activation_ready=False):
+        self.pending_disband=None
         if activation_ready:
             if not getattr(self,'unit_activation_enabled',False) or not labor_ready:
                 raise RuntimeError('Unit activation needs an enabled capability and a fresh city checkpoint')

@@ -30,6 +30,7 @@ from .revision import (RevisionError, revision as state_revision, revision_key,
                        observation_key)
 from .rules import eligible_governments, eligible_research
 from .city import CityLaborError, city_labor_projection
+from .unit_economy import living, home_transfer, DISBAND_PARAMETERS
 
 
 class PolicyError(ValueError):
@@ -433,7 +434,8 @@ def unit_candidates(observation, unit_id=None, rules=None):
     Unknown destinations remain unknown. Ground units can request boarding an
     observed own passenger transport; those ships can request native landfall.
     Neither request establishes cargo, free capacity, or successful movement.
-    No disband, cheat, map-write, or forced end-turn action exists.
+    Disband requests a separately observed confirmation; no automatic Yes,
+    cheat, map-write, or forced end-turn action exists.
     """
     revision = _revision(observation)
     rules = _rules(rules)
@@ -505,6 +507,20 @@ def unit_candidates(observation, unit_id=None, rules=None):
         add("unload", "unload",
             "Request unloading from this selected transport in the original game; cargo and unloading legality are unverified",
             "KeyU", transport_specification=transport_spec)
+    if (type(observation.get('player',{}).get('id'))is int and 1<=observation['player']['id']<=7
+            and isinstance(unit.get('type'),str) and unit['type']==spec.get('name')
+            and all(type(unit.get(k))is int for k in ('movement_thirds_spent','order_id'))
+            and living(unit,spec)):
+        add('request_disband','request_disband',
+            'Review disbanding this selected '+_label(unit.get('type') or spec.get('name'))+
+            '; opens the original warning only, with a separate No/Yes decision',
+            **deepcopy(DISBAND_PARAMETERS))
+        transfer=home_transfer(observation,unit,spec)
+        if transfer is not None:
+            add('set_home_city','set_home_city',
+                'Set this unit\'s home city to '+_label(transfer['new_home']['name'])+
+                ' (currently '+_label(transfer['previous_home']['name'])+
+                '); requests transfer of its support to the city it occupies',**transfer)
     tile = tiles.get((unit["x"], unit["y"]))
     if not worker or not tile or tile.get("terrain") == "Ocean":
         return actions
@@ -901,6 +917,20 @@ def unit_request_for(observation, actions, rules=None, recent_actions=None):
             "Choose exactly one useful order for the selected owned unit. This answer selects the executed command; empire_strategy is independent advice and is not a previous answer. Use the whole explored map, current owned-unit roster, city spacing, strategic_playbook and recent receipts to plan a purposeful next step. Establish and grow productive settlements, protect valuable settlers, use military roles appropriately, and improve useful surrounding land under the current government's rules. Avoid repeated no-effect attempts and aimless back-and-forth travel; an old slot ID alone is not a persistent unit. A directional order into a visible foreign unit can initiate combat or diplomacy. Sentry/fortify for a useful defensive purpose, skip when waiting serves a specific goal. Do not infer hidden terrain, enemy strength or diplomacy. The original UI can reject an order; do not mistake an attempted order or save change for progress."),
         "empire_strategy": deepcopy(STRATEGY_QUESTION),
     }}
+    if 'request_disband' in actions:
+        unit=_unit(observation);spec=_specification(unit,_rules(rules))
+        def city_budget(identifier):
+            cities=[c for c in observation.get('cities',[]) if c.get('id')==identifier and c.get('owner')==unit['owner']]
+            if len(cities)!=1:return None
+            fields=('id','name','size','food_produced','shields_produced','food_stored','shields_stored','production_id')
+            return {k:deepcopy(cities[0][k])for k in fields if k in cities[0]}|{
+                'observed_supported_unit_count':sum(u.get('home_city_id')==identifier for u in observation['units'])}
+        transfer=actions.get('set_home_city',{}).get('parameters')
+        request['state']['selected_unit_economy']={
+            'recorded_home':city_budget(unit.get('home_city_id')),
+            'offered_new_home':city_budget(transfer['new_home']['id']) if transfer else None,
+            'original_unit_shield_cost':spec.get('shield_cost'),
+            'reference':'Disband removes the unit only after a separate Yes choice. The original manual says disbanding inside a city contributes half its production cost to the current project. Outside a city no such production contribution is stated. Removing a defender can also remove protection or martial law. H changes which city supports the unit; ordinary movement does not. Transferring support can burden the new home. Actual native effects must be observed, and no remaining defender is declared sufficient.'}
     attempts = _unchanged_move_attempts(observation, actions, records)
     if attempts:
         request['state']['unit_action_feedback'] = {
@@ -1031,6 +1061,10 @@ def dialog_request_for(observation, dialog, rules=None, recent_actions=None, *, 
     state = model_state(observation, rules, recent_actions) if _revision(observation, required=False) else {"observation_limits": "Only this visible dialog has been supplied; empire state is unavailable.", "recent_actions": _recent_actions(recent_actions)}
     state["mandatory_dialog"] = {"title": _label(dialog["title"]), "options": [a["label"] for a in actions.values()],
                                   "source": "Original game image OCR; options must remain present at execution."}
+    if dialog.get('kind')=='disband_confirmation':
+        proof=dialog.get('evidence',{}).get('disband_confirmation')
+        if not isinstance(proof,dict):raise PolicyError('Disband confirmation requires its dispatched actor context')
+        state['mandatory_dialog']['disband_confirmation']=deepcopy(proof)
     if any(a['parameters'].get('selection_only') is True for a in actions.values()):
         state['mandatory_dialog']['foreign_contact_report']=deepcopy(dialog['evidence']['foreign_report'])
         state['mandatory_dialog']['command_scope']=(

@@ -42,7 +42,9 @@ class CouncilChoiceTests(unittest.TestCase):
         if not p.exists():self.skipTest('Private original council absent')
         o=recognize(p);d=classify_dialog(o,game_text=game_text(),labels_text=labels_text())
         self.assertTrue(d['supported']);self.assertTrue(d['requires_model']);self.assertEqual(d['resource_tag'],'COUNCILTIME')
-        self.assertEqual(d['title'],'The Figh Comcl A.D.1')
+        self.assertEqual(d['title'],'The Fligh Cooncl: A.D. 1')
+        row=next(r for r in o['lines'] if r['text']==d['title'])
+        self.assertEqual(row['provenance'][0]['text'],'The Figh Comcl A.D.1')
         self.assertEqual(len(d['options']),2);self.assertEqual([b['text'] for b in d['buttons']],['OK'])
 
 class ADMapDateTests(unittest.TestCase):
