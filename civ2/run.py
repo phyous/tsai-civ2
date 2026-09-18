@@ -531,6 +531,7 @@ def run_steps(session, *, max_decisions=10000):
         observation, dialog = observe_ready(session, resources)
         observation,dialog,audience_wait_error=_await_diplomatic_followup(session,context,observation,dialog,resources)
         observation,dialog,turn_wait_error=_await_turn_resolution(session,context,observation,dialog,resources)
+        Session.observe_dialog_feedback(session,dialog)
         # Pointer movement is harmless to strategy but still an ordinary input.
         # Its observation-recovery event invalidates the strict no-input token.
         reuse_checkpoint = reuse_checkpoint and _checkpoint_token(session) == verified_endturn_checkpoint

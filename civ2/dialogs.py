@@ -26,9 +26,11 @@ from .tax_controls import proven_tax_arrows
 from .exchange_picker import classify_exchange_picker
 from .acquisition_notice import classify_acquisition_notice
 from .production_change import classify_production_change
+from .production_upgrade import classify_production_upgrade
 from .history_notice import classify_history_notice
 from .native_choices import classify_native_choice
 from .foreign_report import classify_foreign_report
+from .caravan import classify_caravan
 from .native_map import evidence_for as native_map_evidence
 from .gdi_titles import exact_production_title
 
@@ -652,12 +654,23 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         result['evidence'].update(production_change['evidence'])
         return finish('production_change_choice',production_change['title'],production_change['options'],
                       production_change['buttons'],model=True)
+    production_upgrade=classify_production_upgrade(observation,rows,dialog_resources(game_text or ''),rules,state,labels_text)
+    if production_upgrade:
+        result['resource_tag']=production_upgrade['resource_tag']
+        result['evidence'].update(production_upgrade['evidence'])
+        return finish(production_upgrade['kind'],production_upgrade['title'],production_upgrade['options'],
+                      production_upgrade['buttons'],model=True)
     foreign_report=classify_foreign_report(observation,rows,dialog_resources(game_text or ''),rules,labels_text)
     if foreign_report:
         result['resource_tag']=foreign_report['resource_tag']
         result['evidence'].update(foreign_report['evidence'])
         return finish(foreign_report['kind'],foreign_report['title'],foreign_report['options'],
                       foreign_report['buttons'],model=True)
+    caravan=classify_caravan(observation,rows,dialog_resources(game_text or ''),rules,labels_text)
+    if caravan:
+        result['resource_tag']=caravan['resource_tag']
+        result['evidence'].update(caravan['evidence'])
+        return finish(caravan['kind'],caravan['title'],caravan['options'],caravan['buttons'],model=True)
     native_choice=classify_native_choice(observation,rows,dialog_resources(game_text or ''),rules)
     if native_choice:
         result['resource_tag']=native_choice['resource_tag']

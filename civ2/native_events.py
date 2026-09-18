@@ -23,6 +23,10 @@ EVENT_TITLES = {
     'MULTIPLEWIN': 'defense minister',
     'MULTIPLELOSE': 'defense minister',
     'TOOKCIV': 'civilization advance stolen!',
+    'CARAVAN': 'trade route',
+    'FOODCARAVAN': 'trade route',
+    'CARAVANOTHER': 'trade route',
+    'CARAVANHOME': 'civ rules: trade units',
     'SNEAK': 'defense minister',
     'SURPRISESCROLLS': 'village',
     'SURPRISEMETALS': 'village',
@@ -68,6 +72,12 @@ COMBAT_NOTICE_RESOURCES = {
     'MULTIPLEWIN': '72e8bd528879eca5bff6259e6976b83a451aa9724dce6e94161d347d51504438',
     'MULTIPLELOSE': 'dcb38e4e3fff4ce44a83d9834d5d7f69e512deb089af8a31e048b1015f73fb7f',
     'TOOKCIV': 'ef12f6bbbaeed93332c5c54ee7d7587c579421cd3da72ff5be8e1aed81a4a192',
+}
+TRADE_NOTICE_RESOURCES = {
+    'CARAVAN': '81e7dd7878249d0f110efac44694cd6f1509d55e3a34ea75c9095286e3299a4f',
+    'FOODCARAVAN': '8d11a59207b1740e82c609c1d2360e28156aec5656290193feb35ca7152036c9',
+    'CARAVANHOME': 'b27f78a773aeab795a9a70211c3274edf4ba8caec0bd6feaa755e49b4b632418',
+    'CARAVANOTHER': '580ee3496eb05f126e9d2660ced4efec6fc3e5cf5ac3d66174252558cb178e8c',
 }
 # Original LABELS.TXT lines191–194; do not let a variable verb absorb a choice.
 CAPTURE_VERBS = ('capture', 'liberate', 'captured', 'liberated')
@@ -201,9 +211,10 @@ def classify_information(observation, resources, *, placeholder_values=None):
             continue
         if tag in RULE_REJECTIONS and _normal(body or '') != _normal(RULE_REJECTIONS[tag]):
             continue
-        pinned = tag in COMBAT_NOTICE_RESOURCES
+        pinned_hash = COMBAT_NOTICE_RESOURCES.get(tag) or TRADE_NOTICE_RESOURCES.get(tag)
+        pinned = pinned_hash is not None
         if pinned and hashlib.sha256(json.dumps(resource, sort_keys=True,
-                separators=(',', ':'), ensure_ascii=False).encode()).hexdigest() != COMBAT_NOTICE_RESOURCES[tag]:
+                separators=(',', ':'), ensure_ascii=False).encode()).hexdigest() != pinned_hash:
             continue
         tag_values = placeholder_values.get(tag, {})
         if not isinstance(tag_values, dict):

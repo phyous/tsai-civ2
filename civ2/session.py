@@ -13,7 +13,7 @@ from .compact import compact_model_state
 from .engine import Game
 from .empire import empire_candidates, empire_request_for, validate_empire_action
 from .evidence import Journal, canonical
-from .policy import unit_candidates, unit_request_for, dialog_request_for, validate_action
+from .policy import unit_candidates, unit_request_for, dialog_request_for, validate_action, dialog_panel_signature
 from .planning import advance_plan, make_plan, request_for as planning_request_for, task_candidates, target_geometry
 from .recording import Recorder
 from .save import parse_save, parse_rules
@@ -757,9 +757,31 @@ class Session:
         self.publish('running')
         return action, after
 
+    def observe_dialog_feedback(self, dialog):
+        """Track observed returns only; any intervening different screen resets."""
+        panel=dialog_panel_signature(dialog)
+        pending=getattr(self,'_pending_dialog_repeat',None)
+        records=getattr(self,'_dialog_repeat_records',[])
+        self._pending_dialog_repeat=None
+        try:bound=revision(self.state)
+        except ValueError:bound=None
+        if panel is None or bound is None:
+            self._dialog_repeat_records=[]
+            return
+        if pending is not None:
+            if panel is not None and pending['panel']==panel and pending['revision']==bound:
+                records=pending['history']+[dict(panel=panel,revision=bound,decision=pending['decision'],
+                    option=pending['option'],completed=True,observed_again=True)]
+            else:records=[]
+        elif panel is None or any(item['panel']!=panel or item['revision']!=bound for item in records):
+            records=[]
+        self._dialog_repeat_records=records[-24:]
+
     def choose_dialog(self, dialog):
+        self.observe_dialog_feedback(dialog)
         request, actions = dialog_request_for(self.state, dialog, self.rules,
-                                             recent_actions=list(self.history))
+                                             recent_actions=list(self.history),
+                                             completed_dialog_clicks=self._dialog_repeat_records)
         request['state']['checkpoint_freshness'] = {
             'pending_decisions_since_native_save':list(self.pending_decisions),
             'note':'Empire and unit data are from the last native save. The mandatory dialog is current; pending orders may have changed the empire.'}
@@ -799,6 +821,9 @@ class Session:
         self.journal.append('dialog_dispatched',decision=self.decisions,action=action,receipt=receipt,
                             after=after['sha256'])
         self._mark_dispatched(decision_id, 'dialog_action', action, inputs)
+        panel=dialog_panel_signature(dialog)
+        self._pending_dialog_repeat=(dict(panel=panel,revision=revision(self.state),decision=decision_id,
+            option=action['label'],history=deepcopy(self._dialog_repeat_records)) if panel is not None else None)
         self.history.append({'turn':self.state['turn'],'decision':decision_id,'action':deepcopy(action),
                              'order':action['label'],'outcome':'awaiting original game response'})
         self.chronicle.append({'id':str(self.decisions),'turn':self.state['turn'],'label':action['label'],'kind':'dialog'})
