@@ -40,6 +40,22 @@ class RecognitionCacheTests(unittest.TestCase):
             result=self.recognize(path);result['ocr']['fallback_errors']=['transient'];return result
         with patch('civ2.ui.recognize',side_effect=failing) as ocr:
             self.ui.observe();self.ui.observe();self.assertEqual(ocr.call_count,2)
+    def test_retained_native_frame_reuses_analysis_but_its_own_path(self):
+        with patch('civ2.ui.recognize',side_effect=self.recognize) as ocr:
+            captured=self.ui.observe()
+            retained=Path(self.directory.name)/'native-middle.png'
+            retained.write_bytes(self.game.data)
+            result=UI.recognize_retained(self.ui,retained,recognizer=ocr)
+            self.assertEqual(ocr.call_count,1);self.assertEqual(self.game.calls,1)
+            self.assertEqual(self.ui.counter,1)
+            self.assertEqual(result['path'],str(retained))
+            self.assertNotEqual(result['path'],captured['path'])
+            result['lines'][0]['text']='changed'
+            self.assertEqual(self.ui.recognize_retained(retained)['text'],'End of Turn')
+            retained.write_bytes(png('black'))
+            changed=self.ui.recognize_retained(retained)
+            self.assertNotEqual(changed['sha256'],captured['sha256'])
+            self.assertEqual(ocr.call_count,2);self.assertEqual(self.game.calls,1)
     def test_changed_recognizer_not_cached(self):
         with patch('civ2.ui.recognize',side_effect=self.recognize):self.ui.observe()
         with patch('civ2.ui.recognize',side_effect=self.recognize) as replacement:

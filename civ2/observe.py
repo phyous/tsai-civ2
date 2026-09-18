@@ -608,26 +608,35 @@ def _recover_stolen_advance_notice(image,rows,executable,directory,evidence):
 
 
 def _recover_capture_notice_title(image,rows,executable,directory,evidence):
-    """Retain a paired title reading above complete original capture prose."""
+    """Read the complete capture title/prose while preserving names and amounts."""
     if image.size!=(640,480):return
     controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help','continue')]
     titles=[r for r in rows if r['confidence']>=.8 and 100<=r['center'][1]<=160
             and 300<=r['center'][0]<=340 and _near_text(r['text'].casefold(),'defense minister',6)]
     if len(controls)!=1 or controls[0]['text']!='OK' or len(titles)!=1:return
     old=titles[0];ok=controls[0]
-    if old['text'] in ('Defense Minister','Defense Mfinister') or abs(old['center'][0]-ok['center'][0])>8:return
+    if abs(old['center'][0]-ok['center'][0])>8:return
     body=sorted([r for r in rows if 296<=r['bounds'][0]<=320
                  and old['center'][1]<r['center'][1]<ok['center'][1]-12],key=lambda r:r['center'][1])
     if len(body)!=2 or any(r['confidence']<.8 for r in body):return
-    if (not re.fullmatch(r'[A-Za-z -]{2,60} (?:capture|liberate|captured|liberated) [A-Za-z -]{2,60}\. [0-9]{1,6} gold pieces',body[0]['text'])
-            or body[1]['text']!='plundered.'):return
-    a=_crop_text(image,old,'capture_title_rgb4',executable,directory,evidence,padding=(3,3),scale=4)
-    b=_crop_text(image,old,'capture_title_gray4',executable,directory,evidence,padding=(3,3),scale=4,grayscale=True)
-    if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
-            or a[0]['text'] not in ('Defense Minister','Defense Mfinister')
-            or min(a[0]['confidence'],b[0]['confidence'])<.8
-            or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
-    if _replace_crop_row(rows,rows.index(old),a,lambda before,after:True):a[0]['provenance']+=b[0]['provenance']
+    match=re.fullmatch(r'([A-Za-z -]{2,60} (?:capture|liberate|captured|liberated) [A-Za-z -]{2,60})[.,] ([0-9]{1,6} gold pieces)',body[0]['text'])
+    if not match or body[1]['text'] not in ('plundered.','Splundered.'):return
+    tasks=[]
+    if old['text'] not in ('Defense Minister','Defense Mfinister'):
+        tasks.append((old,'title',4,('Defense Minister','Defense Mfinister')))
+    for row,name,wanted in ((body[0],'body',match[1]+'. '+match[2]),(body[1],'tail','plundered.')):
+        if row['text']!=wanted:tasks.append((row,name,3,(wanted,)))
+    recovered=[]
+    for row,name,scale,wanted in tasks:
+        a=_crop_text(image,row,f'capture_{name}_rgb{scale}',executable,directory,evidence,padding=(3,3),scale=scale)
+        b=_crop_text(image,row,f'capture_{name}_gray{scale}',executable,directory,evidence,padding=(3,3),scale=scale,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text'] or a[0]['text'] not in wanted
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(row,a[0]) or not _same_location(a[0],b[0])):return
+        recovered.append((row,a[0],b[0]))
+    for row,a,b in recovered:
+        a['provenance']=row['provenance']+a['provenance']+b['provenance']
+        rows[rows.index(row)]=a
 
 
 def _recover_foreign_completion_title(image,rows,executable,directory,evidence):
@@ -1457,10 +1466,12 @@ def _recover_withdrawal_warning(image,rows,executable,directory,evidence):
     panel.sort(key=lambda r:r['center'][1])
     if (len(panel)!=6 or panel[0]['text']!='"Your troops have violated the territory of our'
             or not re.fullmatch(r'city of [A-Za-z -]{2,60}\. By the terms of our peace',panel[1]['text'])
-            or panel[2]['text'] not in ('treaty, you must withdraw inmediately or face','treaty, you must withdraw immediately or face')
+            or panel[2]['text'] not in ('treaty, you must withdraw inmediately or face','treaty, you must withdraw immediately or face',
+                                      'freaty, you must withdraw immediately or face')
             or panel[3]['text']!='the consequences! Will you comply?"'
             or panel[4]['text'] not in ('O Withdraw troops to nearest city.','Withdraw troops to nearest city.')
-            or panel[5]['text'] not in ('"No! We renounce this worthless treaty!"','• "No! We renounce this worthless treaty!"')
+            or panel[5]['text'] not in ('"No! We renounce this worthless treaty!"','• "No! We renounce this worthless treaty!"',
+                                      'O "No! We renounce this worthless treaty!"')
             or any(r['confidence']<.8 for r in [*titles,*panel,*buttons])):return
     recovered=[]
     for i,wanted in ((2,'treaty, you must withdraw immediately or face'),(4,'Withdraw troops to nearest city.'),
@@ -1472,9 +1483,18 @@ def _recover_withdrawal_warning(image,rows,executable,directory,evidence):
         if (i==4 and len(a)==len(b)==1 and a[0]['text']==b[0]['text']=='Withdraw troopsto nearest city.'):
             a=_crop_text(image,old,'withdrawal_4_wide_rgb3',executable,directory,evidence,padding=(6,3),scale=3)
             b=_crop_text(image,old,'withdrawal_4_wide_gray3',executable,directory,evidence,padding=(6,3),scale=3,grayscale=True)
+        prior=[]
+        if (i==5 and old['text']=='O '+wanted and len(a)==len(b)==1
+                and a[0]['text']==b[0]['text']=='• '+wanted
+                and min(a[0]['confidence'],b[0]['confidence'])>=.8
+                and _same_location(old,a[0]) and _same_location(a[0],b[0])):
+            prior=a[0]['provenance']+b[0]['provenance']
+            a=_crop_text(image,old,'withdrawal_5_rgb2',executable,directory,evidence,padding=(4,4),scale=2)
+            b=_crop_text(image,old,'withdrawal_5_gray2',executable,directory,evidence,padding=(4,4),scale=2,grayscale=True)
         if (len(a)!=1 or len(b)!=1 or a[0]['text']!=wanted or b[0]['text']!=wanted
                 or min(a[0]['confidence'],b[0]['confidence'])<.8
                 or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+        a[0]['provenance']=prior+a[0]['provenance']
         recovered.append((old,a[0],b[0]))
     for old,a,b in recovered:
         a['provenance']=old['provenance']+a['provenance']+b['provenance']

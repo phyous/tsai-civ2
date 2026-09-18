@@ -28,7 +28,7 @@ class CompactStateTests(unittest.TestCase):
         self.assertEqual(original,before)
         self.assertEqual(expand_model_state(compact),decision_facts(original))
         self.assertEqual(compact['owned_unit_roster']['$table'],TABLE)
-        self.assertEqual(compact['planning'],original['planning'])
+        self.assertEqual(expand_model_state(compact)['planning'],original['planning'])
         self.assertEqual(compact['selected_unit'],original['selected_unit'])
         self.assertEqual(compact['map'],original['map'])
         self.assertEqual(compact['strategic_playbook'],original['strategic_playbook'])

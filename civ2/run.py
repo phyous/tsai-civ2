@@ -282,6 +282,7 @@ def _native_map_fallback(session, observation, dialog, resources, _attempt=0, *,
     """Bounded read-only attempts for a map proof still visible on the canvas."""
     from .native_map import LEFT_MAP_REASON, archive_read, footer_blink_context
     from .observe import recognize
+    from .ui import UI
     if (getattr(session, 'observer', None) is None or dialog.get('supported')
             or dialog.get('kind') != 'unknown' or dialog.get('reason') != LEFT_MAP_REASON):
         return observation, dialog
@@ -298,7 +299,7 @@ def _native_map_fallback(session, observation, dialog, resources, _attempt=0, *,
             raise ValueError('Native map context must return paused with no held input')
         state, context, artifact, receipt = archive_read(session.journal,value,status['inputSequence'])
         middle = session.journal.directory/receipt['source_images'][1]
-        fresh = recognize(middle);fresh['path'] = str(middle)
+        fresh = UI.recognize_retained(session.ui,middle,recognizer=recognize)
         classified = classify_dialog(fresh,rules=session.rules,game_text=resources,labels_text=labels_text(),
                                      state=state,native_map_context=context)
         # The observer's middle image is bracketed by its native snapshots,
@@ -316,7 +317,7 @@ def _native_map_fallback(session, observation, dialog, resources, _attempt=0, *,
             changed_frame=True
             context=footer_blink_context(context,middle.read_bytes(),current_png)
             current_path=session.journal.directory/current_artifact['path']
-            fresh=recognize(current_path);fresh['path']=str(current_path)
+            fresh=UI.recognize_retained(session.ui,current_path,recognizer=recognize)
             if fresh['sha256']!=current_hash:raise ValueError('Current native map image changed during recognition')
             classified=classify_dialog(fresh,rules=session.rules,game_text=resources,labels_text=labels_text(),
                                       state=state,native_map_context=context)

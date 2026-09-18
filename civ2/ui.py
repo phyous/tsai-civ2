@@ -38,14 +38,20 @@ class UI:
         self.counter += 1
         path = self.directory / f'ui-{self.counter:07d}.png'
         self.game.capture(path)
+        return self.recognize_retained(path,retain_unreadable=retain_unreadable)
+
+    def recognize_retained(self, path, *, retain_unreadable=False, recognizer=None):
+        """Analyze retained PNG bytes; no capture or game input is performed."""
+        path=Path(path)
+        recognizer=recognize if recognizer is None else recognizer
         # Capture every time. Reuse only analysis of identical original PNG
         # bytes, never an old screen, path, cursor state or model decision.
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         executable = Path(__file__).resolve().parents[1]/'.runtime/ocr'
         stat = executable.stat() if executable.is_file() else None
-        key = (digest, recognize, None if stat is None else
+        key = (digest, recognizer, None if stat is None else
                (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-        if not hasattr(self, '_recognition_cache'):
+        if not isinstance(getattr(self, '_recognition_cache', None), OrderedDict):
             self._recognition_cache = OrderedDict()
         cache = self._recognition_cache
         if key in cache:
@@ -53,7 +59,7 @@ class UI:
             cache.move_to_end(key)
         else:
             try:
-                observation = recognize(path)
+                observation = recognizer(path)
             except ValueError as error:
                 if not retain_unreadable or str(error) != 'Invalid normalized OCR geometry':
                     raise

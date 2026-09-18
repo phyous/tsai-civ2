@@ -37,6 +37,22 @@ observed events. This addressed a measured `max_tokens_exceeded` response in
 attempt 010: its next compact planning call retained all 64 choices and used
 23,361 input tokens.
 
+
+The compatible extended table encoding also handles keyed planning records,
+common columns, grouped record shapes and nested coordinate-record lists. Its
+metadata describes every representation explicitly, and the decoder still
+accepts unchanged legacy requests. Groups must cover each original record index
+exactly once; dictionary keys are unique and retain their original order.
+Shared values cannot overlap varying fields, and null, false, zero, empty and
+absent values remain distinct. Literal reserved table markers in unencoded
+data are rejected rather than interpreted as observations.
+
+For the retained failed attempt012 request552, this representation reduces
+complete JSON from 82,977 to 75,138 characters (9.45%) while decoding to exactly
+the same game facts and retaining all 64 planning targets and every question.
+This character reduction is measured offline; API token usage and acceptance
+must be measured from the next real request.
+
 The labor description now reflects the completed twenty-position calibration.
 Only separately offered city actions after a fresh native checkpoint authorize
 labor inputs; specialist-type cycling remains unavailable.

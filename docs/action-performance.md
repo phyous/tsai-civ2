@@ -92,3 +92,16 @@ encoder logs when checked. They were still recording, so this is not final
 video verification. Faster processing must preserve continuous real-time
 recording, every actual model choice, all ordinary-input receipts, and the
 no-saves-during-playthrough boundary.
+
+Retained native-map images now use the same bounded OCR cache as ordinary UI
+captures. The key includes the complete PNG SHA-256, recognizer identity and
+OCR executable metadata. A cache hit returns a deep copy with the current
+artifact path; it does not reuse a native snapshot, actor binding, classification,
+input receipt or old capture. All original before/after status and image checks
+remain in place. Failed OCR analyses are not cached.
+
+A read-only sample of 100 successful responses from each of attempts 010–012
+found 67 native-map middle images identical to their already-recognized trigger.
+Six offline image measurements took 239–696 ms for cold OCR and 51–55 ms for
+cached analysis. These are component measurements, not a claimed end-to-end
+speedup; development pauses and newly encountered dialogs still dominate.

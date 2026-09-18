@@ -39,6 +39,48 @@ class WithdrawalPixels(unittest.TestCase):
                 self.assertEqual(len(original[3]['provenance']),3);self.assertEqual(len(original[5]['provenance']),3)
             else:self.assertEqual(original,before)
 
+    def test_treaty_word_and_observed_radio_residual_require_complete_pixel_reads(self):
+        for case in ('valid','wrong_treaty','peer','weak','missing_choice'):
+            original=rows();original[3]['text']='freaty, you must withdraw immediately or face'
+            original[6]['text']='O '+original[6]['text']
+            if case=='missing_choice':original.pop(5)
+            before=deepcopy(original)
+            def crop(image,old,mode,*args,**kwargs):
+                fresh=deepcopy(old)
+                if 'withdrawal_2' in mode:
+                    fresh['text']='treaty, you must withdraw immediately or face'
+                    if case=='wrong_treaty':fresh['text']='treaty, you may withdraw immediately or face'
+                elif 'withdrawal_4' in mode:fresh['text']='Withdraw troops to nearest city.'
+                else:
+                    fresh['text']='"No! We renounce this worthless treaty!"'
+                    if kwargs['scale']==3:fresh['text']='• '+fresh['text']
+                    elif case=='peer' and kwargs.get('grayscale'):fresh['text']='"Yes! We accept this treaty!"'
+                    elif case=='weak':fresh['confidence']=.5
+                return [fresh]
+            with self.subTest(case=case),patch('civ2.observe._crop_text',side_effect=crop):
+                _recover_withdrawal_warning(Image.new('RGB',(640,480)),original,None,None,{})
+            if case=='valid':
+                self.assertEqual(original[3]['text'],'treaty, you must withdraw immediately or face')
+                self.assertEqual(original[6]['text'],'"No! We renounce this worthless treaty!"')
+                self.assertEqual(len(original[6]['provenance']),5)
+                self.assertEqual(original[0],before[0]);self.assertEqual(original[2],before[2])
+            else:self.assertEqual(original,before)
+
+    def test_actual_toledo_preserves_two_complete_treaty_choices(self):
+        p=Path('runs/attempt-011/screens/ui-0002868.png')
+        if not p.exists():self.skipTest('Private original frame absent')
+        from civ2.run import game_text
+        from civ2.dialogs import classify_dialog
+        o=recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'VIOLATOR')
+        self.assertTrue(d['requires_model']);self.assertIsNone(d['mechanical_action'])
+        self.assertEqual([r['text']for r in d['options']],['Withdraw troops to nearest city.','"No! We renounce this worthless treaty!"'])
+        body=next(r for r in o['lines'] if r['text'].startswith('treaty,'))
+        self.assertTrue(body['provenance'][0]['text'].startswith('freaty,'))
+        refusal=next(r for r in o['lines'] if r['text'].startswith('"No!'))
+        self.assertEqual([r.get('scale') for r in refusal['provenance'][1:]],[3,3,2,2])
+        self.assertIn('Toledo',d['visible_text'])
+
     def test_actual_seville_warning_needs_full_spaced_radio_read(self):
         p=Path('runs/attempt-012/screens/ui-0002149.png')
         if not p.exists():self.skipTest('Private original frame absent')

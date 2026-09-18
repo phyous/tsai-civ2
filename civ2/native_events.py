@@ -16,6 +16,7 @@ from .notice_icons import proven_notice_icon
 
 
 EVENT_TITLES = {
+    'GOLDENAGE': 'golden age of philosophy',
     'NEWFORTRESS': 'new order: fortress',
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
@@ -92,6 +93,9 @@ TRADE_NOTICE_RESOURCES = {
 }
 ORDER_NOTICE_RESOURCES = {
     'NEWFORTRESS': '7008caabad90b14e8e354ed60484e54359857ebf4f5da5284f35630d45028f8c',
+}
+PHILOSOPHY_NOTICE_RESOURCES = {
+    'GOLDENAGE': 'b8fae752a1051a78b7f42dbf360d7473c55bbeb5acf8baecb5d7302987d2b135',
 }
 FOREIGN_NOTICE_RESOURCES = {
     'BUILT2': '2c09eb9b67c932e3391f839b3df04e5512edf656bc324a0c66adb8f7ef9a5427',
@@ -239,7 +243,7 @@ def classify_information(observation, resources, *, placeholder_values=None):
             continue
         pinned_hash = (COMBAT_NOTICE_RESOURCES.get(tag) or TRADE_NOTICE_RESOURCES.get(tag)
                        or FOREIGN_NOTICE_RESOURCES.get(tag) or SPACE_NOTICE_RESOURCES.get(tag)
-                       or ORDER_NOTICE_RESOURCES.get(tag))
+                       or ORDER_NOTICE_RESOURCES.get(tag) or PHILOSOPHY_NOTICE_RESOURCES.get(tag))
         pinned = pinned_hash is not None
         if pinned and hashlib.sha256(json.dumps(resource, sort_keys=True,
                 separators=(',', ':'), ensure_ascii=False).encode()).hexdigest() != pinned_hash:
