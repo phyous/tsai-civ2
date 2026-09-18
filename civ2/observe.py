@@ -239,14 +239,17 @@ def _recover_expanded_status(image,rows,executable,directory,evidence):
         _recover_status(rows,raw,evidence['conflicts'],crop=crop,name=name,scale=3,threshold=threshold)
 
 
-def _crop_text(image, row, name, executable, directory, evidence, *, white=False, padding=(6,3), grayscale=False, white_threshold=None, scale=None):
+def _crop_text(image, row, name, executable, directory, evidence, *, white=False, padding=(6,3), grayscale=False, white_threshold=None, black_threshold=None, scale=None):
     """Read actual row pixels again; preserve source coordinates and provenance."""
     x,y,w,h=row['bounds']
     px,py=padding
     box=(max(0,x-px),max(0,y-py),min(image.width,x+w+px),min(image.height,y+h+py))
     crop=image.crop(box);scale=(4 if white else 3) if scale is None else scale
     if type(scale) is not int or scale not in (2,3,4):raise ValueError('Unsupported bounded OCR scale')
-    if white:crop=crop.point(lambda v:0 if v>=230 else 255).convert('L')
+    if black_threshold is not None and (type(black_threshold) is not int or black_threshold!=70 or white or white_threshold is not None or grayscale):
+        raise ValueError('Unsupported bounded black-glyph transform')
+    if black_threshold is not None:crop=crop.convert('L').point(lambda value:0 if value<=black_threshold else 255)
+    elif white:crop=crop.point(lambda v:0 if v>=230 else 255).convert('L')
     elif white_threshold is not None:
         rgb=crop.convert('RGB');crop=Image.new('L',rgb.size)
         crop.putdata([0 if min(pixel)>=white_threshold else 255 for pixel in rgb.getdata()])
@@ -265,7 +268,8 @@ def _crop_text(image, row, name, executable, directory, evidence, *, white=False
         candidate=_prepare_rows([mapped],image.width,image.height,name)[0]
         candidate['provenance'][0].update(crop=list(box),scale=scale,
             normalized_crop_bounds=[nx,ny,nw,nh],transform='RGB>=230 inverted to black; nearest' if white else
-            (f'all RGB channels>={white_threshold} to black; bicubic enlargement' if white_threshold is not None else
+            (f'L<={black_threshold} to black; others white; bicubic enlargement' if black_threshold is not None else
+             f'all RGB channels>={white_threshold} to black; bicubic enlargement' if white_threshold is not None else
              ('grayscale; bicubic enlargement' if grayscale else 'bicubic enlargement')))
         result.append(candidate)
     return result
@@ -924,9 +928,18 @@ def _recover_support_notice(image,rows,executable,directory,evidence):
     for index,row,expected,name in ((*titles[0],'Military Advisor','title'),(bi,br,expected_body,'body')):
         a=_crop_text(image,row,'support_'+name+'_rgb2',executable,directory,evidence,padding=(6,6),scale=2)
         b=_crop_text(image,row,'support_'+name+'_gray2',executable,directory,evidence,padding=(6,6),scale=2,grayscale=True)
-        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=expected or b[0]['text']!=expected
-                or min(a[0]['confidence'],b[0]['confidence'])<.8
-                or not _same_location(row,b[0]) or not _same_location(a[0],b[0])):return
+        def valid():
+            return (len(a)==len(b)==1 and a[0]['text']==b[0]['text']==expected
+                    and min(a[0]['confidence'],b[0]['confidence'])>=.8
+                    and _same_location(row,b[0]) and _same_location(a[0],b[0]))
+        if not valid() and len(a)==len(b)==1 and a[0]['text']==b[0]['text']:
+            if name=='title' and _near_text(a[0]['text'].casefold(),'military advisor',3):
+                a=_crop_text(image,row,'support_title_rgb4',executable,directory,evidence,padding=(3,3),scale=4)
+                b=_crop_text(image,row,'support_title_gray4',executable,directory,evidence,padding=(3,3),scale=4,grayscale=True)
+            elif name=='body' and a[0]['text'] in (row['text'],expected.replace('disbanded','dishanded')):
+                a=_crop_text(image,row,'support_body_black70_2x',executable,directory,evidence,padding=(6,6),scale=2,black_threshold=70)
+                b=_crop_text(image,row,'support_body_black70_3x',executable,directory,evidence,padding=(6,6),scale=3,black_threshold=70)
+        if not valid():return
         a[0]['provenance']=row['provenance']+a[0]['provenance']+b[0]['provenance'];replacements.append((index,a[0]))
     for index,row in replacements:rows[index]=row
 
