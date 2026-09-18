@@ -33,6 +33,34 @@ class HeraldOptionPixels(unittest.TestCase):
             else:self.assertEqual(rows,before)
             if case=='extra_button':crop.assert_not_called()
 
+    def test_discussion_completion_needs_observed_period_and_unchanged_words(self):
+        old=prepared('"Consider this discussion complete!"',345,320,248,17)
+        fresh=prepared('"Consider this discussion complete."',345,320,248,17)
+        for case in ('valid','disagree','word','unchanged','missing_context'):
+            rows=[prepared('TEST Emissary',404,272,132,14),prepared('You respond: "We..."',308,282,140,17),deepcopy(old),prepared('OK',455,454,25,13)]
+            if case=='missing_context':rows[1]['text']='Other context'
+            peer=deepcopy(fresh)
+            if case=='disagree':peer['text']=old['text']
+            if case=='word':peer['text']='"Consider this alliance complete."'
+            if case=='unchanged':peer=deepcopy(old)
+            before=deepcopy(rows)
+            with patch.object(observe,'_crop_text',side_effect=lambda *a,**kw:[deepcopy(peer if kw.get('grayscale') or case in ('word','unchanged') else fresh)]):
+                observe._recover_herald_options(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            if case=='valid':self.assertEqual(rows[2]['text'],fresh['text'])
+            else:self.assertEqual(rows,before)
+
+    def test_actual_five_choice_discussion_menu_keeps_all_alternatives(self):
+        p=Path('runs/attempt-011/screens/ui-0002258.png')
+        if not p.exists():self.skipTest('Private original menu unavailable')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model']);self.assertEqual(len(d['options']),5)
+        self.assertEqual(d['options'][0]['text'],'"Consider this discussion complete."')
+        self.assertIsNone(d['mechanical_action'])
+        row=next(r for r in o['lines'] if r['text']==d['options'][0]['text'])
+        self.assertIn(row['provenance'][0]['text'],('"Consider this discussion complete!"','"\'Consider this discussion complete."'))
+
     def test_optional_original_010_has_all_three_source_choices(self):
         root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-010/screens/ui-0000521.png'
         if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original trade absent')

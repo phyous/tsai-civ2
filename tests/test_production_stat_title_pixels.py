@@ -20,8 +20,11 @@ class ProductionStatTitlePixels(unittest.TestCase):
             rows=self.fixture();a=deepcopy(rows[2]);a['text']='(20 Turns, ADM: 0/1/1 HP: 2/1)'
             b=deepcopy(a)
             if changed:b['text']='(19 Turns, ADM: 0/1/1 HP: 2/1)'
+            def crop(image,old,name,*args,**kwargs):
+                if name.startswith('production_title'):return []
+                return [deepcopy(b if '_gray_' in name else a)]
             with patch.object(observe,'_production_names',return_value={'settlers'}),patch.object(
-                    observe,'_crop_text',side_effect=[[a],[b],[a],[b]]):
+                    observe,'_crop_text',side_effect=crop):
                 observe._recover_city_and_production_rows(Image.new('RGB',(640,480)),rows,None,None,{})
             self.assertEqual(rows[0]['text'],self.fixture()[0]['text'])
             self.assertEqual(rows[2]['text'],self.fixture()[2]['text'] if changed else a['text'])

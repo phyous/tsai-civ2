@@ -597,6 +597,65 @@ def _unit_health_resolved(unit, specification):
     return type(hp) is int and hp>0
 
 
+def _composition_context(rules, own, cities):
+    """Compact current roster/orders/builds, with no tactical adequacy rating."""
+    fields=('domain','role','attack','defense','movement','max_hp','shield_cost')
+    def unit_spec(identifier):
+        found=[r for r in rules.get('units',[]) if isinstance(r,dict) and type(r.get('id')) is int and r['id']==identifier]
+        if (len(found)!=1 or not isinstance(found[0].get('name'),str)
+                or any(type(found[0].get(k)) is not int or found[0][k]<0 for k in fields)
+                or found[0]['domain'] not in (0,1,2) or not 0<=found[0]['role']<=7
+                or found[0]['max_hp']<=0):return None
+        return {k:deepcopy(found[0][k]) for k in ('name',*fields)}
+    by_type=[];unknown=[];unresolved=[];unknown_orders=[]
+    role_counts=Counter();orders=Counter()
+    for identifier in sorted({u.get('type_id') for u in own},key=str):
+        members=[u for u in own if u.get('type_id')==identifier];spec=unit_spec(identifier)
+        healthy=[];type_orders=Counter()
+        for unit in members:
+            order=unit.get('order_id')
+            if type(order) is int and 0<=order<=255:orders[str(order)]+=1;type_orders[str(order)]+=1
+            else:unknown_orders.append(unit['id'])
+            hp,lost=unit.get('hp'),unit.get('hp_lost')
+            resolved=(spec is not None and _unit_health_resolved(unit,spec)
+                      and not(type(hp)is int and type(lost)is int and hp+lost!=spec['max_hp']))
+            if resolved:healthy.append(unit);role_counts[str(spec['role'])]+=1
+            else:unresolved.append(unit['id'])
+            if spec is None:unknown.append(unit['id'])
+        by_type.append(dict(type_id=identifier,original_specification=spec,
+            observed_count=len(members),resolved_positive_hp_count=len(healthy),
+            unresolved_hp_count=len(members)-len(healthy),order_id_counts=dict(sorted(type_orders.items()))))
+    builds=[];unknown_builds=[]
+    groups={}
+    for city in cities:
+        item=city.get('production',{})
+        if (not isinstance(item,dict) or item.get('kind') not in ('unit','improvement')
+                or type(item.get('id')) is not int or item['id']<0):
+            unknown_builds.append(city['id']);continue
+        groups.setdefault((item['kind'],item['id']),[]).append(city)
+    for (kind,identifier),members in sorted(groups.items()):
+        spec=unit_spec(identifier) if kind=='unit' else None
+        if kind=='improvement':
+            found=[r for r in rules.get('improvements',[]) if isinstance(r,dict) and type(r.get('id'))is int and r['id']==identifier]
+            if (len(found)==1 and isinstance(found[0].get('name'),str)
+                    and found[0].get('kind') in ('building','wonder','capitalization')
+                    and all(type(found[0].get(k))is int and found[0][k]>=0 for k in ('shield_cost','upkeep'))):
+                spec={k:deepcopy(found[0][k]) for k in ('name','kind','shield_cost','upkeep')}
+        if spec is None:unknown_builds.extend(c['id'] for c in members)
+        builds.append(dict(record_type=kind,type_id=identifier,original_specification=spec,
+            city_count=len(members),city_ids=[c['id'] for c in members],
+            observed_names=sorted({c['production']['name'] for c in members if isinstance(c['production'].get('name'),str)}),
+            missing_observed_name_count=sum(not isinstance(c['production'].get('name'),str) for c in members)))
+    return dict(owned_types=by_type,observed_order_id_counts=dict(sorted(orders.items())),
+        fortified_record_count=orders.get('2',0),resolved_positive_hp_counts_by_original_role=dict(sorted(role_counts.items())),
+        resolved_worker_count=role_counts.get('5',0),resolved_trade_count=role_counts.get('7',0),
+        resolved_diplomatic_count=role_counts.get('6',0),
+        current_production_groups=builds,unknown_specification_unit_ids=sorted(unknown),
+        unresolved_hp_unit_ids=sorted(unresolved),unknown_order_unit_ids=sorted(unknown_orders),
+        unknown_production_specification_city_ids=sorted(unknown_builds),
+        note='Current owned records and original RULES base statistics only. Order2 means fortified; order255 means no standing order, not available movement. Counts do not establish adequate defense, effective combat strength, safety or a preferred build. Production groups are current repeated assignments, not completed units, completion dates or presently offered alternatives. Unknown specifications and unresolved HP stay explicit; no native effect or route is forecast.')
+
+
 def _empire_readiness(observation, rules, own, cities, specifications):
     """Compact arithmetic over owned records and original rules, never a forecast."""
     unresolved={u['id'] for u in own if not _unit_health_resolved(u,specifications.get(str(u['type_id']),{}))}
@@ -619,6 +678,7 @@ def _empire_readiness(observation, rules, own, cities, specifications):
     return {'source':('Owned records from the bound live memory observation and original RULES.TXT'
                       if observation_key(observation)=='observation_sha256' else
                       'Owned records from the bound native save and original RULES.TXT'),
+        'composition':_composition_context(rules,own,cities),
         'owned_armed_unit_count':len(armed),'owned_worker_unit_count':len(workers),
         'unknown_unit_specification_count':len(unknown),'city_garrisons':garrisons,
         'unresolved_native_unit_ids':sorted(unresolved),

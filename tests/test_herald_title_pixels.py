@@ -14,6 +14,22 @@ def row(text,x=390,y=262,w=158,h=14):
 
 
 class HeraldTitleTests(unittest.TestCase):
+    def test_original_peace_header_keeps_observed_prefix_and_both_terms(self):
+        p=Path('runs/attempt-012/screens/ui-0001789.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text,labels_text
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        o=recognize(p);d=classify_dialog(o,rules=parse_rules(original_rules()),game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model'])
+        self.assertEqual(d['resource_tag'],'PROPOSEPEACE')
+        self.assertEqual([v['text'] for v in d['options']],['"Yes, we welcome peace with the Sioux."',
+            '"No, your terms are not acceptable."'])
+        title=next(r for r in o['lines'] if r['text']=='Uncooperative Siour Emissary')
+        self.assertEqual([r['text'] for r in title['provenance']],['Uncooperative Siour Emisoury',
+            'Uncooperative Siour Emissary','Uncooperative Siour Emissary'])
+
     def fixture(self):
         return [row('Neutral TEST Enussary'),row('OK',456,454,26,16)]
 

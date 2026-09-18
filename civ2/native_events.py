@@ -16,6 +16,7 @@ from .notice_icons import proven_notice_icon
 
 
 EVENT_TITLES = {
+    'NEWFORTRESS': 'new order: fortress',
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
     'DESTROYED': 'defense minister',
@@ -27,6 +28,9 @@ EVENT_TITLES = {
     'FOODCARAVAN': 'trade route',
     'CARAVANOTHER': 'trade route',
     'CARAVANHOME': 'civ rules: trade units',
+    'BADSPACE': 'excess spaceship parts',
+    'NOSPACESHIPS': 'space ships',
+    **dict.fromkeys(('SPACERACE','LAUNCHED','NOFURTHER','SPACERETURNS','SPACEDESTROYED'), 'science advisor'),
     'SNEAK': 'defense minister',
     'SURPRISESCROLLS': 'village',
     'SURPRISEMETALS': 'village',
@@ -34,6 +38,7 @@ EVENT_TITLES = {
     'TERMS': 'foreign minister',
     'WITHDRAWN': 'foreign minister',
     'WITHDRAWN1': 'foreign minister',
+    'BUILT2': 'foreign advisor',
     **dict.fromkeys(('STARTWONDER','SWITCHWONDER','ABANDONWONDER','ALMOSTWONDER'), 'travellers report'),
     **dict.fromkeys(('DECREASE', 'FOODSHORTAGE', 'BUILT', 'BUILT3', 'DISORDER',
                      'RESTORED', 'WELOVEKING', 'WEDONTLOVEKING', 'FURTHERGROWTH',
@@ -56,6 +61,12 @@ TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
                  'CIVADVANCE': {'ciadization advance', 'cialization advance', 'cinlization adsance', 'cinlization advance'},
                  # Original006/608: complete destruction notice and sole OK.
                  'DESTROYED': {'detense ifinister'},
+                 # Original010/2521: two independent 4x title crops, full
+                 # pinned capture/plunder notice and the sole aligned OK.
+                 'CITYCAPTURE': {'defense mfinister'},
+                 # Original010/2533: independent title/body crops after the
+                 # Hispalis capture, with the complete pinned TOOKCIV notice.
+                 'TOOKCIV': {'cialization advance stolen!'},
                  # Original009/570: full sneak-attack body and sole OK.
                  'SNEAK': {'detense mfinister'},
                  # Original011/1245: complete source treaty-withdrawal reminder,
@@ -78,6 +89,21 @@ TRADE_NOTICE_RESOURCES = {
     'FOODCARAVAN': '8d11a59207b1740e82c609c1d2360e28156aec5656290193feb35ca7152036c9',
     'CARAVANHOME': 'b27f78a773aeab795a9a70211c3274edf4ba8caec0bd6feaa755e49b4b632418',
     'CARAVANOTHER': '580ee3496eb05f126e9d2660ced4efec6fc3e5cf5ac3d66174252558cb178e8c',
+}
+ORDER_NOTICE_RESOURCES = {
+    'NEWFORTRESS': '7008caabad90b14e8e354ed60484e54359857ebf4f5da5284f35630d45028f8c',
+}
+FOREIGN_NOTICE_RESOURCES = {
+    'BUILT2': '2c09eb9b67c932e3391f839b3df04e5512edf656bc324a0c66adb8f7ef9a5427',
+}
+SPACE_NOTICE_RESOURCES = {
+    'BADSPACE':'fb52834c18c6ab1d0a0c0df09e9db4a0e578ddc7244656c075d4ab35ba410044',
+    'SPACERACE':'b0858a7a0044cfe83240c58ef8408e3758c6ead7c55af1bd63fa9daf27d87c64',
+    'LAUNCHED':'f72afe8d8b70d5dd437a65e110f30ed0dd09f8252945e4b79f230e4616c6737b',
+    'NOFURTHER':'31fee19ab5b62e9be404bc6bfba069164645211a5c17bcad337f0ad151f94679',
+    'SPACERETURNS':'55569f9db9b0930cac78f901a0e0c4d0a758f5408bddbaeff92e56af68528852',
+    'SPACEDESTROYED':'735a70a9192b7b758f5c717ca6fea505c9dad4338fe0273c2dd89e7551c2eef8',
+    'NOSPACESHIPS':'b49256ff98ffcff01e9883a2ab25574fbdb2ea767a697d65e4e8d7e9e7ed4deb',
 }
 # Original LABELS.TXT lines191–194; do not let a variable verb absorb a choice.
 CAPTURE_VERBS = ('capture', 'liberate', 'captured', 'liberated')
@@ -211,7 +237,9 @@ def classify_information(observation, resources, *, placeholder_values=None):
             continue
         if tag in RULE_REJECTIONS and _normal(body or '') != _normal(RULE_REJECTIONS[tag]):
             continue
-        pinned_hash = COMBAT_NOTICE_RESOURCES.get(tag) or TRADE_NOTICE_RESOURCES.get(tag)
+        pinned_hash = (COMBAT_NOTICE_RESOURCES.get(tag) or TRADE_NOTICE_RESOURCES.get(tag)
+                       or FOREIGN_NOTICE_RESOURCES.get(tag) or SPACE_NOTICE_RESOURCES.get(tag)
+                       or ORDER_NOTICE_RESOURCES.get(tag))
         pinned = pinned_hash is not None
         if pinned and hashlib.sha256(json.dumps(resource, sort_keys=True,
                 separators=(',', ':'), ensure_ascii=False).encode()).hexdigest() != pinned_hash:
@@ -221,7 +249,7 @@ def classify_information(observation, resources, *, placeholder_values=None):
             continue
         if tag == 'CITYCAPTURE':
             tag_values = {**tag_values, 'STRING3': CAPTURE_VERBS}
-        if tag in ('BUILT', 'BUILT3') and not tag_values.get('STRING3'):
+        if tag in ('BUILT', 'BUILT2', 'BUILT3') and not tag_values.get('STRING3'):
             continue
         # TOOKCIV has only "take" as fixed prose. Its complete source hash and
         # exact distinctive title permit four letters for that template alone.

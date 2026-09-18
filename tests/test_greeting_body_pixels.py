@@ -86,6 +86,35 @@ class GreetingBodyPixels(unittest.TestCase):
                 self.assertEqual(rows[2]['text'],tail['text'])
                 self.assertEqual(rows[2]['provenance'][-1]['scale'],2)
 
+    def test_greetings03_preserves_pronoun_name_and_requires_two_tail_reads(self):
+        for pronoun in ('he','she'):
+            for changed in (False,True):
+                rows=self.rows();rows[1]['text']=f'"I speak for {pronoun} who makes mortals tremble:'
+                rows[2]=prepared('Empress TEST of the TEST ....',308,425,251,16)
+                tail=dict(text='Empress TEST of the TEST ..."',confidence=1,x=.01,y=.06,width=.94,height=.77)
+                second=deepcopy(tail)
+                if changed:second['text']='Empress OTHER of the TEST ..."'
+                before=deepcopy(rows)
+                with tempfile.TemporaryDirectory() as directory,patch.object(observe,'_crop_text') as crop,patch.object(
+                        observe,'_run_ocr',side_effect=[[tail],[second]]):
+                    observe._recover_greeting_body(Image.new('RGB',(640,480)),rows,None,directory,{'passes':[]})
+                crop.assert_not_called();self.assertEqual(rows[1],before[1])
+                if changed:self.assertEqual(rows,before)
+                else:self.assertEqual(rows[2]['text'],tail['text'])
+
+    def test_original_greetings03_preserves_zulu_leader_and_every_word(self):
+        p=Path('runs/attempt-011/screens/ui-0002207.png')
+        if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original herald absent')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'GREETINGS03')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        self.assertIn('"I speak for she who makes mortals tremble:',[r['text'] for r in o['lines']])
+        tail=next(r for r in o['lines'] if r['text'].startswith('Empress'))
+        self.assertEqual(tail['text'],'Empress Shakala of the Zulus ..."')
+        self.assertIn(tail['provenance'][0]['text'],('Empress Shakala of the Zulus ....','Empress Shakala of the Zulus ...."'))
+
     def test_original_greetings01_retains_every_word_and_has_no_strategic_choice(self):
         p=Path('runs/attempt-010/screens/ui-0001762.png')
         if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original herald absent')

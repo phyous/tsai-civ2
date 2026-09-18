@@ -22,6 +22,30 @@ def fixture():
 
 
 class TreatyWarningTests(unittest.TestCase):
+    def test_break_spacing_requires_two_reads_of_exact_warning(self):
+        for mode in ('valid','disagree','different_warning','missing_option'):
+            rows=fixture()['lines'];rows[1]['text']='We have signed a peace treaty with the'
+            rows[3]['text']='breakit!';rows[3]['provenance']=[{'text':'breakit!'}]
+            a=deepcopy(rows[3]);a['text']='break it!';b=deepcopy(a)
+            if mode=='disagree':b['text']='breakit!'
+            if mode=='different_warning':a['text']=b['text']='keep it!'
+            if mode=='missing_option':rows.pop(5)
+            with patch('civ2.observe._crop_text',side_effect=[[a],[b]]):
+                _recover_treaty_warning(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[3]['text'],'break it!' if mode=='valid' else 'breakit!',mode)
+            self.assertEqual(rows[3]['provenance'][0]['text'],'breakit!')
+
+    def test_actual_ad100_warning_keeps_both_choices(self):
+        p=Path('runs/attempt-012/screens/ui-0001749.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        from civ2.boot import original_rules
+        from civ2.run import game_text
+        o=recognize(p);d=classify_dialog(o,game_text=game_text(),rules=parse_rules(original_rules()))
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model'])
+        self.assertEqual([x['text'] for x in d['options']],['Cancel action.','Break treaty.'])
+        recovered=next(r for r in o['lines'] if r['text']=='break it!')
+        self.assertEqual([p['text'] for p in recovered['provenance']],['breakit!','break it!','break it!'])
+
     def test_period_requires_paired_pixels_and_unchanged_warning_and_options(self):
         for mode in ('valid','disagreement','different_option','missing_warning'):
             o=fixture();rows=o['lines'];rows[1]['text']='We have signed a peace treaty with the'

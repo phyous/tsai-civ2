@@ -14,6 +14,57 @@ def row(text,*,x=236,y=174,w=60,h=18,confidence=1,source='native'):
 
 
 class MapLabelCrossScale(unittest.TestCase):
+    def test_measured_cyrillic_comparison_never_supplies_replacement(self):
+        for case in ('valid','disagree','unrelated_letters','too_many_ascii_changes'):
+            image,rows=self.fixture();rows[-1]=row('Роmpei')
+            if case=='unrelated_letters':rows[-1]=row('Жяmpei')
+            def crop(image,old,name,*args,**kwargs):
+                value='Pompeii' if case!='too_many_ascii_changes' else 'Palermo'
+                if case=='disagree' and ('gray' in name or 'white' in name):return []
+                return [row(value,source=name)]
+            with patch.object(observe,'_crop_text',side_effect=crop):
+                observe._recover_map_labels(image,rows,None,None,{'passes':[]})
+            if case=='valid':self.assertEqual(rows[-1]['text'],'Pompeii')
+            elif case in ('unrelated_letters','too_many_ascii_changes'):self.assertEqual(rows[-1]['text'],'Жяmpei' if case=='unrelated_letters' else 'Роmpei')
+            else:self.assertNotEqual(rows[-1]['text'],'Pompeii')
+            self.assertEqual(rows[-1]['provenance'][0]['text'],'Жяmpei' if case=='unrelated_letters' else 'Роmpei')
+
+    def test_actual_cyrillic_pompeii_is_read_as_ascii_twice(self):
+        path=Path('runs/attempt-010/screens/ui-0002419.png')
+        if not path.exists():self.skipTest('Private original map unavailable')
+        o=observe.recognize(path)
+        label=next(r for r in o['lines'] if r['provenance'][0]['text']=='Роmpei')
+        self.assertEqual(label['text'],'Pompeii')
+        self.assertGreaterEqual(sum(p['text']=='Pompeii' for p in label['provenance']),2)
+
+    def test_new_framings_require_complete_agreement(self):
+        for case in ('valid','disagree','low','displaced'):
+            image,rows=self.fixture()
+            def crop(image,old,name,*args,**kwargs):
+                if '_white230_wide_' not in name and '_white230_tight_' not in name:return []
+                r=row('Antium',source=name)
+                if '_tight_' in name:
+                    if case=='disagree':r['text']='Antiuna'
+                    if case=='low':r['confidence']=.5
+                    if case=='displaced':r.update(bounds=[360,174,60,18],center=[390,183])
+                return [r]
+            with patch.object(observe,'_crop_text',side_effect=crop):
+                observe._recover_map_labels(image,rows,None,None,{'passes':[]})
+            self.assertEqual(rows[-1]['text'],'Antium' if case=='valid' else 'Antumn',case)
+
+    def test_actual_touching_artwork_uses_two_distinct_complete_reads(self):
+        path=Path('runs/attempt-012/screens/ui-0001936.png')
+        if not path.exists():self.skipTest('Private original map unavailable')
+        o=observe.recognize(path)
+        label=next(r for r in o['lines'] if r['text']=='Antium')
+        self.assertEqual(label['provenance'][0]['text'],'Antumn')
+        for name in ('map_label_11_white230_wide_2x','map_label_11_white230_tight_3x'):
+            reads=[r for r in label['provenance'] if r['preprocessing']==name]
+            # Row index varies with native OCR, so assert the stable suffix.
+            if not reads:reads=[r for r in label['provenance'] if r['preprocessing'].endswith(name.removeprefix('map_label_11'))]
+            self.assertTrue(reads)
+            self.assertTrue(all(r['text']=='Antium' for r in reads))
+
     def fixture(self):
         rows=[row(t,x=8+i*65,y=20,w=45,h=16) for i,t in enumerate(('Game','Kingdom','View','Orders'))]
         rows.append(row('Antumn'))

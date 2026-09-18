@@ -18,7 +18,7 @@ class HistoryTitlePixelsTests(TestCase):
         candidate=row('Cinlization I',280,176,83,15)
         return rows,candidate
     def recover(self,rows,a,b):
-        with mock.patch('civ2.observe._crop_text',side_effect=[a,b,[],[]]) as crop:
+        with mock.patch('civ2.observe._crop_text',side_effect=[a,b,[],[],[],[]]) as crop:
             _recover_history_title(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
         return crop
     def test_pair_preserves_actual_reading_and_both_sources(self):
@@ -47,3 +47,21 @@ class HistoryTitlePixelsTests(TestCase):
         self.assertIn('5. The Puny Civilization of the Romans',d['visible_text'])
         title=next(r for r in o['lines'] if r['text']=='Cinlization I')
         self.assertTrue({'history_title_rgb3','history_title_gray3'}<={p.get('preprocessing') for p in title['provenance']})
+
+    def test_original_without_ocr_colon_preserves_printed_rank_gap(self):
+        p=Path('runs/attempt-011/screens/ui-0002294.png')
+        if not p.exists():self.skipTest('Private original screenshot absent')
+        o=recognize(p);d=classify_dialog(o,game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'HISTORY')
+        self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        ranks=[r['text'] for r in o['lines'] if r['text'][:1].isdigit()]
+        self.assertEqual([r.split('.',1)[0] for r in ranks],['1','2','4'])
+        self.assertIn('MOST ADVANCED',d['visible_text'])
+        title=next(r for r in o['lines'] if r['text']=='Cindization II')
+        self.assertEqual(title['provenance'][0]['text'],'Cindivation I')
+        self.assertEqual([p['preprocessing'] for p in title['provenance'][-2:]],['history_title_rgb2_pad6','history_title_gray2_pad6'])
+
+    def test_missing_colon_only_locates_pixels_not_an_unobserved_title(self):
+        rows,candidate=self.fixture();rows[1]['text']=rows[1]['text'].rstrip(':')
+        before=deepcopy(rows);self.recover(rows,[candidate],[]);self.assertEqual(rows,before)
+        self.recover(rows,[deepcopy(candidate)],[deepcopy(candidate)]);self.assertEqual(rows[0]['text'],candidate['text'])

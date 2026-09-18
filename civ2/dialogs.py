@@ -31,6 +31,7 @@ from .history_notice import classify_history_notice
 from .native_choices import classify_native_choice
 from .foreign_report import classify_foreign_report
 from .caravan import classify_caravan
+from .spaceship import classify_spaceship
 from .native_map import evidence_for as native_map_evidence
 from .gdi_titles import exact_production_title
 
@@ -671,6 +672,11 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         result['resource_tag']=caravan['resource_tag']
         result['evidence'].update(caravan['evidence'])
         return finish(caravan['kind'],caravan['title'],caravan['options'],caravan['buttons'],model=True)
+    spaceship=classify_spaceship(observation,rows,dialog_resources(game_text or ''),game_text)
+    if spaceship:
+        result['resource_tag']=spaceship['resource_tag']
+        result['evidence'].update(spaceship['evidence'])
+        return finish(spaceship['kind'],spaceship['title'],spaceship['options'],spaceship['buttons'],model=True)
     native_choice=classify_native_choice(observation,rows,dialog_resources(game_text or ''),rules)
     if native_choice:
         result['resource_tag']=native_choice['resource_tag']
@@ -1443,7 +1449,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         # Original LABELS.TXT supplies these finite completion verbs. Without
         # them BUILT's all-placeholder body could match arbitrary advisor text.
         event=classify_information(observation,dialog_resources(game_text),
-            placeholder_values={tag:{'STRING3':['completes','builds']} for tag in ('BUILT','BUILT3')})
+            placeholder_values={tag:{'STRING3':['completes','builds']} for tag in ('BUILT','BUILT2','BUILT3')})
         if event['supported']:
             result['resource_tag']=event['resource_tag']
             result['evidence']={**result['evidence'],**event['evidence']}
