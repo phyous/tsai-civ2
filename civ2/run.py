@@ -280,7 +280,7 @@ def labor_refresh_step(session,context,observation,dialog,resources):
 
 def _native_map_fallback(session, observation, dialog, resources, _attempt=0, *, attempts=3, phase=0):
     """Bounded read-only attempts for a map proof still visible on the canvas."""
-    from .native_map import LEFT_MAP_REASON, archive_read
+    from .native_map import LEFT_MAP_REASON, archive_read, footer_blink_context
     from .observe import recognize
     if (getattr(session, 'observer', None) is None or dialog.get('supported')
             or dialog.get('kind') != 'unknown' or dialog.get('reason') != LEFT_MAP_REASON):
@@ -310,16 +310,28 @@ def _native_map_fallback(session, observation, dialog, resources, _attempt=0, *,
         if (final_status.get('paused') is not True or final_status.get('inputSequence') != status['inputSequence']
                 or final_status.get('heldKeys') or final_status.get('buttons')):
             raise ValueError('Ordinary input changed during native map classification')
+        current_artifact=None
         if current_hash != fresh['sha256']:
-            session.journal.artifact(f'screens/native-map-current-{session.journal.sequence+1:06d}-{current_hash}.png',current_png)
+            current_artifact=session.journal.artifact(f'screens/native-map-current-{session.journal.sequence+1:06d}-{current_hash}.png',current_png)
             changed_frame=True
-            raise ValueError('Bracketed native map image is no longer the paused canvas')
+            context=footer_blink_context(context,middle.read_bytes(),current_png)
+            current_path=session.journal.directory/current_artifact['path']
+            fresh=recognize(current_path);fresh['path']=str(current_path)
+            if fresh['sha256']!=current_hash:raise ValueError('Current native map image changed during recognition')
+            classified=classify_dialog(fresh,rules=session.rules,game_text=resources,labels_text=labels_text(),
+                                      state=state,native_map_context=context)
+            confirmed=session.game.rpc('status')
+            if (confirmed.get('paused') is not True or confirmed.get('inputSequence')!=status['inputSequence']
+                    or confirmed.get('heldKeys') or confirmed.get('buttons')
+                    or hashlib.sha256(session.game.request('/bridge/capture/game',binary=True)).hexdigest()!=current_hash):
+                raise ValueError('Current native map changed after footer recognition')
         if not classified.get('supported') or classified.get('kind') not in ('normal_map','end_turn'):
             raise ValueError('Native map proof did not establish original map/status cues')
         session.journal.append('native_map_observed',trigger_image=trigger,trigger_reason=LEFT_MAP_REASON,
             artifact=artifact,receipt=receipt,input_sequence=status['inputSequence'],
             observation={k:deepcopy(fresh[k]) for k in ('width','height','sha256','lines')},
-            classification={k:classified[k] for k in ('kind','supported','reason')})
+            classification={k:classified[k] for k in ('kind','supported','reason')},
+            **({'current_image':current_artifact} if current_artifact else {}))
         return fresh, classified
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         session.journal.append('native_map_observation_failed',trigger_image=trigger,
@@ -585,10 +597,13 @@ def run_steps(session, *, max_decisions=10000):
         expected = {'open_tax':{'tax_rate','luxury_rate','tax_allocation'},
                     'open_research':{'science_advisor'},
                     'open_diplomacy':{'foreign_minister'},
+                    'open_spaceships':{'spaceship_selector','spaceship_report'},
                     'open_revolution':{'revolution_choice','revolution_offer'}}
         if pending and kind in expected.get(pending['id'],set()):
             context['pending_empire_confirmed'] = True
         if pending and pending['id']=='open_diplomacy' and dialog.get('resource_tag')=='NOFOREIGN':
+            context['pending_empire_confirmed'] = True
+        if pending and pending['id']=='open_spaceships' and dialog.get('resource_tag')=='NOSPACESHIPS':
             context['pending_empire_confirmed'] = True
         if kind in ('victory','game_over'):
             return {'status':'paused','reason':'Original end-game screen awaits outcome verification.',

@@ -1,7 +1,8 @@
 """Offline integrity checks for a local original-Civ-II evidence directory.
 
-No emulator, network, credential, OCR, or game-control calls occur here. A valid
-local hash chain is not an independent attestation of how its data was created.
+No emulator, network, credential or game-control calls occur here. OCR is off
+by default; an explicit optional path re-reads retained trade images only.
+A local hash chain is not an independent attestation of how its data was created.
 """
 from __future__ import annotations
 
@@ -206,9 +207,26 @@ def _trade_pending(payload, decision, request, files, observed_screens):
         r'"Will you accept [A-Za-z][A-Za-z \'()-]{0,79} instead\?"',options[2]),
         'Trade continuation has an unsupported additional choice')
     expected=re.escape(dialog['title'])+r' '+body+' '+re.escape(' '.join(options))+r' OK'
-    _require(re.fullmatch(expected,' '.join(text.split())) is not None,
-             'Trade continuation body does not match the complete original exchange template')
     source=action.get('preconditions',{}).get('image_sha256');files.screen(source)
+    if re.fullmatch(expected,' '.join(text.split())) is None:
+        _require(getattr(files,'recheck_trade_ocr',False),
+                 'Trade continuation body requires an explicit retained-image OCR recheck')
+        from .trade_recheck import recheck_foreground
+        try:
+            foreground,proof=recheck_foreground(files.path(files.screen(source)),source,dialog,action,tag,
+                                               PUBLIC_NOTICE_GAME_SHA256)
+        except (OSError,ValueError,TypeError,KeyError,IndexError,RuntimeError,subprocess.SubprocessError):
+            raise VerificationError('Retained trade image does not independently reproduce its offer') from None
+        # Only the offered technology's body slot may differ by one glyph.
+        # Its identity still comes from the exact independently observed
+        # decline option and prior accepted action, never from the typo.
+        relaxed_body=body.replace(name,r"(?P<offered>[A-Za-z][A-Za-z '()-]{0,79})",1)
+        matched=re.fullmatch(re.escape(dialog['title'])+r' '+relaxed_body+r' '+re.escape(' '.join(options))+r' OK',
+                             ' '.join(foreground.split()))
+        _require(matched is not None and _one_edit(matched['offered'],advance['name']),
+                 'Rechecked trade body differs beyond the exact offered technology slot')
+        proof['offered_body_one_edit']=matched['offered']!=advance['name']
+        files.trade_ocr_rechecks.append(proof)
     _require(observed_screens.get(source)=={'classification':'diplomacy','supported':True},
              'Trade continuation source was not an observed supported diplomatic offer')
     source_dialog={'id':action['actor']['id'],'kind':'diplomacy','title':dialog['title'],
@@ -347,11 +365,14 @@ def _hash(path):
 
 
 class Files:
-    def __init__(self, root):
+    def __init__(self, root, *, recheck_trade_ocr=False):
         self.root = Path(root).resolve()
         _require(self.root.is_dir(), 'Evidence directory is missing')
         self.checked = {}
         self.screens = {}
+        _require(type(recheck_trade_ocr) is bool,'Trade OCR recheck option must be boolean')
+        self.recheck_trade_ocr = recheck_trade_ocr
+        self.trade_ocr_rechecks = []
 
     def path(self, name):
         _require(isinstance(name, str) and name and '\\' not in name,
@@ -604,8 +625,22 @@ def _action_binding(action, request, question, saves, *, forced=False):
     elif question == 'empire_action':
         keys = {'finish_turn': ('Enter', []), 'open_tax': ('KeyT', ['ShiftLeft']),
                 'open_research': ('F6', []), 'open_diplomacy': ('F3', []),
+                'open_spaceships': ('F12', []),
                 'open_revolution': ('KeyR', ['ShiftLeft'])}
         key = keys.get(action['id'])
+        if action['id']=='open_spaceships':
+            public_apollo=any(type(w.get('improvement_id')) is int and w['improvement_id']==64
+                             and w.get('status')=='built' for w in state.get('wonders',[]) if isinstance(w,dict))
+            owned_parts=any(c.get('owner')==state['player']['id'] and type(c.get('owner')) is int
+                            and isinstance(c.get('production'),dict) and c['production'].get('kind')=='improvement'
+                            and type(c['production'].get('id')) is int and c['production']['id'] in (35,36,37)
+                            for c in state.get('cities',[]) if isinstance(c,dict))
+            _require(state.get('settings',{}).get('bloodlust') is not True and (public_apollo or owned_parts)
+                     and action['kind']=='empire_menu' and actor=={'kind':'empire','player_id':state['player']['id']}
+                     and params=={'key':'F12','modifiers':[],'only_open_menu':True,'expected_screen':'spaceship_report',
+                                  'source_menu':'Original MENU.TXT @WORLD: &Spaceships|F12',
+                                  'confirmation_requires_separate_choice':True},
+                     'Spaceships command lacks original F12/public eligibility and separate confirmation binding')
         if re.fullmatch(r'inspect_city_\d+', action['id']):
             key = ('KeyC', ['ShiftLeft'])
             target = params.get('target_city', {})
@@ -1535,7 +1570,7 @@ def _navigation_incomplete(payload,files,state,observed_screens,minimum_sequence
 
 def _native_map_event(files,payload,initial_state,inventory,boundary,minimum_sequence):
     from .memory import parse_memory
-    from .native_map import context_for,LEFT_MAP_REASON
+    from .native_map import context_for,footer_blink_context,LEFT_MAP_REASON
     from .dialogs import _rows,_native_map_kind
     _require(initial_state is not None and initial_state['evidence'].get('kind')=='live_memory'
              and payload.get('trigger_reason')==LEFT_MAP_REASON,
@@ -1563,7 +1598,16 @@ def _native_map_event(files,payload,initial_state,inventory,boundary,minimum_seq
     observation=payload.get('observation')
     _require(isinstance(observation,dict) and set(observation)=={'width','height','sha256','lines'},
              'Native map OCR evidence is malformed')
-    context=context_for(data,observation['sha256'],sequence)
+    context=context_for(data,proof['image_sha256'][1],sequence)
+    if 'current_image' in payload:
+        current=files.descriptor(payload['current_image'])
+        _require(current['path'].startswith('screens/') and current['sha256']==observation['sha256'],
+                 'Current footer image differs from recorded OCR')
+        context=footer_blink_context(context,files.path(receipt['images'][1]['path']).read_bytes(),
+                                    files.path(current['path']).read_bytes())
+    else:
+        _require(observation['sha256']==proof['image_sha256'][1],
+                 'Native map OCR is not the bracketed source image')
     kind,reason=_native_map_kind(_rows(observation),observation,state,context)
     _require(kind in ('normal_map','end_turn') and payload.get('classification')==
              dict(kind=kind,supported=True,reason=reason),
@@ -1575,9 +1619,9 @@ def _native_map_event(files,payload,initial_state,inventory,boundary,minimum_seq
     return sequence
 
 
-def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
+def _verify_run(directory, *, terminal_review=None, ffprobe='auto', recheck_trade_ocr=False):
     """Verify retained evidence, never infer victory or claim command acceptance."""
-    files = Files(directory)
+    files = Files(directory,recheck_trade_ocr=recheck_trade_ocr)
     events, chain = _journal(files)
     saves, started, stages, decisions, plans, plan_statuses, dispatched = {}, {}, {}, {}, {}, {}, set()
     started_hashes, started_sequences, failed_inferences = {}, {}, {}
@@ -2507,7 +2551,9 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                           'unit_activation_failures':activation_failures,
                           'native_map_note':'Full source capsule, bracketed original frame, no intervening input and recorded menu/status OCR checked. This allows map artwork only; it is not a gameplay checkpoint or modal acknowledgement.',
                           'accepted_trade_continuations':trade_confirmations,
-                          'trade_continuation_note':'Prior actual model offer/action and original frame/list pixels checked; one Enter only. Technology acquisition and OCR semantics are not independently inferred.',
+                          'retained_trade_ocr_rechecks':files.trade_ocr_rechecks,
+                          'trade_continuation_note':('Prior actual model offer/action and original frame/list pixels checked; one Enter only. Optional retained-image OCR rechecks are listed separately. Technology acquisition is not inferred.'
+                                                     if files.trade_ocr_rechecks else 'Prior actual model offer/action and original frame/list pixels checked; one Enter only. Technology acquisition and OCR semantics are not independently inferred.'),
                           'retained_public_notice_ids':[n['id'] for n in public_notices],
                           'public_notice_verification':'Exact request history, prior native-save context, pinned source hashes and original image integrity checked. No OCR or current-world inference is performed.',
                           'city_labor_results':[labor_outcomes[k] for k in sorted(labor_outcomes)],
@@ -2536,16 +2582,18 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto'):
                               and activation_pending is None and category_pending is None},
             'limitations': ['A local hash chain is not server-signed proof of model provenance or absence of off-journal input.',
                            'Historical requests are checked as recorded, not regenerated with the current candidate policy. Legal availability and native acceptance are not established; controller source revisions must be retained separately for reproducibility.',
-                           'This verifier performs no OCR, live game calls or automatic victory recognition.',
+                           ('Explicit opt-in re-read retained trade images with local OCR and pinned original source templates. It performs no live game calls or automatic victory recognition.'
+                            if files.trade_ocr_rechecks else 'This verification performed no OCR, live game calls or automatic victory recognition.'),
                            'Do not publish original saves or game assets merely because their integrity checks pass.']
                           + (['Mechanical input receipts are unavailable within the declared sequence bounds; input coverage and release review remain incomplete.']
                              if mechanical_input_gaps else [])}
 
 
-def verify_run(directory, *, terminal_review=None, ffprobe='auto'):
+def verify_run(directory, *, terminal_review=None, ffprobe='auto', recheck_trade_ocr=False):
     """Return a compact report or a fixed diagnostic; never contact the game."""
     try:
-        return _verify_run(directory, terminal_review=terminal_review, ffprobe=ffprobe)
+        return _verify_run(directory, terminal_review=terminal_review, ffprobe=ffprobe,
+                           recheck_trade_ocr=recheck_trade_ocr)
     except VerificationError:
         raise
     except (OSError, ValueError, TypeError, KeyError, IndexError, OverflowError, RecursionError):
@@ -2557,11 +2605,13 @@ def main():
     parser.add_argument('directory')
     parser.add_argument('--terminal-review', help='Confined relative path to an explicit human or assistant visual terminal review JSON')
     parser.add_argument('--no-ffprobe', action='store_true')
+    parser.add_argument('--recheck-trade-ocr', action='store_true',
+                        help='Opt in to offline re-reading retained legacy exchange images; requires local OCR and pinned original assets')
     parser.add_argument('--output', help='Optional report output path; no evidence is modified')
     args = parser.parse_args()
     try:
         report = verify_run(args.directory, terminal_review=args.terminal_review,
-                            ffprobe=None if args.no_ffprobe else 'auto')
+                            ffprobe=None if args.no_ffprobe else 'auto',recheck_trade_ocr=args.recheck_trade_ocr)
     except (VerificationError, OSError):
         # Neither file paths, original game data nor remote contents are echoed.
         print(json.dumps({'integrity': 'failed', 'error': 'Evidence verification failed; inspect the scoped local artifacts.'}))

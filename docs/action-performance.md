@@ -49,3 +49,15 @@ and their public projection matched the original save. Individual reads had a
 295 ms median, with paired reads about 0.54–0.66 s. This is an observation
 benchmark, not yet a measured full-campaign speedup. The modern backend remains
 optional while input handling and browser integration are validated.
+
+A later recorded map stall had identical pixels everywhere except the original
+blinking “End of Turn / (Press ENTER)” footer. The map fallback now accepts
+this specific presentation change only when both complete footer crops equal
+the pinned white/gray members of the same original calibration and every pixel
+outside that crop is identical. It retains and recognizes the actual current
+PNG, checks that the emulator remains paused at the same input sequence, and
+checks the current PNG again after recognition. The independent verifier repeats
+the pixel comparison from both retained images. Unknown footer layouts, changed
+map artwork, other status changes and dialog changes still fail this proof.
+This removes that measured false rejection; it does not establish a whole-game
+speedup or authorize an end-turn command.

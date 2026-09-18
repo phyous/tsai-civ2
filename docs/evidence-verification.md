@@ -6,7 +6,20 @@ Run from the repository root after an attempt stops:
 python3 -m civ2.verify runs/attempt-002 --output verification.json
 ```
 
-The command reads local evidence and optionally runs `ffprobe`. It does not contact Jev, read credentials, control the emulator, perform OCR, modify saves or publish files. The output file must be new. `verify_run(directory, terminal_review=None, ffprobe='auto')` offers the same checks to Python callers and raises `VerificationError` on invalid evidence. `--no-ffprobe` explicitly leaves encoded-media validation unavailable.
+The command reads local evidence and optionally runs `ffprobe`. By default it performs no OCR. It never contacts Jev, reads credentials, controls the emulator, modifies saves or publishes files. The output file must be new. `verify_run(directory, terminal_review=None, ffprobe='auto', recheck_trade_ocr=False)` offers the same checks to Python callers and raises `VerificationError` on invalid evidence. `--no-ffprobe` explicitly leaves encoded-media validation unavailable.
+
+Some historical exchange requests retain full-frame OCR, including artwork above
+the original emissary window, or a one-glyph difference in the offered advance's
+body text. `--recheck-trade-ocr` explicitly enables a read-only fallback for these
+cases. It requires the local OCR executable and pinned original game assets,
+reproduces the entire immutable request text from its hashed PNG, and rechecks
+the complete source template, all choices, title and accepted control point.
+Excluding any exterior row requires the complete original window frame and
+every excluded row wholly above it. Only a one-edit offered-name body slot may
+differ from the exact decline option; terms and choices remain exact. Failure
+to reproduce the original reading fails closed. The report lists each rechecked
+source and declares the OCR dependency. Requests, journal events and screenshots
+are never rewritten; technology acquisition is still not inferred.
 
 The report checks:
 

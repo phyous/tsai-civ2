@@ -32,6 +32,7 @@ from .native_choices import classify_native_choice
 from .foreign_report import classify_foreign_report
 from .caravan import classify_caravan
 from .spaceship import classify_spaceship
+from .spaceship_report import classify_spaceship_report
 from .native_map import evidence_for as native_map_evidence
 from .gdi_titles import exact_production_title
 
@@ -677,6 +678,12 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         result['resource_tag']=spaceship['resource_tag']
         result['evidence'].update(spaceship['evidence'])
         return finish(spaceship['kind'],spaceship['title'],spaceship['options'],spaceship['buttons'],model=True)
+    spaceship_report=classify_spaceship_report(observation,rows,dialog_resources(game_text or ''),rules,labels_text,game_text)
+    if spaceship_report:
+        result['resource_tag']=spaceship_report['resource_tag']
+        result['evidence'].update(spaceship_report['evidence'])
+        return finish(spaceship_report['kind'],spaceship_report['title'],spaceship_report['options'],spaceship_report['buttons'],
+                      model=spaceship_report['requires_model'],mechanical=spaceship_report['mechanical_action'])
     native_choice=classify_native_choice(observation,rows,dialog_resources(game_text or ''),rules)
     if native_choice:
         result['resource_tag']=native_choice['resource_tag']

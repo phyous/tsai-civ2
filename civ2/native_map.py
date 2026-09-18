@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import struct
 from pathlib import Path
+from io import BytesIO
 from copy import deepcopy
 from .memory import _validate_capsule, parse_memory, MemoryObservationError
 
@@ -30,8 +31,57 @@ def context_for(data, image_sha256, input_sequence):
     return NativeMapContext(data, image_sha256, input_sequence)
 
 
+@dataclass(frozen=True)
+class FooterBlinkMapContext:
+    original: NativeMapContext
+    bracketed_png: bytes
+    current_png: bytes
+
+
+def footer_blink_context(context, bracketed_png, current_png):
+    """Bind the current image only across a calibrated original footer blink.
+
+    Every other RGB pixel must be identical. Both complete footer crops must
+    be the two pinned members of one original white/gray calibration pair.
+    This is not a tolerance for changed map art, status numbers or controls.
+    """
+    from PIL import Image,ImageChops
+    from .footer_pixels import FOOTER_BLINK_CALIBRATIONS
+    if not isinstance(context,NativeMapContext):raise MemoryObservationError('Missing bracketed native map context')
+    context_for(context.capsule,context.image_sha256,context.input_sequence)
+    if any(not isinstance(p,bytes) or not 24<=len(p)<=4*1024*1024 for p in (bracketed_png,current_png)):
+        raise MemoryObservationError('Invalid footer comparison images')
+    if hashlib.sha256(bracketed_png).hexdigest()!=context.image_sha256:
+        raise MemoryObservationError('Footer comparison source is not the bracketed image')
+    images=[]
+    for raw in (bracketed_png,current_png):
+        with Image.open(BytesIO(raw)) as image:
+            if image.format!='PNG' or image.size!=(640,480):raise MemoryObservationError('Invalid original footer image')
+            images.append(image.convert('RGB'))
+    matches=[]
+    for crop,gray,white in FOOTER_BLINK_CALIBRATIONS:
+        hashes=tuple(hashlib.sha256(image.crop(crop).tobytes()).hexdigest() for image in images)
+        if hashes in ((gray,white),(white,gray)):matches.append(crop)
+    if len(matches)!=1:
+        raise MemoryObservationError('Footer difference is not a calibrated original blink')
+    crop=matches[0];bounds=ImageChops.difference(*images).getbbox()
+    if not bounds or not(crop[0]<=bounds[0]<bounds[2]<=crop[2] and crop[1]<=bounds[1]<bounds[3]<=crop[3]):
+        raise MemoryObservationError('Pixels outside the original footer changed')
+    return FooterBlinkMapContext(context,bracketed_png,current_png)
+
+
 def evidence_for(context, observation):
     """Revalidate source bytes; an unchecked dictionary or old image cannot pass."""
+    if isinstance(context,FooterBlinkMapContext):
+        try:footer_blink_context(context.original,context.bracketed_png,context.current_png)
+        except (MemoryObservationError,ValueError,TypeError,OSError):return None
+        current_hash=hashlib.sha256(context.current_png).hexdigest()
+        if observation.get('sha256')!=current_hash or (observation.get('width'),observation.get('height'))!=(640,480):return None
+        original=context.original
+        return dict(scope=SCOPE,observation_sha256=hashlib.sha256(original.capsule).hexdigest(),
+                    image_sha256=current_hash,image_index=1,input_sequence=original.input_sequence,
+                    bracketed_image_sha256=original.image_sha256,
+                    current_image_binding='exact_original_footer_blink_only')
     if not isinstance(context, NativeMapContext):
         return None
     try:

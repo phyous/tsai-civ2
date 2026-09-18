@@ -14,6 +14,7 @@ from .policy import model_state, STRATEGY_QUESTION, _unit_health_resolved
 from .rules import eligible_governments
 from .save import parse_rules
 from .revision import RevisionError, revision
+from .spaceship_report import space_review_available
 
 
 class EmpireError(ValueError):
@@ -25,7 +26,7 @@ class ForcedEmpireAction(EmpireError):
 
 
 SHA256=re.compile(r'[0-9a-f]{64}')
-MENU_IDS={'open_tax','open_diplomacy','open_research','open_revolution'}
+MENU_IDS={'open_tax','open_diplomacy','open_research','open_revolution','open_spaceships'}
 
 
 def _rules(value):
@@ -205,6 +206,10 @@ def empire_candidates(state,screen,reviewed=None,rules=None):
             only_open_menu=True,expected_screen='foreign_minister')
     add('open_research','empire_menu','Review the Science Advisor and current research; any subsequent choice needs its own observation',actor,'F6',
         only_open_menu=True,expected_screen='science_advisor')
+    if space_review_available(state):
+        add('open_spaceships','empire_menu','Review the original Spaceships report (public Apollo completion or current owned spaceship-part production observed); choosing a ship or requesting launch requires a separate observed choice',
+            actor,'F12',only_open_menu=True,expected_screen='spaceship_report',
+            source_menu='Original MENU.TXT @WORLD: &Spaceships|F12',confirmation_requires_separate_choice=True)
     current=state['player'].get('government_id')
     if type(current) is not int or not 0<=current<=6:raise EmpireError('Observed government ID required')
     alternatives=[g for g in eligible_governments(state,rules) if g['id']>1 and g['id']!=current]
