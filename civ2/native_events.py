@@ -21,6 +21,8 @@ EVENT_TITLES = {
     'ADJACENTCITY': 'civ rules: cities',
     'CIVADVANCE': 'civilization advance',
     'DESTROYED': 'defense minister',
+    'PROMOTED': 'defense minister',
+    'SCHISM': 'defense minister',
     'CITYCAPTURE': 'defense minister',
     'MULTIPLEWIN': 'defense minister',
     'MULTIPLELOSE': 'defense minister',
@@ -65,6 +67,9 @@ TITLE_ALIASES = {'ADJACENTCITY': {'civ rules: cines'},
                  # Original010/2521: two independent 4x title crops, full
                  # pinned capture/plunder notice and the sole aligned OK.
                  'CITYCAPTURE': {'defense mfinister'},
+                 # Original010/3142: two independent3x title reads, complete
+                 # pinned SCHISM body with the same loyal nation repeated.
+                 'SCHISM': {'defense bfinister'},
                  # Original010/2533: independent title/body crops after the
                  # Hispalis capture, with the complete pinned TOOKCIV notice.
                  'TOOKCIV': {'cialization advance stolen!'},
@@ -80,6 +85,8 @@ RULE_REJECTIONS = {'ADJACENTCITY': 'Cities cannot be built in adjacent squares.'
 # Reviewed complete original GAME.TXT records. These narrow additions have
 # source/synthetic coverage; they are not a claim of live modal calibration.
 COMBAT_NOTICE_RESOURCES = {
+    'PROMOTED': '104c1d26e73dc17b890436f2535cdae9990b9b81e75ba9b8cfb2e7fdb8b12f7d',
+    'SCHISM': 'e4c434f650511f5f0b8b511f5824885a12bd7cb555c352db0769b83015c83aab',
     'CITYCAPTURE': '6d85a84bf5749949f3c4fcd9915ca8f44dfc80e2ce6b54069252be45c1a7d1fe',
     'MULTIPLEWIN': '72e8bd528879eca5bff6259e6976b83a451aa9724dce6e94161d347d51504438',
     'MULTIPLELOSE': 'dcb38e4e3fff4ce44a83d9834d5d7f69e512deb089af8a31e048b1015f73fb7f',

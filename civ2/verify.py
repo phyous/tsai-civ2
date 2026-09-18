@@ -75,6 +75,8 @@ PUBLIC_NOTICE_NOTE = (
     'Only the most recent bounded notices are retained; absence is not evidence that an event did not occur.'
 )
 PUBLIC_NOTICE_RESOURCES = {'NEWFORTRESS':'7008caabad90b14e8e354ed60484e54359857ebf4f5da5284f35630d45028f8c','SURPRISEMERCS':'c2385ac58008bbaa30cc7126e827fc322a1c8d9ceb21d7db5697be0740290195',
+    'PROMOTED':'104c1d26e73dc17b890436f2535cdae9990b9b81e75ba9b8cfb2e7fdb8b12f7d',
+    'SCHISM':'e4c434f650511f5f0b8b511f5824885a12bd7cb555c352db0769b83015c83aab',
     'GOLDENAGE':'b8fae752a1051a78b7f42dbf360d7473c55bbeb5acf8baecb5d7302987d2b135',
     'BADSPACE':'fb52834c18c6ab1d0a0c0df09e9db4a0e578ddc7244656c075d4ab35ba410044',
     'SPACERACE':'b0858a7a0044cfe83240c58ef8408e3758c6ead7c55af1bd63fa9daf27d87c64',

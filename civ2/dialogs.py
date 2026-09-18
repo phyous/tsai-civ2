@@ -35,6 +35,7 @@ from .spaceship import classify_spaceship
 from .spaceship_report import classify_spaceship_report
 from .native_map import evidence_for as native_map_evidence
 from .gdi_titles import exact_production_title
+from .city_locator import foreign_locator_context
 
 CDROM_TEMPLATE_SHA256='28a50ae19b7eaf7abf51d1c97ab591c3f03abff2e7a19fc18dcb623914666fd7'
 
@@ -1166,7 +1167,10 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             names={_normal(c['name']) for c in state.get('cities',[]) if isinstance(c.get('name'),str)}
             if not names or not button_rows:return unknown('City navigation context incomplete',kind,title['text'])
             if not body or any(r['normal'] not in names for r in body):
-                return unknown('City locator labels are not unambiguous owned-city names',kind,title['text'])
+                context=foreign_locator_context(observation,title,body,button_rows,names,resources(),rules)
+                if context is None:return unknown('City locator labels are not unambiguous owned-city names',kind,title['text'])
+                body,proof=context
+                result['evidence']['foreign_locator_context']=proof
             choices=[_option(r,'list_item') for r in body]
             return finish(kind,title['text'],choices,buttons,reason='Navigation only; caller must bind its requested owned city, never accept a guessed default')
         if kind=='new_city_name':

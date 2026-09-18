@@ -58,6 +58,45 @@ class WonderNoticeTests(unittest.TestCase):
                 observe._recover_travellers_title(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
             self.assertEqual(rows[0]['text'],good['text'] if case=='good' else base[0]['text'],case)
 
+    def test_abandon_word_requires_paired_pixels_and_preserves_nation_and_project(self):
+        base=[prepared('Dravellers Report',264,196,112,16),
+              prepared('The TEST Romans have ahandoned their great project,',200,220,308,16),
+              prepared('TEST Wonder.',200,240,180,16),prepared('OK',309,272,24,14)]
+        for case in ('valid','nation','verb','peer','weak','missing_tail','extra_control'):
+            rows=copy.deepcopy(base)
+            if case=='missing_tail':rows.pop(2)
+            if case=='extra_control':rows.append(prepared('No',400,272,24,14))
+            before=copy.deepcopy(rows)
+            def crop(image,old,name,*args,**kwargs):
+                r=copy.deepcopy(old)
+                if '_title_' in name:r['text']='Travellers Report'
+                else:
+                    r['text']='The TEST Romans have abandoned their great project,'
+                    if case=='nation':r['text']=r['text'].replace('Romans','OTHER')
+                    if case=='verb':r['text']=r['text'].replace('abandoned','undertaken')
+                    if case=='peer' and kwargs.get('grayscale'):r['text']=old['text']
+                    if case=='weak':r['confidence']=.5
+                return [r]
+            with self.subTest(case=case),patch.object(observe,'_crop_text',side_effect=crop):
+                observe._recover_travellers_title(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            if case=='valid':
+                self.assertEqual(rows[0]['text'],'Travellers Report')
+                self.assertEqual(rows[1]['text'],'The TEST Romans have abandoned their great project,')
+                self.assertEqual(rows[2],before[2])
+            else:self.assertEqual(rows,before)
+
+    def test_actual_zulu_abandonment_is_only_an_informational_notice(self):
+        p=Path('runs/attempt-010/screens/ui-0003118.png')
+        if not p.exists():self.skipTest('Private original report unavailable')
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'ABANDONWONDER')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        body=next(r for r in o['lines']if r['text'].startswith('The Zulus'))
+        self.assertEqual(body['text'],'The Zulus have abandoned their great project,')
+        self.assertIn('ahandoned',body['provenance'][0]['text'])
+        self.assertIn('Hanging Gardens.',d['visible_text'])
+
     def test_optional_original_public_start_report(self):
         root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-005/screens/ui-0002312.png'
         if not p.exists() or not(root/'.runtime/ocr').exists():self.skipTest('Private original report unavailable')

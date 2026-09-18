@@ -9,6 +9,39 @@ from tests.test_herald import prepared
 
 
 class PopulationPixelsTests(unittest.TestCase):
+    def test_population_body_boundary_comes_from_identical_complete_pixel_reads(self):
+        base=[prepared('Domestic Advisor',263,184,114,13),
+              prepared("The population of'the fertile TEST empire now exceeds",147,205,376,19),
+              prepared('500,000 citizens.',144,228,112,16),prepared('OK',309,282,24,13)]
+        for case in ('good','disagree','nation','partial','number','extra','geometry'):
+            rows=copy.deepcopy(base);a=copy.deepcopy(base[1]);a['text']=a['text'].replace("of'the",'of the');b=copy.deepcopy(a)
+            if case=='disagree':b['text']=base[1]['text']
+            if case=='nation':a['text']=b['text']=a['text'].replace('TEST','OTHER')
+            if case=='partial':rows[1]['text']="The population of'the TEST now exceeds"
+            if case=='number':rows[2]['text']='Unknown citizens.'
+            if case=='extra':rows.append(prepared('Cancel',400,282,40,13))
+            if case=='geometry':b['center'][1]+=20
+            before=copy.deepcopy(rows)
+            with patch.object(observe,'_crop_text',side_effect=[[a],[b]]):
+                observe._recover_population_notice(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            if case=='good':
+                self.assertEqual(rows[1]['text'],a['text']);self.assertEqual(rows[2:],before[2:])
+                self.assertEqual(rows[1]['provenance'][0]['text'],base[1]['text'])
+            else:self.assertEqual(rows,before,case)
+
+    def test_actual_half_million_population_notice(self):
+        p=Path('runs/attempt-011/screens/ui-0003037.png')
+        if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original frame unavailable')
+        from civ2.run import game_text
+        from civ2.dialogs import classify_dialog
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'FERTILE')
+        self.assertFalse(d['requires_model']);self.assertEqual([r['text'] for r in d['options']],['OK'])
+        body=next(r for r in o['lines'] if r['text'].startswith('The population'))
+        self.assertEqual(body['text'],'The population of the fertile Roman empire now exceeds')
+        self.assertEqual([r['preprocessing'] for r in body['provenance'][-2:]],['population_body_rgb3','population_body_gray3'])
+        self.assertIn('500,000 citizens.',o['text'])
+
     def test_only_digits_preserving_two_actual_readings_replace_punctuation(self):
         base=[prepared('Domestic Advisor',263,182,116,16),
               prepared('The population of the fertile TEST empire now exceeds',146,208,390,16),
