@@ -32,3 +32,20 @@ class AmbiguousStatusEra(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class NumericEraGlyph(unittest.TestCase):
+    def test_numeric_era_glyph_requires_agreement_preserving_year(self):
+        for text in ('A.D. 500','A.D. 600','500 B.C.'):
+            old=prepared('8.D. 500',474,218,48,10);rows=[deepcopy(old)]
+            a=prepared(text,476,218,46,11)
+            with patch.object(observe,'_crop_text',side_effect=[[deepcopy(a)],[deepcopy(a)]]):
+                observe._recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{'passes':[]})
+            self.assertEqual(rows[0]['text'],text if text=='A.D. 500' else old['text'])
+
+    def test_original_ad500_recovers_from_actual_pixels(self):
+        p=Path('runs/attempt-012/screens/ui-0002469.png')
+        if not p.exists():self.skipTest('Private original image unavailable')
+        o=observe.recognize(p);row=next(r for r in o['lines'] if r['text']=='A.D. 500')
+        self.assertEqual(row['provenance'][0]['text'],'8.D. 500')
+        self.assertGreaterEqual(len(row['provenance']),3)
+        self.assertTrue(all(r['text']=='A.D. 500' for r in row['provenance'][1:]))

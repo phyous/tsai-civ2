@@ -813,7 +813,7 @@ class Session:
         # joined label as if it were one native OCR line.
         inputs = self.game.click(*action['parameters']['center'])
         time.sleep(.25)
-        if option.get('control') != 'button':
+        if option.get('control') != 'button' and action['parameters'].get('selection_only') is not True:
             inputs += self.ui.key('Enter')
         receipt = {'target':action['parameters']['observed_text'],
                    'point':action['parameters']['center'],'before':current['sha256'],'inputs':inputs}
@@ -1002,12 +1002,14 @@ class Session:
     def finish(self, *, status='paused', reason='Session paused for inspection.'):
         self.game.rpc('pause')
         self.publish(status, reason)
+        # A failed final capture must leave the journal/recording recoverable,
+        # without declaring this still-running session stopped or finalized.
+        recording = self.recorder.stop() if self.recorder else None
         self.journal.append('session_stopped',status=status,reason=reason,
             decisions=self.decisions,api_requests=self.client.request_count,
             input_tokens=self.client.input_tokens_total,output_tokens=self.client.output_tokens_total,
             ledger=self.ledger())
-        if self.recorder:
-            recording = self.recorder.stop()
+        if recording is not None:
             recording['path'] = 'video/'+recording['path']
             self.journal.append('recording_finalized', **recording)
         self.journal.close()

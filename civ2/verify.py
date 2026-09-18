@@ -552,6 +552,18 @@ def _pointer_park(payload,files):
     return len(moves),failed
 
 
+
+def _foreign_contact_pixels(request,files):
+    report=request.get('state',{}).get('mandatory_dialog',{}).get('foreign_contact_report')
+    if report is None:return
+    _require(isinstance(report,dict),'Foreign contact report is malformed')
+    from .foreign_report import _two_pixels
+    digest=report.get('image_sha256')
+    actual=_two_pixels({'path':files.path(files.screen(digest)),'sha256':digest})
+    _require(actual is not None and report.get('pixels')==actual,
+             'Foreign contact selection differs from its retained original radio pixels')
+
+
 def _action_binding(action, request, question, saves, *, forced=False):
     _require(isinstance(action, dict) and set(action) ==
              {'id', 'kind', 'label', 'actor', 'preconditions', 'parameters'}, 'Selected action schema is invalid')
@@ -620,6 +632,33 @@ def _action_binding(action, request, question, saves, *, forced=False):
         dialog = model.get('mandatory_dialog', {})
         _require(dialog.get('title') == actor.get('title') and action['label'] in dialog.get('options', []),
                  'Dialog action differs from the model-observed native menu')
+        report=dialog.get('foreign_contact_report')
+        if report is not None:
+            from .foreign_report import SOURCE_SHA256,TWO_FRAME
+            _require(isinstance(report,dict) and actor.get('id')=='foreign_minister'
+                     and report.get('resource_sha256')==SOURCE_SHA256
+                     and report.get('image_sha256')==pre['image_sha256']
+                     and report.get('observed_title')==actor['title']
+                     and report.get('complete_contact_count')==2,
+                     'Foreign contact choice lacks its original report binding')
+            contacts=report.get('contacts');buttons=report.get('buttons');pixels=report.get('pixels',{})
+            _require(isinstance(contacts,list) and len(contacts)==2
+                     and isinstance(buttons,list) and len(buttons)==3
+                     and all(isinstance(r,dict) for r in contacts+buttons)
+                     and [b.get('text') for b in buttons]==['Check Intelligence','Send Emissary','Cancel']
+                     and dialog['options']==[r.get('text') for r in contacts+buttons]
+                     and pixels.get('frame_bounds')==list(TWO_FRAME)
+                     and type(pixels.get('selected_contact_index')) is int
+                     and pixels['selected_contact_index'] in (0,1),
+                     'Foreign report lost its complete observed contacts or controls')
+            selected_contact=contacts[pixels['selected_contact_index']]
+            _require(report.get('selected_contact')=={k:selected_contact.get(k) for k in ('leader','tribe')}
+                     and index<5 and (contacts+buttons)[index].get('text')==action['label']
+                     and (contacts+buttons)[index].get('center')==point
+                     and (params.get('selection_only') is True if index<2 else 'selection_only' not in params),
+                     'Foreign report action differs from its observed selector or button')
+        else:
+            _require('selection_only' not in params,'Click-only contact selection lacks its original report')
         if actor.get('id') == 'buy_quote':
             _purchase_quote(dialog.get('quote'))
     elif question == 'empire_action':
@@ -885,6 +924,15 @@ def _dispatch(payload, action, question, files):
                      and receipt.get('point') == params['center']
                      and receipt.get('target') == action['label'], 'Dialog receipt differs from its observed selected target')
             _require(keys in ([], [('Enter', True), ('Enter', False)]), 'Dialog dispatch contains unrelated keys')
+            if params.get('selection_only') is True:
+                from .foreign_report import _two_pixels
+                proof=_two_pixels({'path':files.path(files.screen(before)),'sha256':before})
+                index=params.get('option_index')
+                _require(action['actor'].get('id')=='foreign_minister' and index in (0,1)
+                         and proof is not None and not keys
+                         and 62<=params['center'][0]<=600
+                         and abs(params['center'][1]-(235+25*index))<=5,
+                         'Contact selector must be a verified two-contact radio click without Enter')
         mouse = [r for r in inputs if r['type'] == 'mouse' and r['event'] != 'mousemove']
         _require([r['event'] for r in mouse] == ['mousedown', 'mouseup']
                  and all(r['button'] == 0 for r in mouse), 'Dialog dispatch must contain one ordinary left click')
@@ -1358,7 +1406,43 @@ def _plan_target_binding(request,category_decision,categories,started,latest_rev
              'Target request changes the selected category, actor, observation or offered leaves')
 
 
-def _recording(files, payload, ffprobe):
+def _final_recording_observation(files, parent, manifest, payload, records, minimum_sequence):
+    value = manifest.get('final_observation')
+    if value is None:
+        _require('final_observation' not in payload, 'Final recording evidence differs from manifest')
+        return None
+    from .recording_final import METHOD
+    _require(payload.get('final_observation') == value and isinstance(value, dict)
+             and set(value) == {'method','input_sequence','game','dashboard','sample','frame','elapsed_ms'}
+             and value.get('method') == METHOD and _int(value.get('input_sequence'))
+             and value['input_sequence'] >= minimum_sequence and _int(value.get('sample'), 1)
+             and value['sample'] <= len(records), 'Final recording observation is malformed')
+    row = records[value['sample']-1]
+    _require(all(value.get(key) == row.get(key) for key in ('sample','frame','elapsed_ms')),
+             'Final recording observation has no matching encoded sample')
+    images = {}
+    for key in ('game','dashboard'):
+        item = value.get(key)
+        _require(isinstance(item, dict) and set(item) == {'name','sha256','bytes'}
+                 and isinstance(item.get('name'),str)
+                 and re.fullmatch(r'final-'+key+r'-[0-9]{3,}\.png', item['name'])
+                 and _int(item.get('bytes'), 24), 'Final recording image descriptor is invalid')
+        descriptor = files.inspect(str(parent/item['name']), item['sha256'], item['bytes'])
+        try:
+            from PIL import Image
+            with Image.open(files.path(descriptor['path'])) as image:
+                _require(image.format == 'PNG' and (key != 'game' or image.size == (640,480)),
+                         'Final recording image is not an original PNG')
+                image.verify()
+        except (OSError, ValueError):
+            raise VerificationError('Final recording image cannot be decoded') from None
+        images[key] = descriptor
+    _require(row['sha256'] == images['dashboard']['sha256'],
+             'Retained final dashboard is not the recorded sample')
+    return {**value, **images, 'verification':'Recorded dashboard sample hash and original-resolution game image checked; paused-game continuity is a local recorder declaration, not automatic outcome recognition.'}
+
+
+def _recording(files, payload, ffprobe, minimum_sequence=0):
     manifest_name = str(PurePosixPath(payload['path']).parent / 'recording.json')
     info = files.inspect(manifest_name); manifest = files.json(manifest_name)
     parent = PurePosixPath(manifest_name).parent
@@ -1389,6 +1473,7 @@ def _recording(files, payload, ffprobe):
         previous_frame, previous_ms = row['frame'], row['elapsed_ms']
     _require(records[0]['frame'] == records[0]['elapsed_ms'] == 0
              and records[0].get('initial_observation') is True, 'Recording initial sample is missing')
+    final = _final_recording_observation(files,parent,manifest,payload,records,minimum_sequence)
     probe = {'status': 'unavailable'}
     executable = shutil.which('ffprobe') if ffprobe == 'auto' else ffprobe
     if executable:
@@ -1413,6 +1498,7 @@ def _recording(files, payload, ffprobe):
             raise VerificationError('ffprobe could not validate the encoded recording') from None
     return {'video': video, 'manifest': info, 'sample_ledger': ledger, 'fps': fps,
             'frames': frames, 'samples': samples, 'duration_seconds': duration, 'ffprobe': probe,
+            'final_observation': final,
             'journal_hash_anchored': False,
             'limitation': 'Current recorder journal anchors counts, not hashes of the MP4/manifest/sample ledger. Reported hashes are computed now. Original dashboard PNG samples were streamed, not retained, so sample hashes cannot be rechecked against source pixels.'}
 
@@ -2111,6 +2197,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto', recheck_trad
                      and action.get('label') == request['questions'][question]['criteria'][choice],
                      'Selected action does not match the actual model choice and criterion')
             _action_binding(action, request, question, saves)
+            _foreign_contact_pixels(request,files)
             if action['kind']=='city_labor':
                 signature={k:action['actor'][k] for k in ('id','owner','name','x','y')}
                 key=(signature['id'],signature['name'],action['preconditions']['year_raw'])
@@ -2196,9 +2283,59 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto', recheck_trad
             # Sequence bounds are not reconstructed receipts, an input count,
             # a model dispatch, or completion/cancellation of a transaction.
         elif kind == 'controller_update':
-            _require(set(payload) in ({'reason'},{'reason','scope'}) and all(isinstance(value,str)
-                     and 0<len(value)<=512 for value in payload.values()),
-                     'Controller update must be a bounded diagnostic note')
+            if (set(payload)=={'change','executes_input'} and payload['executes_input'] is False
+                    and payload['change']=='Support original complete two-contact F3 report with independently observed selected radio and separate model-only contact/button choices; no Enter follows contact selection'):
+                pass  # Exact historical diagnostic only; no authority or effects.
+            elif 'change' in payload:
+                expected={'change','finish_decision','source_turn','continue_decision','notice_image',
+                          'selected_unit','current_image','turn_advanced','executes_input'}
+                revision_keys=set(payload)&{'save_sha256','observation_sha256'}
+                _require(len(revision_keys)==1 and set(payload)==expected|revision_keys
+                         and payload['change']=='Resolve pending FinishTurn after production returns to owned unit input'
+                         and payload['turn_advanced'] is False and payload['executes_input'] is False,
+                         'Invalid production-return diagnostic schema')
+                finish=payload['finish_decision'];notice=payload['continue_decision']
+                _require(_int(finish,1) and _int(notice,1) and finish<notice
+                         and finish in dispatched and notice in dispatched
+                         and notice==max(decisions) and latest_save_sha256 in saves
+                         and _revision_digest(payload)==latest_save_sha256,
+                         'Production-return note lacks current dispatched decisions and native state')
+                state=saves[latest_save_sha256];fa=decisions[finish]['action'];na=decisions[notice]['action']
+                _require(fa.get('kind')=='finish_turn' and na.get('kind')=='dialog_choice'
+                         and na.get('actor',{}).get('id')=='production_notice'
+                         and na.get('parameters',{}).get('observed_text','').lstrip('• ').casefold()=='continue'
+                         and fa['preconditions']['turn']==na['preconditions']['turn']==state['turn']==payload['source_turn']
+                         and na['preconditions']['image_sha256']==payload['notice_image'],
+                         'Production-return note differs from recorded model choices')
+                units=[u for u in state['units'] if u['id']==state['selected_unit_id']]
+                noted=payload['selected_unit']
+                # Portable parsing leaves the RULES-derived display name None
+                # and omits specification/HP. Compare every native field with
+                # JSON types intact; only that absent name may be enriched.
+                # Name and HP consistency below do not independently establish
+                # the private specification or health, or authorize any input.
+                native_fields=set(units[0])-{'type'} if len(units)==1 else set()
+                _require(len(units)==1 and isinstance(noted,dict)
+                         and set(noted)==set(units[0])|{'specification','hp'}
+                         and canonical({k:noted[k] for k in native_fields})
+                             ==canonical({k:units[0][k] for k in native_fields})
+                         and (units[0]['type'] is None or noted['type']==units[0]['type'])
+                         and isinstance(noted['type'],str) and 0<len(noted['type'])<=128
+                         and _int(noted.get('hp'),1)
+                         and isinstance(noted.get('specification'),dict)
+                         and _int(noted['specification'].get('id'))
+                         and noted['specification']['id']==units[0]['type_id']
+                         and noted['specification'].get('name')==noted['type']
+                         and _int(noted['specification'].get('max_hp'),1)
+                         and noted['hp']==noted['specification']['max_hp']-units[0]['hp_lost']
+                         and units[0]['owner']==state['player']['id']
+                         and units[0]['movement_thirds_spent']==0 and units[0]['order_id']==255
+                         and units[0]['waiting'] is False,'Production-return note has no eligible owned unit')
+                files.screen(payload['current_image'])
+            else:
+                _require(set(payload) in ({'reason'},{'reason','scope'}) and all(isinstance(value,str)
+                         and 0<len(value)<=512 for value in payload.values()),
+                         'Controller update must be a bounded diagnostic note')
             # Narrative only: never authorizes input, resets pending state,
             # verifies source code, or establishes any claimed gameplay effect.
             controller_update_notes+=1
@@ -2477,7 +2614,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto', recheck_trad
             recoveries.append(identifier)
         elif kind == 'recording_finalized':
             _require(recording is None, 'Multiple recording finalizations are unsupported')
-            recording = _recording(files, payload, ffprobe)
+            recording = _recording(files, payload, ffprobe, latest_runtime_input)
         elif kind == 'session_stopped':
             stops.append(payload)
         elif kind == 'batch_observed_effect':

@@ -969,6 +969,16 @@ def dialog_candidates(observation, dialog):
                               "actor": {"kind": "dialog", "id": identifier, "title": title},
                               "preconditions": {**revision, "image_sha256": dialog["sha256"], "width": width, "height": height},
                               "parameters": {"center": list(center), "observed_text": label, "option_index": index}}
+        if option.get('control')=='radio_selector':
+            proof=dialog.get('evidence',{}).get('foreign_report',{})
+            if (identifier!='foreign_minister' or dialog.get('resource_tag')!='REPORTFOREIGN'
+                    or proof.get('complete_contact_count')!=2 or index not in (0,1)
+                    or proof.get('image_sha256')!=dialog['sha256']
+                    or len(proof.get('contacts',[]))!=2
+                    or proof['contacts'][index].get('text')!=label
+                    or proof['contacts'][index].get('center')!=list(center)):
+                raise PolicyError('Contact selection requires its exact original two-contact report')
+            actions[action_id]['parameters']['selection_only']=True
     if not actions:
         raise PolicyError("No enabled observed dialog option exists.")
     return actions
@@ -986,9 +996,17 @@ def dialog_panel_signature(dialog):
         controls=dialog.get(key)
         if not isinstance(controls,list) or not 1<=len(controls)<=64:return None
         if any(not isinstance(c,dict) or not isinstance(c.get('text'),str)
-               or c.get('control') not in ('button','option','list_item')
+               or c.get('control') not in ('button','option','list_item','radio_selector')
                or not isinstance(c.get('center'),list) or len(c['center'])!=2 for c in controls):return None
         result[key]=[{field:deepcopy(c.get(field)) for field in ('text','control','center')} for c in controls]
+    if any(c['control']=='radio_selector' for c in result['options']):
+        proof=dialog.get('evidence',{}).get('foreign_report',{})
+        selected=proof.get('pixels',{}).get('selected_contact_index')
+        contacts=proof.get('contacts')
+        if (dialog.get('kind')!='foreign_minister' or proof.get('complete_contact_count')!=2
+                or type(selected) is not int or selected not in (0,1)
+                or not isinstance(contacts,list) or len(contacts)!=2):return None
+        result['selected_contact']={'index':selected,'contact':deepcopy(contacts[selected])}
     return result
 
 
@@ -1013,6 +1031,12 @@ def dialog_request_for(observation, dialog, rules=None, recent_actions=None, *, 
     state = model_state(observation, rules, recent_actions) if _revision(observation, required=False) else {"observation_limits": "Only this visible dialog has been supplied; empire state is unavailable.", "recent_actions": _recent_actions(recent_actions)}
     state["mandatory_dialog"] = {"title": _label(dialog["title"]), "options": [a["label"] for a in actions.values()],
                                   "source": "Original game image OCR; options must remain present at execution."}
+    if any(a['parameters'].get('selection_only') is True for a in actions.values()):
+        state['mandatory_dialog']['foreign_contact_report']=deepcopy(dialog['evidence']['foreign_report'])
+        state['mandatory_dialog']['command_scope']=(
+            'A contact-row choice clicks only that radio and returns to the report. '
+            'It does not send an emissary or open intelligence. The selected contact is shown in '
+            'foreign_contact_report; choose the appropriate actual report button separately afterward.')
     feedback=repeated_dialog_feedback(observation,dialog,completed_dialog_clicks)
     if feedback:state['mandatory_dialog']['previous_click_observations']=feedback
     if 'visible_text' in dialog:

@@ -28,6 +28,31 @@ class ProductionUpgradeTests(unittest.TestCase):
         self.assertIsNotNone(d);self.assertEqual([x['text']for x in d['options']],['Zoom to City','Continue'])
         self.assertEqual(d['kind'],'production_upgrade_notice');self.assertEqual(args,before)
 
+    def test_paired_alternative_needs_full_provenance_and_one_unique_owned_city(self):
+        for case in ('valid','hash','native','reading','scale','crop','geometry','ambiguous','foreign','unchanged_words'):
+            o,s,r,l=fixture();old=o['lines'][1];old['text']='Production orders in TEST Twn upgraded from'
+            x,y,w,h=old['bounds'];text='Production orders in TEST Town upgraded from'
+            modes=['upgrade_city_rgb3','upgrade_city_gray3','upgrade_city_rgb2','upgrade_city_gray2']
+            reads=[dict(preprocessing=m,text=text,confidence=1,scale=int(m[-1]),
+                normalized_bounds=[x/640,y/480,w/640,h/480],crop=[x-3,y-3,x+w+3,y+h+3],
+                transform='grayscale; bicubic enlargement' if 'gray' in m else 'bicubic enlargement') for m in modes]
+            proof={'source_sha256':'a'*64,'native_text':old['text'],'row_bounds':list(old['bounds']),'text':text,'readings':reads}
+            old['production_upgrade_city_reading']=proof
+            if case=='hash':proof['source_sha256']='b'*64
+            if case=='native':proof['native_text']='Different original line'
+            if case=='reading':reads[2]['text']=old['text']
+            if case=='scale':reads[2]['scale']=3
+            if case=='crop':reads[1]['crop'][0]+=1
+            if case=='geometry':reads[1]['normalized_bounds'][1]+=.1
+            if case=='ambiguous':s['cities'].append({'name':'TEST Twn','owner':1})
+            if case=='foreign':s['cities'][0]['owner']=2
+            if case=='unchanged_words':proof['text']=text.replace('upgraded','downgraded')
+            d=self.classify(o,s,r,l)
+            self.assertEqual(d is not None,case=='valid',case)
+            if case=='valid':
+                self.assertEqual(d['evidence']['city_name'],'TEST Town')
+                self.assertEqual(o['lines'][1]['text'],'Production orders in TEST Twn upgraded from')
+
     def test_missing_or_unbound_body_controls_sources_and_conflicts_fail_closed(self):
         for case in ('body','city','unit','option','extra','button','title','source','labels','conflict','radio'):
             o,s,r,l=fixture();source=deepcopy(SOURCE)

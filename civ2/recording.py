@@ -102,13 +102,19 @@ class Recorder:
     def stop(self):
         if self.thread is None:
             return None
+        from .recording_final import retain_final_sample, validate_final_game
+        final = retain_final_sample(self)
         self.stop_event.set()
         self.thread.join(timeout=55)
         if self.thread.is_alive():
             raise RuntimeError('Recorder has not finalized')
         self.check()
+        # A last capture can race the stop signal by one frame. Let its actual
+        # encoded interval elapse while the original game remains paused.
+        time.sleep(max(0, self.frames/self.fps-(time.monotonic()-self.started)))
+        validate_final_game(self, final)
         result = {'path':'full-game.mp4','fps':self.fps,'frames':self.frames,
                   'samples':self.samples,'duration_seconds':self.frames/self.fps,
-                  'time_compression':False}
+                  'time_compression':False, 'final_observation':final}
         (self.directory/'recording.json').write_text(json.dumps(result, indent=2))
         return result

@@ -956,6 +956,93 @@ def _recover_gape_boundary(image,rows,executable,directory,evidence):
         if _replace_crop_row(rows,index,a,lambda before,after:True):rows[index]['provenance']+=b[0]['provenance']
 
 
+def _recover_upgrade_boundaries(image,rows,executable,directory,evidence):
+    """Read original upgrade punctuation and radio text together, from pixels."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if r['text']=='Domestic Advisor' and r['confidence']>=.8]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Exit')]
+    if len(titles)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    title,ok=titles[0],controls[0]
+    panel=sorted([r for r in rows if title['center'][1]<r['center'][1]<ok['center'][1]
+                  and 216<=r['bounds'][0]<=280],key=lambda r:r['center'][1])
+    if (len(panel)!=4 or any(r['confidence']<.8 for r in panel)
+            or not re.fullmatch(r'Production orders in [A-Za-z][A-Za-z -]{1,59} upgraded from',panel[0]['text'])
+            or not re.fullmatch(r'[A-Za-z][A-Za-z -]{1,59} to [A-Za-z][A-Za-z -]{1,59}[.,]',panel[1]['text'])
+            or not re.fullmatch(r'(?:[O○●•©)]{1,2} )?Zoom to City',panel[2]['text'])
+            or not re.fullmatch(r'(?:[O○●•] )?Continue',panel[3]['text'])
+            or any(not 16<=b['center'][1]-a['center'][1]<=32 for a,b in zip(panel,panel[1:]))):return
+    repairs=[]
+    if panel[1]['text'].endswith(','):repairs.append((panel[1],panel[1]['text'][:-1]+'.','tail'))
+    if panel[2]['text'].startswith('©) '):
+        repairs.append((panel[2],'Zoom to City','zoom'))
+        if panel[3]['text']!='Continue':repairs.append((panel[3],'Continue','continue'))
+    replacements=[]
+    for old,expected,name in repairs:
+        a=_crop_text(image,old,f'upgrade_{name}_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+        b=_crop_text(image,old,f'upgrade_{name}_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text'] or a[0]['text']!=expected
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+        fresh=dict(a[0]);fresh['provenance']=old['provenance']+a[0]['provenance']+b[0]['provenance']
+        replacements.append((rows.index(old),fresh))
+    # The short-control pass may have reported Continue against its native
+    # radio prefix. Only this now twice-read same control resolves that exact
+    # conflict; preserve the conflicting read as evidence, never erase it.
+    resolved=[]
+    for index,fresh in replacements:
+        old=rows[index]
+        if fresh['text']=='Continue' and re.fullmatch(r'[O○●•] Continue',old['text']):
+            for conflict in evidence.get('conflicts',[]):
+                bounds=conflict.get('bounds',[])
+                if (conflict.get('text')!='Continue' or conflict.get('reason')!='contradictory overlapping native text'
+                        or not isinstance(bounds,list) or len(bounds)!=4 or any(type(v)is not int for v in bounds)
+                        or bounds[2]<=0 or bounds[3]<=0):continue
+                other={'bounds':bounds,'center':[round(bounds[0]+bounds[2]/2),round(bounds[1]+bounds[3]/2)]}
+                if _same_location(old,other) and _same_location(fresh,other):resolved.append(conflict)
+        rows[index]=fresh
+    if resolved:
+        evidence.setdefault('resolved_control_conflicts',[]).extend(deepcopy(resolved))
+        evidence['conflicts']=[c for c in evidence['conflicts'] if c not in resolved]
+
+
+def _recover_production_upgrade_city(image,rows,executable,directory,evidence):
+    """Read a changed city spelling at two scales; never take its name from state."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text']=='Domestic Advisor' and r['confidence']>=.8]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Exit')]
+    choices=[r for r in rows if re.fullmatch(r'(?:[O○●•] )?(?:Zoom to City|Continue)',r['text'])]
+    if (len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK' or len(choices)!=2
+            or {re.sub(r'^[O○●•] ','',r['text']) for r in choices}!={'Zoom to City','Continue'}):return
+    candidates=[(i,r,m) for i,r in enumerate(rows)
+                if (m:=re.fullmatch(r'Production orders in ([A-Za-z][A-Za-z -]{1,59}) upgraded from',r['text']))
+                and r['confidence']>=.8 and 216<=r['bounds'][0]<=240
+                and headings[0]['center'][1]+10<r['center'][1]<min(c['center'][1] for c in choices)-25]
+    if len(candidates)!=1:return
+    index,old,match=candidates[0]
+    tails=[r for r in rows if re.fullmatch(r'[A-Za-z][A-Za-z -]{1,59} to [A-Za-z][A-Za-z -]{1,59}\.',r['text'])
+           and r['confidence']>=.8 and 216<=r['bounds'][0]<=240 and 16<=r['center'][1]-old['center'][1]<=28]
+    if len(tails)!=1:return
+    readings=[]
+    for scale in (3,2):
+        a=_crop_text(image,old,f'upgrade_city_rgb{scale}',executable,directory,evidence,padding=(3,3),scale=scale)
+        b=_crop_text(image,old,f'upgrade_city_gray{scale}',executable,directory,evidence,padding=(3,3),scale=scale,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+        fresh=re.fullmatch(r'Production orders in ([A-Za-z][A-Za-z -]{1,59}) upgraded from',a[0]['text'])
+        if not fresh or not _near_text(match[1].casefold(),fresh[1].casefold(),1) or fresh[1]==match[1]:return
+        readings.append((a[0],b[0]))
+    if readings[0][0]['text']!=readings[1][0]['text']:return
+    # Keep the native reading. A cropped pair can share a font error, so only
+    # the source-bound classifier may resolve a unique owned city from these
+    # competing actual readings. Neither supplies a name from unseen state.
+    old['production_upgrade_city_reading']={
+        'source_sha256':evidence.get('source_image_sha256'),
+        'native_text':old['text'],'row_bounds':list(old['bounds']),
+        'text':readings[0][0]['text'],
+        'readings':[p for pair in readings for r in pair for p in r['provenance']]}
+
+
 def _recover_support_notice(image,rows,executable,directory,evidence):
     """Two real crops restore an observed support-loss report, not an action."""
     if image.size!=(640,480):return
@@ -1141,7 +1228,7 @@ def _recover_status_year(image,rows,executable,directory,evidence):
         if number is None and trailing_mark:
             parts=date_parts(trailing_mark[1])
             if parts is not None:number,old_era=parts
-        damaged_prefix=re.fullmatch(r'([A-Za-z.]{2,6})\s+([0-9]{1,5})',old['text'])
+        damaged_prefix=re.fullmatch(r'([A-Za-z0-9.]{2,6})\s+([0-9]{1,5})',old['text'])
         if number is None and damaged_prefix:
             candidates=[value for value in ('AD','BC') if _near_text(era(damaged_prefix[1]),value,1)]
             if len(candidates)==1:number,old_era=damaged_prefix[2],candidates[0]
@@ -2138,7 +2225,7 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
     # replacement must independently contain the actual original "What".
     # A missing OCR space before "in" may locate the list for pixel re-reads,
     # but never supplies a canonical title or authorizes its classification.
-    titles=[r for r in rows if (re.match(r'^wh(?:at|ait) (?:shall|chall)\s*(?:we|me)\s+[a-z]{3,7}?\s*in .+',r['text'],re.I)
+    titles=[r for r in rows if (re.match(r'^wh(?:at|ait) (?:shall|chall)\s*(?:we|me|te)\s+[a-z]{3,7}?\s*in .+',r['text'],re.I)
                               or r.get('production_caption_fragments') is True)
             and r['confidence']>=.8 and 70<r['center'][1]<350]
     if len(titles)!=1:return
@@ -2152,7 +2239,7 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
     # separately cropped RGB and grayscale pass. Keep that actual reading;
     # do not replace the verb or city with a guessed canonical title.
     heading=lambda text:re.fullmatch(r'what shall\s*(?:we|me) ([a-z]{3,7}) in (.{1,60})',text.strip().rstrip('?'),re.I)
-    old_heading=re.fullmatch(r'wh(?:at|ait) (?:shall|chall)\s*(?:we|me)\s+([a-z]{3,7}?)\s*in (.{1,60})',title['text'].strip().rstrip('?'),re.I)
+    old_heading=re.fullmatch(r'wh(?:at|ait) (?:shall|chall)\s*(?:we|me|te)\s+([a-z]{3,7}?)\s*in (.{1,60})',title['text'].strip().rstrip('?'),re.I)
     if old_heading and (not heading(title['text']) or not _near_text(old_heading[1].casefold(),'build',2)):
         city_readings=[]
         framings=[(3,(6,6)),(2,(6,6)),(2,(3,3))]
@@ -2234,7 +2321,7 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
 def _recover_production_option_rows(image,rows,executable,directory,evidence):
     """Read damaged list labels, including icon ink, from complete row crops."""
     if image.size!=(640,480):return
-    titles=[r for r in rows if re.fullmatch(r'What shall (?:we|me) [a-z]{3,7} in .{1,60}\?',r['text'])
+    titles=[r for r in rows if re.fullmatch(r'Wha(?:t|it) shall (?:we|me) [a-z]{3,7} in .{1,60}\?',r['text'])
             and r['confidence']>=.8 and 70<r['center'][1]<350]
     if len(titles)!=1:return
     title=titles[0]
@@ -2513,7 +2600,7 @@ def _recover_moving_status(image,rows,executable,directory,evidence):
     """Read the fixed unit-pane heading twice; never infer a move or actor."""
     if image.size!=(640,480):return
     candidates=[(i,r) for i,r in enumerate(rows) if r['bounds'][0]>=475 and 245<=r['center'][1]<=268
-                and r['bounds'][2]<=160 and r['confidence']>=.8 and re.fullmatch(r'[A-Za-z]+ [A-Za-z]+',r['text'])
+                and r['bounds'][2]<=160 and r['confidence']>=.8 and re.fullmatch(r'[^\W\d_]+ [^\W\d_]+',r['text'])
                 and _near_text(r['text'].casefold(),'moving units',6)]
     if len(candidates)!=1:return
     index,row=candidates[0]
@@ -2564,7 +2651,7 @@ def _recover_completion_zoom(image,rows,executable,directory,evidence):
         if len(first)!=1 or len(second)!=1:continue
         a,b=first[0],second[0]
         if a['text']!='Zoom to City' or b['text']!='Zoom to City' or b['confidence']<.8 or not _same_location(row,b):continue
-        if _replace_crop_row(rows,index,first,lambda old,new:True):rows[index]['provenance']+=b['provenance']
+        if _replace_crop_row(rows,index,first,lambda old,new:True):rows[index]['provenance']+=second[0]['provenance']
 
 
 def _map_patch_colors(image, rows, source_hash):
@@ -2595,7 +2682,7 @@ def recognize(path: str | Path) -> dict:
     with Image.open(path) as image:
         width, height = image.size
         rows = _prepare_rows(_run_ocr(executable, path), width, height, 'native')
-        evidence = dict(passes=['native'], conflicts=[], fallback_errors=[])
+        evidence = dict(passes=['native'], conflicts=[], fallback_errors=[],source_image_sha256=original_hash)
         # Analysis copies are temporary and ignored; coordinates always use the
         # original image dimensions, since Vision reports normalized boxes.
         with tempfile.TemporaryDirectory(prefix='ocr-', dir=ROOT / '.runtime') as directory:
@@ -2641,7 +2728,7 @@ def recognize(path: str | Path) -> dict:
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
             for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_exchange_advance_row,_recover_split_production_title,_recover_joined_production_title,_recover_city_and_production_rows,_recover_production_option_rows,_recover_city_caption_year,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_council_title,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_stolen_advance_notice,_recover_capture_notice_title,_recover_foreign_completion_title,_recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_support_notice,_recover_travellers_title,_recover_population_decrease_option,_recover_population_notice,_recover_map_menu_label,_recover_map_heading,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_title_fragments,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_intruder_notice,_recover_tech_demand_title,_recover_herald_title,_recover_exchange_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_missing_ok,_recover_treaty_closing_rows,_recover_greeting_body,_recover_howdy_spacing,_recover_diplomacy_gift_row,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_fortress_order_body,_recover_masked_city_badge,_recover_merged_city_badge,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+                            _recover_stolen_advance_notice,_recover_capture_notice_title,_recover_foreign_completion_title,_recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_upgrade_boundaries,_recover_production_upgrade_city,_recover_support_notice,_recover_travellers_title,_recover_population_decrease_option,_recover_population_notice,_recover_map_menu_label,_recover_map_heading,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_title_fragments,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_intruder_notice,_recover_tech_demand_title,_recover_herald_title,_recover_exchange_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_missing_ok,_recover_treaty_closing_rows,_recover_greeting_body,_recover_howdy_spacing,_recover_diplomacy_gift_row,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_fortress_order_body,_recover_masked_city_badge,_recover_merged_city_badge,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

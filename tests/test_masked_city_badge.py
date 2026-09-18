@@ -43,7 +43,7 @@ class MaskedCityBadgeTests(unittest.TestCase):
                 observe._recover_masked_city_badge(Image.new('RGB',(640,480)),rows,None,None,{})
             if case=='valid':
                 self.assertEqual([r['text'] for r in rows[:2]],['Pompeii','1'])
-                self.assertTrue(all(r['provenance'][0]['text']=='Роmpеї па' for r in rows[:2]))
+                self.assertTrue(all(r['provenance'][0].get('text')=='Роmpеї па' for r in rows[:2]))
             else:self.assertEqual(rows[0]['text'],'Роmpеї па',case)
 
     def test_actual_mixed_script_components_match_pixels_and_keep_native_raw_text(self):
@@ -51,7 +51,7 @@ class MaskedCityBadgeTests(unittest.TestCase):
         if not path.exists():self.skipTest('Private original image unavailable')
         from civ2.map_badges import proven_badge
         before=path.read_bytes();result=observe.recognize(path)
-        found=[r for r in result['lines'] if r['provenance'][0]['text']=='Роmpеї па']
+        found=[r for r in result['lines'] if r['provenance'][0].get('text')=='Роmpеї па']
         self.assertEqual(len(found),2)
         self.assertEqual(found[1]['text'],'1')
         self.assertTrue(any(p['text']=='Pompeii' and p['preprocessing']=='masked_city_badge_white160' for p in found[0]['provenance']))

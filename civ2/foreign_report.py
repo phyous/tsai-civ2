@@ -1,7 +1,7 @@
-"""Original single-contact Foreign Minister report; every button needs Jev.
+"""Original Foreign Minister reports; every contact and button needs Jev.
 
-The measured one-contact window and selected radio are required. Multiple
-contacts, other layouts, and a partially read report fail closed. This reports
+Measured one- and two-contact windows and selected radios are required.
+Other layouts and a partially read report fail closed. This reports
 the observed leader/tribe; it does not infer the native civilization slot.
 """
 from copy import deepcopy
@@ -16,7 +16,7 @@ SOURCE = dict(tag='REPORTFOREIGN', title='Foreign Minister', width=580,
     body='Sire, our power is %STRING0 and our reputation is %STRING1.',
     options=[], buttons=['Check Intelligence', 'Send Emissary'], listbox=False)
 SOURCE_SHA256 = '77ea7cf68eb56a39dc6bc96372b3b34bb5abe9ef42ae46bb4cb5ecb21d6d3129'
-TITLES = {'Foreign Minister', 'Foreign Winister', 'Foreign Minisber'}
+TITLES = {'Foreign Minister', 'Foreign Winister', 'Foreign Minisber', 'Foreign Ifinister', 'ForeignMfinister'}
 REPUTATIONS = ('Spotless', 'Excellent', 'Honorable', 'Questionable', 'Dishonorable', 'Poor', 'Despicable', 'Atrocious')
 POWERS = ('Pathetic', 'Weak', 'Inadequate', 'Moderate', 'Strong', 'Mighty', 'Supreme')
 RELATIONS = ('Allied', 'Peace', 'Cease Fire', 'War')
@@ -48,6 +48,112 @@ def _pixels(observation):
     return [{'bounds':list(box), 'rgb_sha256':digest} for box,digest in PIXELS]
 
 
+
+# Exact original attempt011/ui2738, two contacts. Every border and the empty
+# band below both contacts is checked; each complete radio has either measured
+# selected or unselected pixels, with exactly one selected. No text pixels are
+# reconstructed from these hashes.
+TWO_FRAME = (20,170,622,312)
+TWO_PIXELS = (
+    ((20,170,622,172), '930e7ae56be0addb6d373ff3ffd44668592d3efdfc73a634eaf84627e1ed38ae'),
+    ((20,171,22,311), 'cbd3892b96c7afd659e706195e69bbf7fcdf4d2fd06728ac5cb66adb6abca24f'),
+    ((620,171,622,311), 'd02e5fa54e4a9106a5695e11530724cf5473a41ad8aa320029a471f5e9772908'),
+    ((20,310,622,312), '783d2d7565842a119710c3e6bdd48fb101e74fc0c525ef6f641d3559efb2109c'),
+    ((22,273,620,281), 'ea33415914904d3a6792ae33e8435c55ea7a253e00c7cd1f4e3287e97b78d859'),
+)
+TWO_RADIOS = ((39,226,57,244),(39,251,57,269))
+
+
+def _two_pixels(observation):
+    path=observation.get('path')
+    if not isinstance(path,(str,Path)):return None
+    try:
+        data=Path(path).read_bytes()
+        if hashlib.sha256(data).hexdigest()!=observation.get('sha256'):return None
+        with Image.open(BytesIO(data)) as source:
+            if source.format!='PNG' or source.size!=(640,480):return None
+            image=source.convert('RGB')
+        if any(hashlib.sha256(image.crop(box).tobytes()).hexdigest()!=digest for box,digest in TWO_PIXELS):return None
+        from .gdi_text import WHITE_RING,BLACK_RING
+        pixels=image.load();radios=[]
+        for y in range(219,273):
+            for x in range(30,612):
+                if (all(pixels[x+dx,y+dy]==(255,255,255) for dx,dy in WHITE_RING)
+                        and all(pixels[x+dx,y+dy]==(0,0,0) for dx,dy in BLACK_RING)):
+                    radios.append((x,y))
+        if radios!=[(47,235),(47,260)]:return None
+        states=[]
+        for x,y in radios:
+            colors={pixels[xx,yy] for xx in range(x-2,x+3) for yy in range(y-1,y+2)}
+            if colors=={(0,0,0)}:states.append(True)
+            elif colors=={(195,195,195)}:states.append(False)
+            else:return None
+        if states.count(True)!=1:return None
+        hashes=[hashlib.sha256(image.crop(box).tobytes()).hexdigest() for box in TWO_RADIOS]
+        return dict(frame_bounds=list(TWO_FRAME),selected_contact_index=states.index(True),
+            radio_regions=[{'bounds':list(box),'rgb_sha256':digest} for box,digest in zip(TWO_RADIOS,hashes)],
+            pixel_regions=[{'bounds':list(box),'rgb_sha256':digest} for box,digest in TWO_PIXELS])
+    except (OSError,ValueError):return None
+
+
+def _two_contacts(observation,rows,rules,labels_text):
+    left,top,right,bottom=TWO_FRAME;inside=[];outside=[]
+    for row in rows:
+        x,y,w,h=row['bounds']
+        # The independently exact bottom two border rows may overlap the
+        # OCR box of background text below the foreground window.
+        if x+w<=left or x>=right or y+h<=top or (y>=bottom-2 and row['center'][1]>=bottom):outside.append(row)
+        elif left<=x and top<=y and x+w<=right and y+h<=bottom:inside.append(row)
+        else:return None
+    if len(inside)!=7 or any(r['confidence']<.8 for r in inside):return None
+    ordered=sorted(inside,key=lambda r:(r['center'][1],r['center'][0]))
+    title,body=ordered[:2];contacts=ordered[2:4];buttons=sorted(ordered[4:],key=lambda r:r['center'][0])
+    if (title['text'] not in TITLES or not 315<=title['center'][0]<=327 or not 181<=title['center'][1]<=190
+            or not 28<=body['bounds'][0]<=34 or not 199<=body['bounds'][1]<=207
+            or not 205<=body['center'][1]<=215):return None
+    match=re.fullmatch(r'Sire, our power is ([A-Za-z]+) and our reputation is ([A-Za-z]+)\.',body['text'])
+    if not match or match[1] not in POWERS or match[2] not in REPUTATIONS:return None
+    named=[]
+    for row,cy in zip(contacts,(235,260)):
+        prefixed=re.match(r'^(?:O|[○●•]) ',row['text'])
+        # The visible radio can be included in its OCR row. Retain the raw
+        # marker; selected state comes exclusively from the independent pixels.
+        text=row['text'][prefixed.end():] if prefixed else row['text']
+        left_ok=38<=row['bounds'][0]<=44 if prefixed else 62<=row['bounds'][0]<=72
+        if not (left_ok and abs(row['center'][1]-cy)<=5 and row['bounds'][3]<=24):return None
+        m=re.fullmatch(r"([A-Za-z][A-Za-z .'-]{1,80}) of the ([A-Za-z][A-Za-z '-]{0,45}) \(([A-Za-z][A-Za-z -]{0,30}), (Allied|Peace|Cease Fire|War), No Embassy\)",text)
+        if not m:return None
+        candidates=[]
+        for leader in rules.get('leaders',[]):
+            if not isinstance(leader,dict) or leader.get('tribe')!=m[2]:continue
+            for sex in ('male','female'):
+                name=leader.get(sex)
+                if (isinstance(name,str) and m[1].endswith(' '+name)
+                        and re.fullmatch(r"[A-Za-z][A-Za-z .'-]{0,35}",m[1][:-len(name)-1])):
+                    candidates.append(dict(leader=name,tribe=leader['tribe']))
+        if len(candidates)!=1:return None
+        named.append(candidates[0])
+    if named[0]==named[1] or [r['text'] for r in buttons]!=['Check Intelligence','Send Emissary','Cancel']:return None
+    if any(abs(row['center'][0]-cx)>6 or not 289<=row['center'][1]<=300 or not 283<=row['bounds'][1]<=291
+           for row,cx in zip(buttons,(126,321,519))):return None
+    pixels=_two_pixels(observation)
+    if pixels is None:return None
+    def control(row,kind):
+        return {k:deepcopy(row[k]) for k in ('text','center','source_line','confidence')}|{'control':kind,'enabled':None}
+    choices=[control(r,'radio_selector') for r in contacts]+[control(r,'button') for r in buttons]
+    proof=dict(resource_sha256=SOURCE_SHA256,image_sha256=observation['sha256'],
+        labels_sha256=hashlib.sha256(labels_text.encode()).hexdigest(),
+        observed_title=title['text'],observed_body=body['text'],complete_contact_count=2,
+        contacts=[dict(text=r['text'],center=deepcopy(r['center']),**name) for r,name in zip(contacts,named)],
+        buttons=[dict(text=r['text'],center=deepcopy(r['center'])) for r in buttons],
+        pixels=pixels,selected_contact=named[pixels['selected_contact_index']],
+        source_lines=[r['source_line'] for r in ordered],
+        outside_report_rows=[{'text':r['text'],'bounds':r['bounds'],'source_line':r['source_line']} for r in outside],
+        scope='Two observed contacts; selecting a radio only changes the report selection. Each report button needs a separate model choice. No native civilization-slot mapping inferred.')
+    return dict(kind='foreign_minister',title=title['text'],resource_tag='REPORTFOREIGN',options=choices,
+        buttons=deepcopy(choices[2:]),requires_model=True,mechanical_action=None,evidence={'foreign_report':proof})
+
+
 def classify_foreign_report(observation, rows, resources, rules, labels_text):
     """Accept validated classifier rows and retain all actual button choices."""
     if (not isinstance(observation,dict) or (observation.get('width'),observation.get('height')) != (640,480)
@@ -62,6 +168,8 @@ def classify_foreign_report(observation, rows, resources, rules, labels_text):
     if (labels[7:11] != ['@POPUPS','OK','Help','Cancel']
             or labels[157:162] != [*RELATIONS,'No Embassy']
             or labels[236:251] != [*REPUTATIONS,*POWERS]): return None
+    two=_two_contacts(observation,rows,rules,labels_text)
+    if two is not None:return two
     inside=[];outside=[]
     for row in rows:
         x,y,w,h=row['bounds'];left,top,right,bottom=FRAME

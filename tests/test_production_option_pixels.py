@@ -49,6 +49,31 @@ class ProductionOptionPixels(unittest.TestCase):
                 observe._recover_production_option_rows(Image.new('RGB',(640,480)),rows,None,None,{})
             crop.assert_not_called()
 
+    def test_measured_whait_heading_only_locates_exact_independent_option_reads(self):
+        rows=panel();rows[0]['text']='Whait shall me boildd in TEST?'
+        good=prepared('Courthouse',179,200,75,14)
+        with patch.object(observe,'_production_names',return_value=NAMES),patch.object(observe,'_crop_text',return_value=[deepcopy(good)]):
+            observe._recover_production_option_rows(Image.new('RGB',(640,480)),rows,None,None,{})
+        self.assertEqual(rows[-2]['text'],'Courthouse');self.assertEqual(rows[0]['text'],'Whait shall me boildd in TEST?')
+
+    def test_original_viroconium_gdi_title_and_all_sixteen_options(self):
+        path=Path('runs/attempt-010/screens/ui-0002769.png')
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text,labels_text
+        o=observe.recognize(path);o['path']=str(path.resolve())
+        state={'cities':[],'recent_founding_notices':[{'name':'Viroconium','year_text':'A.D. 220','source_tag':'FOUNDED',
+            'image_sha256':'903921e0ea2f00cc1b0b6a77476c7ef3856fda2193d45aec934e330362a5b7dc'}]}
+        d=classify_dialog(o,state=state,rules=parse_rules(original_rules()),game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['kind'],'production_choice')
+        self.assertEqual([r['text'] for r in d['options']],['Settlers','Warriors','Phalanx','Archers','Horsemen',
+            'Catapult','Trireme','Diplomat','Caravan','Explorer','Palace','Barracks','Granary','Temple','MarketPlace','Library'])
+        row=next(r for r in o['lines'] if r['text']=='Catapult');self.assertEqual(row['provenance'][0]['text'],',Catapult')
+        self.assertEqual(d['title'],'What shall we build in Viroconium?');self.assertTrue(d['requires_model'])
+        self.assertIsNone(d['mechanical_action'])
+
     def test_actual_ravenna_full_original_choices_and_raw_provenance(self):
         path=Path('runs/attempt-010/screens/ui-0002275.png')
         if not path.exists():self.skipTest('Private original calibration image unavailable')

@@ -440,6 +440,48 @@ def _checkpoint_token(session):
                 year=state['year_raw'], journal_sequence=sequence)
 
 
+def _production_return_to_unit(session, context, dialog):
+    """Recognize player input after a completed, model-chosen production notice.
+
+    The native turn counter can advance before its production dialogs finish.
+    This is an input-readiness proof, never a claim that the turn advanced.
+    """
+    pending=context['pending_turn']
+    history=list(getattr(session,'history',[]))
+    if (pending is None or len(history)<2 or not dialog.get('supported')
+            or dialog.get('kind')!='normal_map'
+            or getattr(session,'pending_decisions',None)!=[]
+            or any(context.get(key) is not None for key in
+                   ('pending_empire','pending_city','pending_city_control','pending_labor_refresh',
+                    'pending_city_navigation','pending_diplomatic_followup','pending_trade'))
+            or getattr(session,'pending_unit_activation',None) is not None):
+        return None
+    finish, notice=history[-2:]
+    action=notice.get('action',{})
+    if (finish.get('decision')!=pending['decision']
+            or finish.get('action',{}).get('kind')!='finish_turn'
+            or finish.get('turn')!=pending['source_turn']
+            or notice.get('turn')!=pending['source_turn']
+            or notice.get('decision')!=getattr(session,'decisions',None)
+            or action.get('kind')!='dialog_choice'
+            or action.get('actor',{}).get('id')!='production_notice'
+            or action.get('parameters',{}).get('observed_text','').lstrip('• ').casefold()!='continue'):
+        return None
+    state=session.state
+    try:bound=prefixed_revision(state)
+    except RevisionError:return None
+    units=[u for u in state.get('units',[]) if u.get('id')==state.get('selected_unit_id')]
+    if len(units)!=1:return None
+    unit=units[0]
+    if (unit.get('owner')!=state.get('player',{}).get('id')
+            or type(unit.get('hp')) is not int or unit['hp']<=0
+            or unit.get('movement_thirds_spent')!=0 or unit.get('order_id')!=255
+            or unit.get('waiting') is not False):return None
+    return dict(finish_decision=pending['decision'],source_turn=pending['source_turn'],
+        continue_decision=notice['decision'],notice_image=action['preconditions']['image_sha256'],
+        selected_unit=deepcopy(unit),**bound)
+
+
 def _await_turn_resolution(session,context,observation,dialog,resources):
     """FinishTurn stays pending through combat, diplomacy and production.
 
@@ -461,6 +503,16 @@ def _await_turn_resolution(session,context,observation,dialog,resources):
             return observation,dialog,None
         if turn<pending['source_turn']:
             return observation,dialog,'Native turn moved backward while resolving FinishTurn.'
+        if _production_return_to_unit(session,context,dialog) is not None:
+            observation,dialog=observe_ready(session,resources)
+            proof=_production_return_to_unit(session,context,dialog)
+            if proof is not None:
+                session.journal.append('controller_update',
+                    change='Resolve pending FinishTurn after production returns to owned unit input',
+                    **proof,current_image=observation['sha256'],turn_advanced=False,
+                    executes_input=False)
+                context['pending_turn']=None
+                return observation,dialog,None
         if attempt==40:
             return observation,dialog,'Original turn is still resolving; no further map command issued.'
         session.game.rpc('resume')

@@ -385,6 +385,24 @@ class NativeRowCropTests(unittest.TestCase):
         with patch.object(observe,'_crop_text') as crop:observe._recover_moving_status(image,rows,None,None,{})
         crop.assert_not_called()
 
+    def test_accented_status_locator_still_requires_two_exact_original_pixel_reads(self):
+        image=Image.new('RGB',(640,480));old=self.prepared('Moưng Uhits',x=514,y=252,width=72,height=15)
+        good=self.prepared('Moving Units',x=514,y=254,width=72,height=12,source='TEST crop')
+        for peer in ([good],[]):
+            rows=[dict(old)]
+            with patch.object(observe,'_crop_text',side_effect=[[good],peer,[good],peer]):
+                observe._recover_moving_status(image,rows,None,None,{})
+            self.assertEqual(rows[0]['text'],'Moving Units' if peer else 'Moưng Uhits')
+            self.assertEqual(rows[0]['provenance'][0]['text'],'Moưng Uhits')
+
+    def test_actual_accented_moving_heading_uses_two_exact_white_masks(self):
+        path=Path('runs/attempt-010/screens/ui-0002726.png')
+        if not path.exists():self.skipTest('Private original calibration unavailable')
+        o=observe.recognize(path);r=next(r for r in o['lines'] if r['text']=='Moving Units')
+        self.assertEqual(r['provenance'][0]['text'],'Moưng Uhits')
+        self.assertEqual([p['text'] for p in r['provenance'][1:]],['Moving Units','Moving Units'])
+        self.assertEqual([p['preprocessing'] for p in r['provenance'][1:]],['moving_status_white190_3x','moving_status_white230_3x'])
+
     def test_completion_zoom_requires_source_heading_and_two_exact_pixel_readings(self):
         image=Image.new('RGB',(640,480));old=self.prepared('Loom to City',x=206,y=216,width=87,height=19)
         good=self.prepared('Zoom to City',x=205,y=218,width=88,height=15,source='TEST crop')

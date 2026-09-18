@@ -13,6 +13,41 @@ def normal(text):return ' '.join(text.casefold().split())
 def radio(text):return re.sub(r'^(?:O|[○●•])\s+','',text)
 
 
+def _one_edit(a,b):
+    if len(a)==len(b):return sum(x!=y for x,y in zip(a,b))<=1
+    if abs(len(a)-len(b))!=1:return False
+    longer,shorter=(a,b) if len(a)>len(b) else (b,a)
+    return any(longer[:i]+longer[i+1:]==shorter for i in range(len(longer)))
+
+
+def _paired_city_reading(observation,row):
+    index=row.get('source_line');lines=observation.get('lines',[])
+    if type(index)is not int or not 0<=index<len(lines):return None
+    proof=lines[index].get('production_upgrade_city_reading')
+    if (not isinstance(proof,dict) or set(proof)!={'source_sha256','native_text','row_bounds','text','readings'}
+            or proof['source_sha256']!=observation.get('sha256') or proof['native_text']!=row['text']
+            or proof['row_bounds']!=row['bounds'] or not isinstance(proof['text'],str)):return None
+    pattern=r'Production orders in ([A-Za-z][A-Za-z -]{1,59}) upgraded from'
+    old,new=re.fullmatch(pattern,row['text']),re.fullmatch(pattern,proof['text'])
+    if not old or not new or not _one_edit(normal(old[1]),normal(new[1])):return None
+    reads=proof['readings'];modes=['upgrade_city_rgb3','upgrade_city_gray3','upgrade_city_rgb2','upgrade_city_gray2']
+    if not isinstance(reads,list) or len(reads)!=4:return None
+    for reading,mode in zip(reads,modes):
+        if (not isinstance(reading,dict) or reading.get('preprocessing')!=mode or reading.get('text')!=proof['text']
+                or type(reading.get('confidence'))not in (int,float) or not .8<=reading['confidence']<=1
+                or type(reading.get('scale'))is not int or reading['scale']!=int(mode[-1])
+                or reading.get('transform')!=('grayscale; bicubic enlargement' if 'gray' in mode else 'bicubic enlargement')):return None
+        box=reading.get('normalized_bounds');crop=reading.get('crop')
+        if (not isinstance(box,list) or len(box)!=4 or any(type(v)not in (int,float) or not 0<=v<=1 for v in box)
+                or not isinstance(crop,list) or len(crop)!=4 or any(type(v)is not int for v in crop)):return None
+        x,y,w,h=row['bounds'];bx,by,bw,bh=[v*m for v,m in zip(box,(640,480,640,480))]
+        if (bw<=0 or bh<=0 or abs(by+bh/2-row['center'][1])>4
+                or abs(bx+bw/2-row['center'][0])>max(6,min(w,bw)*.3)
+                or max(0,min(x+w,bx+bw)-max(x,bx))*max(0,min(y+h,by+bh)-max(y,by))<.6*min(w*h,bw*bh)
+                or crop!=[max(0,x-3),max(0,y-3),min(640,x+w+3),min(480,y+h+3)]):return None
+    return proof
+
+
 def classify_production_upgrade(observation,rows,resources,rules,state,labels_text):
     if ((observation.get('width'),observation.get('height'))!=(640,480)
             or not re.fullmatch('[a-f0-9]{64}',str(observation.get('sha256','')))
@@ -58,8 +93,13 @@ def classify_production_upgrade(observation,rows,resources,rules,state,labels_te
     match=re.fullmatch(r'Production orders in (.{1,60}) upgraded from (.{1,60}) to (.{1,60})\.',body)
     if not match:return None
     player=state.get('player',{}).get('id')
+    alternate=_paired_city_reading(observation,prose[0]) if len(prose)==2 else None
+    observed_names=[match[1]]
+    if alternate:
+        other=re.fullmatch(r'Production orders in (.{1,60}) upgraded from',alternate['text'])
+        observed_names.append(other[1])
     cities=[c for c in state.get('cities',[]) if isinstance(c,dict) and c.get('owner')==player
-            and isinstance(c.get('name'),str) and normal(c['name'])==normal(match[1])]
+            and isinstance(c.get('name'),str) and normal(c['name']) in {normal(n) for n in observed_names}]
     units={u['name'] for u in rules.get('units',[]) if isinstance(u,dict) and isinstance(u.get('name'),str)}
     if type(player)is not int or len(cities)!=1 or match[2] not in units or match[3] not in units or match[2]==match[3]:return None
     def control(row,kind):return {k:deepcopy(row[k])for k in ('text','center','source_line','confidence')}|{'control':kind,'enabled':None}
@@ -69,6 +109,7 @@ def classify_production_upgrade(observation,rows,resources,rules,state,labels_te
             template_sha256=hashlib.sha256(json.dumps(SOURCE,sort_keys=True).encode()).hexdigest(),
             observed_body='\n'.join(r['text']for r in prose),body_source_lines=[r['source_line']for r in prose],
             option_source_lines=[r['source_line']for r in options],source_image_sha256=observation['sha256'],
-            city_name=match[1],previous_unit=match[2],new_unit=match[3],
+            city_name=cities[0]['name'],previous_unit=match[2],new_unit=match[3],
+            city_reading_evidence=deepcopy(alternate),
             background_ocr_conflicts=deepcopy(conflicts),
             scope='Observed notice only; Zoom to City and Continue each require an actual model choice'))

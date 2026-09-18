@@ -283,3 +283,21 @@ recorded integrity checks, including the new current-image bindings. Request
 receipt at decision 27 remains disclosed. Attempt 011's prefix through 554
 passed with zero input gaps using the explicit retained-trade-image OCR
 recheck; two legacy offers required that recheck. Evidence was not rewritten.
+
+### Production-phase return to unit input
+
+Attempt 012 exposed a turn-counter timing case at AD 420. The original counter
+had advanced before production finished; a second recorded FinishTurn decision
+was followed by a genuine production notice and Jev's Continue choice. The
+controller then waited for another counter increment even though the original
+map had returned to an owned, healthy unit with unspent movement and no order.
+The bounded recovery requires that exact recent dispatched choice sequence,
+a fresh native observation, a supported current map, and no other pending
+transaction. It records input readiness without claiming a turn increment or
+issuing a command. The next unit action still comes from Jev. The campaign
+continued to the original AD 500 screen without loading or creating a save.
+
+Original upgrade notices now recover clipped city names and damaged radio
+labels only through agreeing full-row pixel reads. The raw readings and any
+resolved same-location control conflict remain retained. Neither a build nor
+a dialog choice is supplied by these repairs.
