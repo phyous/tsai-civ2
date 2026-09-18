@@ -2549,7 +2549,7 @@ def _verify_run(directory, *, terminal_review=None, ffprobe='auto', recheck_trad
                           'unit_activation_steps':activation_steps,
                           'unit_activation_results':activation_results,
                           'unit_activation_failures':activation_failures,
-                          'native_map_note':'Full source capsule, bracketed original frame, no intervening input and recorded menu/status OCR checked. This allows map artwork only; it is not a gameplay checkpoint or modal acknowledgement.',
+                          'native_map_note':'Full source capsule, bracketed original frame, no intervening input and recorded menu/status OCR checked. An optional retained current image must differ only by one calibrated complete footer blink; all other pixels remain identical. This allows map artwork only; it is not a gameplay checkpoint or modal acknowledgement.',
                           'accepted_trade_continuations':trade_confirmations,
                           'retained_trade_ocr_rechecks':files.trade_ocr_rechecks,
                           'trade_continuation_note':('Prior actual model offer/action and original frame/list pixels checked; one Enter only. Optional retained-image OCR rechecks are listed separately. Technology acquisition is not inferred.'

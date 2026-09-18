@@ -27,13 +27,38 @@ class GreetingBodyPixels(unittest.TestCase):
             elif case=='no_quote':second_tail['text']='Emperor: TEST of the TEST people ...'
             elif case=='extra_choice':rows.insert(3,prepared('Pay TEST gold.',308,440,200,12))
             original_tail=deepcopy(rows[-2])
-            with tempfile.TemporaryDirectory() as directory,patch.object(observe,'_crop_text',side_effect=[[deepcopy(intro)],[second_intro]]) as crop,patch.object(observe,'_run_ocr',side_effect=[[deepcopy(tail)],[second_tail]]):
+            with tempfile.TemporaryDirectory() as directory,patch.object(observe,'_crop_text',side_effect=[[deepcopy(intro)],[second_intro]]) as crop,patch.object(observe,'_run_ocr',side_effect=[[deepcopy(tail)],[second_tail],[],[]]):
                 observe._recover_greeting_body(Image.new('RGB',(640,480)),rows,None,directory,{'passes':[]})
             if case=='valid':
                 self.assertEqual(rows[1]['text'],intro['text'])
                 self.assertEqual(rows[2]['text'],tail['text']);self.assertEqual(len(rows[2]['provenance']),3)
             elif case=='extra_choice':crop.assert_not_called()
             else:self.assertEqual(rows[-2],original_tail)
+
+    def test_spacing_disagreement_requires_two_fresh_full_reads(self):
+        for final in ('Empress of the TEST..."','Empress of the OTHER..."'):
+            rows=self.rows();rows[1]['text']='"Greetings from the most exalted TEST:'
+            rows[2]=prepared('Empress of the TEST.',308,425,251,16)
+            def raw(text):return dict(text=text,confidence=1,x=.01,y=.06,width=.94,height=.77)
+            readings=[[raw('Empress of the TEST ..."')],[raw('Empress of the TEST..."')],
+                      [raw('Empress of the TEST..."')],[raw(final)]]
+            with tempfile.TemporaryDirectory() as directory,patch.object(observe,'_run_ocr',side_effect=readings):
+                observe._recover_greeting_body(Image.new('RGB',(640,480)),rows,None,directory,{'passes':[]})
+            self.assertEqual(rows[2]['text'],'Empress of the TEST..."' if final=='Empress of the TEST..."' else 'Empress of the TEST.')
+            if final=='Empress of the TEST..."':self.assertEqual([p.get('scale') for p in rows[2]['provenance'][1:]],[3,3,2,2])
+
+    def test_original_greetings00_short_king_tail_uses_actual_second_scale(self):
+        p=Path('runs/attempt-010/screens/ui-0002672.png')
+        if not p.exists():self.skipTest('Private original calibration unavailable')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'GREETINGS00')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        tail=next(r for r in o['lines'] if r['text'].startswith('King of the Germans'))
+        self.assertEqual(tail['text'],'King of the Germans..."')
+        self.assertEqual(tail['provenance'][0]['text'],'King of the Germans..')
+        self.assertEqual([p['scale'] for p in tail['provenance'][-4:]],[3,3,2,2])
 
     def test_optional_original_010_is_only_source_bound_greeting(self):
         root=Path(__file__).resolve().parents[1];p=root/'runs/attempt-010/screens/ui-0000492.png'

@@ -39,6 +39,20 @@ class WithdrawalPixels(unittest.TestCase):
                 self.assertEqual(len(original[3]['provenance']),3);self.assertEqual(len(original[5]['provenance']),3)
             else:self.assertEqual(original,before)
 
+    def test_actual_seville_warning_needs_full_spaced_radio_read(self):
+        p=Path('runs/attempt-012/screens/ui-0002149.png')
+        if not p.exists():self.skipTest('Private original frame absent')
+        from civ2.run import game_text
+        from civ2.dialogs import classify_dialog
+        o=recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'VIOLATOR')
+        self.assertTrue(d['requires_model']);self.assertIsNone(d['mechanical_action'])
+        self.assertEqual([r['text'] for r in d['options']],['Withdraw troops to nearest city.','"No! We renounce this worthless treaty!"'])
+        option=next(r for r in o['lines'] if r['text']=='Withdraw troops to nearest city.')
+        self.assertEqual(option['provenance'][0]['text'],'O Withdraw troops to nearest city.')
+        self.assertEqual({r['preprocessing'] for r in option['provenance'][1:]},
+                         {'withdrawal_4_wide_rgb3','withdrawal_4_wide_gray3'})
+
     def test_actual_complete_original_warning_requires_independent_model_choice(self):
         p=Path('runs/attempt-011/screens/ui-0001616.png')
         if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original frame absent')

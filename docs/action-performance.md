@@ -61,3 +61,34 @@ the pixel comparison from both retained images. Unknown footer layouts, changed
 map artwork, other status changes and dialog changes still fail this proof.
 This removes that measured false rejection; it does not establish a whole-game
 speedup or authorize an end-turn command.
+
+A later read-only sample covered 100 actual responses from each of attempts
+012 (decisions 387–486) and 011 (500–599), including task categories and targets.
+API latency totaled 48.5 and 46.8 seconds, with medians of 0.438 and 0.416 seconds.
+The corresponding journal windows lasted 1,615 and 3,501 seconds, including
+development pauses. Inter-event gaps longer than 30 seconds accounted for
+1,093 and 2,962 seconds; those gaps are not attributed to inference. There were
+64 and 66 failed map-proof attempts, largely preceding the footer repair above,
+and no city-inspection/navigation decisions in either sample. Repeated city
+visits were therefore not the current bottleneck.
+
+One small classifier cost was independently measurable without touching the
+game: `classify_dialog` reparsed the same supplied GAME catalog up to 14 times
+on the retained original `NOSPACESHIPS` notice. It now parses lazily once per
+classification. The public parser still returns fresh records, and no catalog
+is cached across calls or source changes. In 50 offline calls on that notice,
+median classification time decreased from 34.4 to 5.1 milliseconds. This is a
+single-frame classifier benchmark, excluding OCR, input, painting, recording
+and model time; it is not a measured campaign speedup. Tests retain the existing
+map, strategic-choice and information semantics, verify that helpers leave the
+catalog unchanged, and check source-change isolation and branches needing no
+catalog.
+
+The timing review made no campaign inputs or saves. All 155 successful native
+read receipts in those two windows retained identical before/after campaign
+save inventories. Both active video ledgers began at time zero, had contiguous
+samples and monotonic frame numbers, no sample gap over one second, and empty
+encoder logs when checked. They were still recording, so this is not final
+video verification. Faster processing must preserve continuous real-time
+recording, every actual model choice, all ordinary-input receipts, and the
+no-saves-during-playthrough boundary.

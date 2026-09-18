@@ -13,6 +13,22 @@ def row(text='1250 В.C.',x=475,y=216):
 
 
 class StatusYearTests(unittest.TestCase):
+    def test_trailing_mark_only_triggers_two_actual_complete_date_reads(self):
+        for first,second in (('A.D. 60','A.D. 60'),('A.D. 60','A.D. 80'),('A.D. 80','A.D. 80'),('60 B.C.','60 B.C.')):
+            rows=[row('A.D. 60 (')]
+            with mock.patch('civ2.observe._crop_text',side_effect=[[row(first)],[row(second)]]):
+                _recover_status_year(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[0]['text'],'A.D. 60' if first==second=='A.D. 60' else 'A.D. 60 (')
+            self.assertEqual(rows[0]['provenance'][0]['text'],'A.D. 60 (')
+
+    def test_actual_complete_date_reread_drops_only_unobserved_mark(self):
+        from civ2.observe import recognize
+        path=Path('runs/attempt-010/screens/ui-0002595.png')
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        o=recognize(path);dates=[r for r in o['lines'] if r['text']=='A.D. 60']
+        self.assertEqual(len(dates),1)
+        self.assertEqual([p['text'] for p in dates[0]['provenance']],['A.D. 60 (','A.D. 60','A.D. 60'])
+
     def test_damaged_prefix_era_still_requires_exact_digits_and_two_reads(self):
         for first,second in (('A.D. 20','A.D. 20'),('A.D. 20','A.D. 21'),('B.C. 20','B.C. 20'),('A.D. 21','A.D. 21')):
             rows=[row('ALD. 20')]

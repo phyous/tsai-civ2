@@ -248,6 +248,26 @@ def _production_icon_rows(body, names):
     icons=[]
     for row in body:
         x,y,w,h=row['bounds']
+        # A vertical OCR fragment may span several unit sprites in the same
+        # native icon column. It remains wholly left of every complete label;
+        # each overlapping row must already have its independently read stat.
+        words=re.sub(r'[^a-z0-9 ]',' ',row['normal']).split()
+        vertical=(row not in labels and row not in stats and row['confidence']<.5
+            and row.get('chromatic_fraction',0)>=.20 and 110<=x and x+w<=160
+            and 1<=w<=24 and 40<h<=136 and re.fullmatch(r'[A-Za-z0-9 -]{1,12}',row['text'])
+            and not set(words)&{'ok','no','yes','help','cancel','buy','exit','auto','done','continue'}
+            and labels and all(r['bounds'][0]>=x+w+30 for r in labels))
+        if vertical:
+            peers=[r for r in labels if y<=r['center'][1]<=y+h]
+            peer_y=sorted(r['center'][1] for r in peers)
+            # Original011/2562 merges seven unit sprites into one tall OCR
+            # fragment. The longer column needs a complete, closely spaced
+            # sequence of six to eight independently read label/stat rows.
+            tall_complete=(h<=80 or (6<=len(peers)<=8 and peer_y[0]-y<=14 and y+h-peer_y[-1]<=18
+                            and all(15<=b-a<=19 for a,b in zip(peer_y,peer_y[1:]))))
+            if tall_complete and len(peers)>=3 and all(any(s['bounds'][0]>r['bounds'][0]+r['bounds'][2]
+                    and abs(s['center'][1]-r['center'][1])<=5 for s in stats) for r in peers):
+                icons.append(row);continue
         if (row in labels or row in stats or row['confidence']>=.5
                 or row.get('chromatic_fraction',0)<.5 or not 1<=w<=68 or not 1<=h<=20
                 or not re.fullmatch(r'[A-Za-z0-9]{1,12}',row['text'])
@@ -520,6 +540,16 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     auxiliary controls. Do not dispatch from a result with supported=False.
     Terminal text is a cue for human verification, not an automatic victory.
     """
+    # One invocation sees one immutable source string. Parse it only when a
+    # source-dependent branch needs it; never cache mutable records globally
+    # or retain a catalog across classifications/source changes.
+    parsed_resources = None
+    def resources():
+        nonlocal parsed_resources
+        if parsed_resources is None:
+            parsed_resources = dialog_resources(game_text or '')
+        return parsed_resources
+
     rows=_rows(observation);width,height=observation['width'],observation['height']
     result=dict(id='unknown',kind='unknown',supported=False,title='',width=width,height=height,
                 sha256=observation['sha256'],options=[],buttons=[],requires_model=False,
@@ -555,7 +585,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     # Its default OK continues this session without media; Repeat Search is
     # auxiliary. Pin the complete original resource, not a generic Please Note.
     if game_text and (width,height)==(640,480):
-        media=[t for t in dialog_resources(game_text) if t['tag']=='CDROMNOTFOUND'
+        media=[t for t in resources() if t['tag']=='CDROMNOTFOUND'
                and hashlib.sha256(json.dumps(t,sort_keys=True).encode()).hexdigest()==CDROM_TEMPLATE_SHA256]
         headings=[r for r in rows if r['normal'] in ('please note','please lfote') and r['confidence']>=.8]
         if len(media)==len(headings)==1:
@@ -649,48 +679,48 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             result['evidence']['template_sha256']=hashlib.sha256(expected.encode()).hexdigest()
             return finish('presentation_notice','Throne room notice',[button],[button],
                           mechanical='acknowledge_presentation')
-    production_change=classify_production_change(observation,rows,dialog_resources(game_text or ''),rules)
+    production_change=classify_production_change(observation,rows,resources(),rules)
     if production_change:
         result['resource_tag']='PRODCHANGE'
         result['production_change']=production_change['production_change']
         result['evidence'].update(production_change['evidence'])
         return finish('production_change_choice',production_change['title'],production_change['options'],
                       production_change['buttons'],model=True)
-    production_upgrade=classify_production_upgrade(observation,rows,dialog_resources(game_text or ''),rules,state,labels_text)
+    production_upgrade=classify_production_upgrade(observation,rows,resources(),rules,state,labels_text)
     if production_upgrade:
         result['resource_tag']=production_upgrade['resource_tag']
         result['evidence'].update(production_upgrade['evidence'])
         return finish(production_upgrade['kind'],production_upgrade['title'],production_upgrade['options'],
                       production_upgrade['buttons'],model=True)
-    foreign_report=classify_foreign_report(observation,rows,dialog_resources(game_text or ''),rules,labels_text)
+    foreign_report=classify_foreign_report(observation,rows,resources(),rules,labels_text)
     if foreign_report:
         result['resource_tag']=foreign_report['resource_tag']
         result['evidence'].update(foreign_report['evidence'])
         return finish(foreign_report['kind'],foreign_report['title'],foreign_report['options'],
                       foreign_report['buttons'],model=True)
-    caravan=classify_caravan(observation,rows,dialog_resources(game_text or ''),rules,labels_text)
+    caravan=classify_caravan(observation,rows,resources(),rules,labels_text)
     if caravan:
         result['resource_tag']=caravan['resource_tag']
         result['evidence'].update(caravan['evidence'])
         return finish(caravan['kind'],caravan['title'],caravan['options'],caravan['buttons'],model=True)
-    spaceship=classify_spaceship(observation,rows,dialog_resources(game_text or ''),game_text)
+    spaceship=classify_spaceship(observation,rows,resources(),game_text)
     if spaceship:
         result['resource_tag']=spaceship['resource_tag']
         result['evidence'].update(spaceship['evidence'])
         return finish(spaceship['kind'],spaceship['title'],spaceship['options'],spaceship['buttons'],model=True)
-    spaceship_report=classify_spaceship_report(observation,rows,dialog_resources(game_text or ''),rules,labels_text,game_text)
+    spaceship_report=classify_spaceship_report(observation,rows,resources(),rules,labels_text,game_text)
     if spaceship_report:
         result['resource_tag']=spaceship_report['resource_tag']
         result['evidence'].update(spaceship_report['evidence'])
         return finish(spaceship_report['kind'],spaceship_report['title'],spaceship_report['options'],spaceship_report['buttons'],
                       model=spaceship_report['requires_model'],mechanical=spaceship_report['mechanical_action'])
-    native_choice=classify_native_choice(observation,rows,dialog_resources(game_text or ''),rules)
+    native_choice=classify_native_choice(observation,rows,resources(),rules)
     if native_choice:
         result['resource_tag']=native_choice['resource_tag']
         result['evidence'].update(native_choice['evidence'])
         return finish(native_choice['kind'],native_choice['title'],native_choice['options'],native_choice['buttons'],
                       model=native_choice['requires_model'],mechanical=native_choice['mechanical_action'])
-    history=classify_history_notice(observation,rows,game_text,dialog_resources(game_text or ''))
+    history=classify_history_notice(observation,rows,game_text,resources())
     if history:
         result['resource_tag']='HISTORY'
         result['evidence']['history_report']=history['evidence']
@@ -702,7 +732,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         result['evidence']['acquisition_notice']=acquisition['evidence']
         return finish('information',acquisition['title'],[acquisition['button']],[acquisition['button']],
                       mechanical='acknowledge_information')
-    exchange=classify_exchange_picker(observation,rows,dialog_resources(game_text or ''),rules,state)
+    exchange=classify_exchange_picker(observation,rows,resources(),rules,state)
     if exchange:
         result.update(resource_tag=exchange['resource_tag'],advance=exchange['advance'],prior_trade=exchange['prior_trade'])
         result['evidence']['exchange_picker']=exchange['evidence']
@@ -770,7 +800,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         tag='COMPLETE1' if choices else 'COMPLETE0'
         if (choices and cost>treasury) or (not choices and cost<=treasury):
             return unknown('Buy controls conflict with the observed affordability','buy_quote',title['text'])
-        templates=[t for t in dialog_resources(game_text) if t['tag']==tag]
+        templates=[t for t in resources() if t['tag']==tag]
         expected_body='Cost to complete %STRING0: %NUMBER0 gold. Treasury: %NUMBER1 gold.'
         if (len(templates)!=1 or _normal(templates[0]['title'])!='buy %string0'
                 or _normal(templates[0]['body'].replace('^',' '))!=_normal(expected_body)
@@ -805,7 +835,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         if len(science_report)!=1 or science_report[0]['confidence']<.8:
             return unknown('Science report title is ambiguous','science_advisor')
         title=science_report[0]
-        templates=[t for t in dialog_resources(game_text) if t['tag']=='REPORTSCIENCE'] if game_text else []
+        templates=[t for t in resources() if t['tag']=='REPORTSCIENCE'] if game_text else []
         if len(templates)!=1 or _normal(templates[0]['title'])!='science advisor report' or not isinstance(rules,dict):
             return unknown('Original REPORTSCIENCE resource and advance names are required','science_advisor',title['text'])
         template=templates[0]
@@ -894,7 +924,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     # damaged heading needs the complete original body and both alternatives;
     # its displayed date remains observed text, independent of the save year.
     if game_text:
-        council=[t for t in dialog_resources(game_text) if t['tag']=='COUNCILTIME'
+        council=[t for t in resources() if t['tag']=='COUNCILTIME'
                  and t['title']=='The High Council: %STRING2' and t['width']==320
                  and t['options']==['Consult High Council.','No thanks, too busy.']
                  and not t['buttons'] and not t['listbox']]
@@ -918,7 +948,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     # The observation's raw OCR stays intact; the regular production branch
     # below must still prove every offered item, statistic and native control.
     if isinstance(state,dict) and isinstance(rules,dict) and game_text:
-        caption=exact_production_title(observation,rows,state,dialog_resources(game_text))
+        caption=exact_production_title(observation,rows,state,resources())
         if caption:
             previous,recovered,name,proof=caption
             rows[rows.index(previous)]=recovered
@@ -938,7 +968,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     }
     matches=[(kind,r) for kind,p in patterns.items() for r in single_title(p)]
     if not matches and game_text:
-        offers=[t for t in dialog_resources(game_text) if t['tag']=='AUTOREV'
+        offers=[t for t in resources() if t['tag']=='AUTOREV'
                 and _normal(t['title'])=='civ rules: governments' and len(t['options'])==2]
         recovered=[]
         for heading in rows:
@@ -957,7 +987,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             result['title_recovery']={'source':'Complete original AUTOREV body and both actual choices; bounded title glyph difference',
                                       'ocr_text':recovered[0]['text']}
     if not matches and game_text:
-        templates=[t for t in dialog_resources(game_text) if t['tag']=='REVOLUTION'
+        templates=[t for t in resources() if t['tag']=='REVOLUTION'
                    and _normal(t['title'])=='revolution' and t['options']==['Yes','No']]
         recovered=[]
         if len(templates)==1:
@@ -1104,7 +1134,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
             choices=[_option(r,'option') for r in choice_rows]
             return finish(kind,title['text'],choices,buttons,model=True)
         if kind=='revolution_offer':
-            templates=[t for t in dialog_resources(game_text or '') if t['tag'] in ('AUTOMONARCHY','AUTOREV')
+            templates=[t for t in resources() if t['tag'] in ('AUTOMONARCHY','AUTOREV')
                        and _normal(t['title'])=='civ rules: governments' and len(t['options'])==2]
             matches=[]
             radio=lambda text:re.sub(r'^(?:[o0]\s+|[•○●]\s*)','',text)
@@ -1157,7 +1187,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 # A selected native edit value can be absent from OCR. The
                 # source-bound NAMECITY form may still accept its untouched
                 # default: no name is typed, inferred, or added to known cities.
-                templates=[t for t in dialog_resources(game_text) if t['tag']=='NAMECITY'] if game_text else []
+                templates=[t for t in resources() if t['tag']=='NAMECITY'] if game_text else []
                 ok_row=next(r for r in button_rows if r['normal']=='ok')
                 cancel_row=next(r for r in button_rows if r['normal']=='cancel')
                 source_ok=(len(templates)==1 and _normal(templates[0]['title'])=='what shall we name this city'
@@ -1229,7 +1259,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
         # Diplomacy may have no standard button labels in OCR: option radio rows
         # still need a complete resource-matched body and actual option labels.
         if not game_text:return unknown('Original diplomacy templates required',kind,title['text'])
-        templates=[t for t in dialog_resources(game_text) if re.fullmatch(_pattern(t['title']),title['normal'])]
+        templates=[t for t in resources() if re.fullmatch(_pattern(t['title']),title['normal'])]
         found=[]
         for template in templates:
             if not template['body']:continue
@@ -1354,7 +1384,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     # @GHOSTTOWN is a strategic choice: completing a worker can remove its
     # size-one city. Never send its OK through the informational path.
     if game_text and isinstance(state,dict) and isinstance(rules,dict):
-        ghost=[t for t in dialog_resources(game_text) if t['tag']=='GHOSTTOWN'
+        ghost=[t for t in resources() if t['tag']=='GHOSTTOWN'
                and _normal(t['title'])=='domestic advisor' and t['width']==320
                and _normal(t['body'])=='%string0 is about to build %string1, but it is only a size 1 city. continue anyway'
                and t['options']==['Delay Settler production.','Build Settlers anyway (disbands city).']
@@ -1399,16 +1429,20 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     # the information-only path. Bind names to observed own cities/public rules.
     if game_text and isinstance(state,dict) and isinstance(rules,dict):
         notice_templates={'BUILT':('domestic advisor','%string0 %string3 %string1'),
+                          'DECREASE':('domestic advisor','population decrease in %string0'),
                           'SUPPORT':('military advisor',"%string0 can't support %string1. unit disbanded")}
-        built=[t for t in dialog_resources(game_text) if t['tag'] in notice_templates
+        built=[t for t in resources() if t['tag'] in notice_templates
                and (_normal(t['title']),_normal(t['body']))==notice_templates[t['tag']]
                and t['options']==[] and not t['listbox']]
         headings=single_title('domestic advisor')+single_title('military advisor')
         if len(headings)==1:
             built=[t for t in built if _normal(t['title'])==headings[0]['normal']]
+            decrease=any(r['normal'].startswith('population decrease in ') for r in rows
+                         if r['center'][1]>headings[0]['center'][1])
+            built=[t for t in built if (t['tag']=='DECREASE')==decrease]
         if len(built)==1 and len(headings)==1:
             title=headings[0]
-            body,button_rows,_=body_rows(title,{'ok','cancel','yes','no','help'},600)
+            body,button_rows,_=body_rows(title,{'ok','cancel','yes','no','help'},440 if built[0]['tag']=='DECREASE' else 600)
             def radio_label(row):
                 # Original unselected circle can be read as O. Preserve raw
                 # option text and its observed center; only compare the label.
@@ -1438,6 +1472,9 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                 units={_normal(u['name']) for u in rules.get('units',[]) if isinstance(u,dict) and isinstance(u.get('name'),str)}
                 combinations=[(city,'cannot support',item) for city in cities for item in units
                               if sentence==city+" can't support "+item+'. unit disbanded']
+            if built[0]['tag']=='DECREASE':
+                combinations=[(city,'population decrease',None) for city in cities
+                              if sentence=='population decrease in '+city]
             if (len(combinations)==1 and len(radios)==2 and {radio_label(r) for r in radios}=={'zoom to city','continue'}
                     and len(button_rows)==1 and button_rows[0]['normal']=='ok'
                     and all(r['confidence']>=.8 for r in [title,*body,*button_rows])
@@ -1445,17 +1482,19 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                     and all(r['center'][1]>text_rows[0]['center'][1]+8 for r in radios)):
                 tag=built[0]['tag']
                 result['resource_tag']=tag
-                result['evidence']['completion_notice' if tag=='BUILT' else 'support_loss_notice']={'source':f'Original GAME.TXT {tag} and LABELS.TXT Zoom to City/Continue',
+                notice_kind={'BUILT':'production_notice','SUPPORT':'support_loss_notice','DECREASE':'population_loss_notice'}[tag]
+                evidence_key={'BUILT':'completion_notice','SUPPORT':'support_loss_notice','DECREASE':'population_loss_notice'}[tag]
+                result['evidence'][evidence_key]={'source':f'Original GAME.TXT {tag} and LABELS.TXT Zoom to City/Continue',
                     'observed_body':text_rows[0]['text'],'body_source_line':text_rows[0]['source_line'],
                     'city_name':combinations[0][0],'item_name':combinations[0][2],
                     'separate_radio_artwork':[{'text':r['text'],'bounds':r['bounds'],
                                                'source_line':r['source_line']} for r in radio_marks]}
-                return finish('production_notice' if tag=='BUILT' else 'support_loss_notice',title['text'],[_option(r,'option') for r in radios],
+                return finish(notice_kind,title['text'],[_option(r,'option') for r in radios],
                               [_option(r,'button') for r in button_rows],model=True)
     if game_text:
         # Original LABELS.TXT supplies these finite completion verbs. Without
         # them BUILT's all-placeholder body could match arbitrary advisor text.
-        event=classify_information(observation,dialog_resources(game_text),
+        event=classify_information(observation,resources(),
             placeholder_values={tag:{'STRING3':['completes','builds']} for tag in ('BUILT','BUILT2','BUILT3')})
         if event['supported']:
             result['resource_tag']=event['resource_tag']
@@ -1472,7 +1511,7 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
     if info_titles:
         title=info_titles[0]
         if title['normal'].startswith('civ rules:'):
-            sources=[t for t in dialog_resources(game_text) if re.fullmatch(_pattern(t['title']),title['normal'])] if game_text else []
+            sources=[t for t in resources() if re.fullmatch(_pattern(t['title']),title['normal'])] if game_text else []
             if len(sources)!=1 or sources[0]['options']:
                 return unknown('Rule notice is not a verified information-only resource','information',title['text'])
         _,button_rows,_=body_rows(title,{'ok','cancel','yes','no','help'})

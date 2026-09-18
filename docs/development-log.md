@@ -252,3 +252,34 @@ phases still caused retries; it is not a general full-game speedup claim.
 
 These remain unfinished campaigns with continuous recordings, no between-turn
 saves, and the previously disclosed evidence gaps unchanged.
+
+## Diplomacy, support pressure and a measured map stall
+
+Attempt 010 founded a ninth city, Hispalis, then lost it to the Sioux after
+Jev refused a Literacy demand. The original notices report the capture,
+13 gold plundered and Literacy taken. A later Neapolis notice reported a
+Warriors unit disbanded because the city could not support it. The campaign
+continued from those outcomes without loading a save. Attempt 011 completed
+technology exchanges with the Zulus and a peace agreement. Attempt 012 reached
+seven cities and AD 380. These are intermediate outcomes, not victories.
+
+Current army composition and production groups are now summarized from the
+same observed records and original unit specifications already supplied to
+Jev. Counts distinguish fortified orders, workers, trade units, unknown
+specifications and unresolved health. They do not rate defensive adequacy,
+predict combat or choose a build.
+
+A retained native-map comparison isolated a recurring false rejection: only
+the original two-line end-turn footer had changed from white to gray. The
+current-image binding now requires the complete pinned pair of footer crops
+and identical pixels everywhere else. The actual current PNG is independently
+recognized and retained. This cleared live stalls in attempts 011 and 012.
+Other changes still require a new observation; this is not general image
+similarity or permission to end the turn automatically.
+
+A read-only attempt 012 audit through 467 returned responses passed the
+recorded integrity checks, including the new current-image bindings. Request
+468 was still in flight at that snapshot. Its original missing mechanical
+receipt at decision 27 remains disclosed. Attempt 011's prefix through 554
+passed with zero input gaps using the explicit retained-trade-image OCR
+recheck; two legacy offers required that recheck. Evidence was not rewritten.

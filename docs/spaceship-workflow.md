@@ -117,6 +117,14 @@ actual report, request Launch through a real model choice, then verify that the
 separate confirmation and subsequent original response are observed. No
 production campaign inputs or synthetic state changes were used here.
 
+A separate original 1.06 debug game at 1200 BC was tested with an ordinary F12
+key. It displayed `NOSPACESHIPS`, “The space race has not yet begun!”, with
+one OK button. The actual key receipts and before/after captures were retained
+privately. Its current OCR reads “hegun” in place of “begun”, including bounded
+RGB/grayscale rereads, so the classifier correctly remains unsupported and the
+modal was left paused. This proves the native shortcut and no-ships branch,
+not report/launch behavior or a completed review transaction.
+
 Original private sources: `GAME.TXT` lines 1073–1077 (`BADSPACE`), 3272–3337
 (space race, report, confirmations, components/modules and ship notices), and
 3813–3816 (`NOSPACESHIPS`); `MENU.TXT` line 82; the original manual's space-race
