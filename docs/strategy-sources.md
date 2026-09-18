@@ -42,3 +42,11 @@ the proposal, not acceptance of a treaty, tribute, technology transfer or war
 demand. The subsequent terms remain separate observed model choices. This
 addresses a possible decision-framing problem; the earlier American attack
 does not prove that refusing its audience caused the loss.
+
+Revision v7 makes the manual's combat distinction explicit: the attacker's
+attack value is compared with the defender's defense value, with HP, firepower,
+veteran status and the defender's terrain/improvements also relevant (manual,
+“Calculating the Winner” and “Adding in Adjustments,” printed page 105).
+A defensive unit's larger defense number does not improve an attack it initiates.
+The advice asks Jev to consider defending a threatened city as an alternative to
+a weak attack; it neither removes attack choices nor predicts a guaranteed result.

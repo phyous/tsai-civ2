@@ -1046,6 +1046,8 @@ def dialog_request_for(observation, dialog, rules=None, recent_actions=None, *, 
         state['mandatory_dialog']['observed_text'] = body
     if dialog.get('kind')=='production_choice':
         state['mandatory_dialog']['offered_original_specifications']=_offered_production_specs(actions,_rules(rules))
+        unresolved=dialog.get('evidence',{}).get('unresolved_displayed_stat_suffixes')
+        if unresolved:state['mandatory_dialog']['unresolved_displayed_stat_suffixes']=deepcopy(unresolved)
     if dialog.get('kind')=='tax_allocation':
         allocation=dialog.get('tax_allocation')
         if not isinstance(allocation,dict):

@@ -1,6 +1,7 @@
 """Synthetic TEST public wonder reports and optional original notice."""
 import copy
 from pathlib import Path
+import hashlib
 import unittest
 from unittest.mock import patch
 from PIL import Image
@@ -12,6 +13,17 @@ from tests.test_native_events import resource,notice
 
 
 class WonderNoticeTests(unittest.TestCase):
+    def test_all_four_original_wonder_notices_have_independent_audit_pins(self):
+        from civ2.evidence import canonical
+        from civ2.verify import PUBLIC_NOTICE_RESOURCES
+        bodies={'STARTWONDER':'The %STRING1 have undertaken a great project: %STRING2!',
+                'SWITCHWONDER':'The %STRING1 have changed projects from %STRING2 to %STRING3!',
+                'ABANDONWONDER':'The %STRING1 have abandoned their great project, %STRING2.',
+                'ALMOSTWONDER':'The %STRING1 have nearly completed their great project, %STRING2.'}
+        for tag,body in bodies.items():
+            source=dict(tag=tag,title='Travellers Report',width=320,body=body,options=[],buttons=[],listbox=False)
+            self.assertEqual(PUBLIC_NOTICE_RESOURCES[tag],hashlib.sha256(canonical(source)).hexdigest())
+
     def test_only_complete_original_informational_wonder_templates_are_supported(self):
         cases=[('STARTWONDER','The %STRING1 have undertaken a great project: %STRING2!',
                 'The TEST Romans have undertaken a great project: TEST Wonder!'),

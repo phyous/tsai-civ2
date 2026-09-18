@@ -50,8 +50,9 @@ data are rejected rather than interpreted as observations.
 For the retained failed attempt012 request552, this representation reduces
 complete JSON from 82,977 to 75,138 characters (9.45%) while decoding to exactly
 the same game facts and retaining all 64 planning targets and every question.
-This character reduction is measured offline; API token usage and acceptance
-must be measured from the next real request.
+The next real request,553, was accepted on its first attempt with 29,075 input
+tokens and 59 output tokens. The failed552 request remains recorded separately
+and was not overwritten.
 
 The labor description now reflects the completed twenty-position calibration.
 Only separately offered city actions after a fresh native checkpoint authorize

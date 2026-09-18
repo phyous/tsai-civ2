@@ -127,6 +127,42 @@ class GreetingBodyPixels(unittest.TestCase):
                 if changed:self.assertEqual(rows,before)
                 else:self.assertEqual(rows[2]['text'],tail['text'])
 
+    def test_greetings03_leader_change_requires_rgb_gray_and_both_complete_masks(self):
+        for case in ('valid','rgb_disagree','mask_disagree','rank','nation','distant_name','weak'):
+            rows=self.rows();rows[1]['text']='"I speak for she who makes mortals tremble:'
+            rows[2]=prepared('Empress TESTI of the TEST...',308,425,251,16);before=deepcopy(rows)
+            text='Empress TEST of the TEST..."'
+            if case=='rank':text='Queen TEST of the TEST..."'
+            if case=='nation':text='Empress TEST of the OTHER..."'
+            if case=='distant_name':text='Empress ELSE of the TEST..."'
+            raw=dict(text=text,confidence=1,x=.01,y=.06,width=.94,height=.77);peer=deepcopy(raw)
+            if case=='mask_disagree':peer['text']='Empress TESTI of the TEST..."'
+            color=prepared('Empress TEST of the TEST.',308,425,251,16);gray=deepcopy(color)
+            if case=='rgb_disagree':gray['text']='Empress TESTI of the TEST.'
+            if case=='weak':gray['confidence']=.5
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as directory,patch.object(
+                    observe,'_crop_text',side_effect=[[color],[gray]]),patch.object(
+                    observe,'_run_ocr',side_effect=[[raw],[peer]]):
+                observe._recover_greeting_body(Image.new('RGB',(640,480)),rows,None,directory,{'passes':[]})
+            if case=='valid':
+                self.assertEqual(rows[2]['text'],text);self.assertEqual(len(rows[2]['provenance']),5)
+                self.assertEqual(rows[1],before[1])
+            else:self.assertEqual(rows,before)
+
+    def test_actual_spanish_greetings03_leader_is_read_in_four_independent_crops(self):
+        p=Path('runs/attempt-011/screens/ui-0002888.png')
+        if not p.exists():self.skipTest('Private original herald absent')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'GREETINGS03')
+        self.assertFalse(d['requires_model']);self.assertEqual(d['mechanical_action'],'acknowledge_information')
+        tail=next(r for r in o['lines'] if r['text'].startswith('Empress'))
+        self.assertEqual(tail['text'],'Empress Isabella of the Spanish..."')
+        self.assertIn('Isahella',tail['provenance'][0]['text'])
+        self.assertEqual([r['preprocessing']for r in tail['provenance'][-4:]],
+            ['greeting_leader_rgb3','greeting_leader_gray3','greeting_tail_black3_right37','greeting_tail_black3_right41'])
+
     def test_original_greetings03_preserves_zulu_leader_and_every_word(self):
         p=Path('runs/attempt-011/screens/ui-0002207.png')
         if not p.exists() or not Path('.runtime/ocr').exists():self.skipTest('Private original herald absent')

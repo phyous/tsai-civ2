@@ -378,13 +378,17 @@ def _production_names():
 def _stat_reading(text):
     # A native right column borders the scrollbar. OCR can append its vertical
     # stroke or one extra close-paren; retain these raw readings in provenance.
+    # The observed defense * / OCR % suffix is opaque display text, never a
+    # numeric value or an inferred ability. Do not drop it during re-reading.
     cleaned=text.strip().rstrip('|').strip()
     if cleaned.endswith('))'):cleaned=cleaned[:-1]
-    return cleaned if re.fullmatch(r'\(\d+\s+(?:Turns?|Tums?)(?:,\s*ADM:\s*\d+/\d+/\d+\s+HP:\s*\d+/\d+)?\)',cleaned,re.I) else None
+    return cleaned if re.fullmatch(r'\(\d+\s+(?:Turns?|Tums?)(?:,\s*ADM:\s*\d+/\d+[*%]?/\d+\s+HP:\s*\d+/\d+)?\),?',cleaned,re.I) else None
 
 
 def _stat_numbers_compatible(old,new):
     previous,fresh=re.findall(r'\d+',old),re.findall(r'\d+',new)
+    marker=re.search(r'ADM:\s*\d+/\d+([*%])/\d+',old,re.I)
+    if marker and not re.search(r'ADM:\s*\d+/\d+[*%]/\d+',new,re.I):return False
     # Original008/382 reads the second ADM slash as 7: 0/171. Only
     # two agreeing actual crops can supply the replacement caller-side;
     # unchanged turn/HP values and one unique separator position are required.
@@ -1755,6 +1759,41 @@ def _recover_herald_panel(image,rows,executable,directory,evidence):
     rows[:]=[r for r in rows if not (r['bounds'][0]>=box[0] and r['bounds'][1]>=box[1])]+replacements
 
 
+def _recover_cease_proposal(image,rows,executable,directory,evidence):
+    """Read punctuation in the complete original cease-fire proposal/options."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary') and r['confidence']>=.8
+              and 420<=r['center'][0]<=445 and 320<=r['center'][1]<=340]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    heading,ok=headings[0],controls[0]
+    if not 450<=ok['center'][1]<=468 or abs(heading['center'][0]-ok['center'][0])>8:return
+    panel=sorted([r for r in rows if 298<=r['bounds'][0]<=345
+                  and heading['center'][1]<r['center'][1]<ok['center'][1]-12],key=lambda r:r['center'][1])
+    if len(panel)!=4 or any(r['confidence']<.8 or r['bounds'][3]>24 for r in panel):return
+    first=re.fullmatch(r'[*"]The ([A-Za-z -]{2,60}) people grow weary of this endless',panel[0]['text'])
+    accepted='"We accept--let us end this terrible war."'
+    refusal='"Cowards! We shall fight to the bitter end!"'
+    if (not first or panel[1]['text'] not in ('war. We suggest a cease fire.','war. We suggest a cease fire."')
+            or panel[2]['text'] not in (accepted,accepted.replace('--','-'))
+            or panel[3]['text'] not in (refusal,'• '+refusal,'O '+refusal)):return
+    recovered=[]
+    for old,name,scale,padding,wanted in (
+            (panel[0],'intro',2,(3,3),'"The '+first[1]+' people grow weary of this endless'),
+            (panel[1],'tail',3,(8,3),'war. We suggest a cease fire."'),
+            (panel[2],'accept',3,(3,3),accepted)):
+        if old['text']==wanted:continue
+        a=_crop_text(image,old,f'cease_proposal_{name}_rgb{scale}',executable,directory,evidence,padding=padding,scale=scale)
+        b=_crop_text(image,old,f'cease_proposal_{name}_gray{scale}',executable,directory,evidence,padding=padding,scale=scale,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text'] or a[0]['text']!=wanted
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+        recovered.append((old,a[0],b[0]))
+    for old,a,b in recovered:
+        a['provenance']=old['provenance']+a['provenance']+b['provenance']
+        rows[rows.index(old)]=a
+
+
 def _recover_herald_options(image,rows,executable,directory,evidence):
     """Recover quoted radio labels without changing any observed words.
 
@@ -1898,6 +1937,26 @@ def _recover_greeting_body(image,rows,executable,directory,evidence):
     x,y,w,h=tail['bounds']
     scale=2 if prefix.startswith('"I bring tidings from ') else 3
     words=lambda text:re.findall(r'[A-Za-z]+',text)
+    expected_words=words(tail['text']);leader_readings=[]
+    def corroborate_leader(text):
+        nonlocal expected_words
+        incoming=words(text)
+        if incoming==expected_words:return True
+        # GREETINGS03 names a leader in one variable word. A measured glyph
+        # disagreement needs separate RGB/gray reads before both full-tail
+        # black-mask reads may establish the complete printed quotation.
+        if (leader_readings or not prefix.startswith('"I speak for ')
+                or len(incoming)!=5 or len(expected_words)!=5
+                or incoming[2:4]!=['of','the']
+                or any(incoming[i]!=expected_words[i] for i in (0,2,3,4))
+                or not _near_text(incoming[1],expected_words[1],1)):return False
+        a=_crop_text(image,tail,'greeting_leader_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+        b=_crop_text(image,tail,'greeting_leader_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text'] or words(a[0]['text'])!=incoming
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(tail,a[0]) or not _same_location(a[0],b[0])):return False
+        leader_readings.extend((a[0],b[0]));expected_words=incoming
+        return True
     def read_pair(scale):
         readings=[]
         for pad,right in ((3,37),(3,41)):
@@ -1907,7 +1966,7 @@ def _recover_greeting_body(image,rows,executable,directory,evidence):
                 (crop.width*scale,crop.height*scale),Image.Resampling.BICUBIC).save(target)
             evidence['passes'].append(name);raw=_run_ocr(executable,target)
             if (len(raw)!=1 or raw[0]['confidence']<.8 or not raw[0]['text'].endswith('..."')
-                    or words(raw[0]['text'])!=words(tail['text'])):return None
+                    or not corroborate_leader(raw[0]['text'])):return None
             local=_prepare_rows(raw,crop.width,crop.height,name)[0]
             nx,ny,nw,nh=local['provenance'][0]['normalized_bounds']
             mapped=_prepare_rows([dict(text=local['text'],confidence=local['confidence'],
@@ -1930,8 +1989,118 @@ def _recover_greeting_body(image,rows,executable,directory,evidence):
         if alternate is None:return
         readings+=alternate;a,b=alternate
     if a['text']!=b['text'] or not _same_location(a,b):return
-    a['provenance']=tail['provenance']+[p for r in readings for p in r['provenance']]
+    a['provenance']=tail['provenance']+[p for r in leader_readings+readings for p in r['provenance']]
     rows[rows.index(tail)]=a
+
+
+
+def _recover_crusade_title(image,rows,executable,directory,evidence):
+    """Read a damaged heading above a complete observed crusade proposal."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['confidence']>=.8 and 307<=r['center'][1]<=320
+              and 425<=r['center'][0]<=445 and len(r['text'].split())==3
+              and _near_text(r['text'].split()[-1],'Emissary',1)]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    old,ok=headings[0],controls[0]
+    if old['text'].endswith(' Emissary') or abs(old['center'][0]-ok['center'][0])>8 or not 452<=ok['center'][1]<=469:return
+    panel=sorted([r for r in rows if old['center'][1]<r['center'][1]<ok['center'][1]
+                  and 300<=r['bounds'][0]<635],key=lambda r:r['center'][1])
+    if len(panel)!=5 or any(r['confidence']<.8 for r in panel):return
+    first,second,tail,no,yes=panel
+    target=re.fullmatch(r'world of the evil ([A-Za-z][A-Za-z -]{1,45})\. We will sign an',second['text'])
+    if (not target or first['text']!='"We invite you to join our crusade to rid the'
+            or tail['text']!='alliance for the duration of the hostilities."'
+            or no['text']!='"No, not interested."'
+            or yes['text'] not in (f'Yes, declare war on {target[1]}.',f'• Yes, declare war on {target[1]}.')):return
+    a=_crop_text(image,old,'crusade_title_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
+    b=_crop_text(image,old,'crusade_title_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
+    if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
+            or min(a[0]['confidence'],b[0]['confidence'])<.8
+            or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+    previous=old['text'].split();fresh=a[0]['text'].split()
+    if (len(fresh)!=3 or fresh[-1]!='Emissary' or not all(re.fullmatch('[A-Za-z]{2,30}',w)for w in fresh)
+            or any(not _near_text(x,y,1)for x,y in zip(previous,fresh))):return
+    choice_readings=None
+    if yes['text'].startswith('• '):
+        ca=_crop_text(image,yes,'crusade_choice_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+        cb=_crop_text(image,yes,'crusade_choice_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+        if (len(ca)!=1 or len(cb)!=1 or ca[0]['text']!=cb[0]['text'] or ca[0]['text']!=yes['text'][2:]
+                or min(ca[0]['confidence'],cb[0]['confidence'])<.8
+                or not _same_location(yes,ca[0]) or not _same_location(ca[0],cb[0])):return
+        choice_readings=(ca[0],cb[0])
+    if _replace_crop_row(rows,rows.index(old),a,lambda before,after:True):a[0]['provenance']+=b[0]['provenance']
+    if choice_readings:
+        ca,cb=choice_readings;ca['provenance']=yes['provenance']+ca['provenance']+cb['provenance']
+        rows[rows.index(yes)]=ca
+
+
+def _recover_golden_age_city_line(image,rows,executable,directory,evidence):
+    """Read the native city/exclamation row of a complete Golden Age notice."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text']=='Golden Age of Philosophy']
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    title,ok=headings[0],controls[0]
+    if (not 174<=title['bounds'][1]<=180 or not 290<=ok['bounds'][1]<=295
+            or abs(title['center'][0]-ok['center'][0])>5):return
+    panel=sorted([r for r in rows if title['center'][1]<r['center'][1]<ok['center'][1]
+                  and 185<=r['bounds'][0]<510],key=lambda r:r['center'][1])
+    if len(panel)!=4 or any(r['confidence']<.8 for r in panel):return
+    first,city,third,last=panel
+    if ([r['text'] for r in (first,third,last)]!=[
+            'The Golden Age of Philosophy begins in the',
+            'articulate scientific, moral, and metaphysical',
+            'systems which endure for centuries to come.']
+            or any(not 196<=r['bounds'][0]<=205 for r in panel)
+            or any(not 17<=b['center'][1]-a['center'][1]<=24 for a,b in zip(panel,panel[1:]))):return
+    pattern=r'([A-Za-z][A-Za-z -]{1,40}) city of ([A-Za-z][A-Za-z -]{1,50})! Great \1 thinkers'
+    old=re.fullmatch(pattern.replace('! Great',' Great'),city['text'])
+    if not old:return
+    for scale in (3,2):
+        a=_crop_text(image,city,f'golden_age_city_rgb{scale}',executable,directory,evidence,padding=(6,3),scale=scale)
+        b=_crop_text(image,city,f'golden_age_city_gray{scale}',executable,directory,evidence,padding=(6,3),scale=scale,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text']
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(city,a[0]) or not _same_location(a[0],b[0])):return
+        if scale==3 and a[0]['text']==city['text']:continue
+        fresh=re.fullmatch(pattern,a[0]['text'])
+        if not fresh or fresh[1]!=old[1] or not _near_text(old[2],fresh[2],2):return
+        index=rows.index(city)
+        if _replace_crop_row(rows,index,a,lambda previous,new:True):rows[index]['provenance']+=b[0]['provenance']
+        return
+
+
+def _recover_crusade_tail(image,rows,executable,directory,evidence):
+    """Read the literal closing quote of the complete two-choice invitation."""
+    if image.size!=(640,480):return
+    headings=[r for r in rows if r['text'].endswith(' Emissary') and 307<=r['center'][1]<=320]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help','Goal')]
+    if len(headings)!=1 or len(controls)!=1 or controls[0]['text']!='OK':return
+    title,ok=headings[0],controls[0]
+    if abs(title['center'][0]-ok['center'][0])>8 or not 452<=ok['center'][1]<=469:return
+    panel=sorted([r for r in rows if title['center'][1]<r['center'][1]<ok['center'][1]
+                  and 300<=r['bounds'][0]<635],key=lambda r:r['center'][1])
+    if len(panel)!=5 or any(r['confidence']<.8 for r in panel):return
+    first,second,tail,no,yes=panel
+    if (first['text']!='"We invite you to join our crusade to rid the'
+            or tail['text']!='for the duration of the hostilities.'
+            or no['text']!='"No, not interested."'):return
+    target=re.fullmatch(r'world of the evil ([A-Za-z][A-Za-z -]{1,45})\. We will sign an alliance',second['text'])
+    if not target or yes['text']!=f'Yes, declare war on {target[1]}.':return
+    if (any(not 306<=r['bounds'][0]<=318 for r in (first,second,tail))
+            or not 17<=second['center'][1]-first['center'][1]<=26
+            or not 16<=tail['center'][1]-second['center'][1]<=24
+            or not 19<=no['center'][1]-tail['center'][1]<=31
+            or not 20<=yes['center'][1]-no['center'][1]<=31):return
+    wanted='for the duration of the hostilities."'
+    a=_crop_text(image,tail,'crusade_tail_rgb4',executable,directory,evidence,padding=(3,3),scale=4)
+    b=_crop_text(image,tail,'crusade_tail_gray4',executable,directory,evidence,padding=(3,3),scale=4,grayscale=True)
+    if (len(a)!=1 or len(b)!=1 or a[0]['text']!=wanted or b[0]['text']!=wanted
+            or min(a[0]['confidence'],b[0]['confidence'])<.8
+            or not _same_location(tail,a[0]) or not _same_location(a[0],b[0])):return
+    index=rows.index(tail)
+    if _replace_crop_row(rows,index,a,lambda old,new:True):rows[index]['provenance']+=b[0]['provenance']
 
 
 def _recover_diplomacy_gift_row(image,rows,executable,directory,evidence):
@@ -2146,6 +2315,13 @@ def _recover_city_caption_year(image,rows,executable,directory,evidence):
             'scope':'Only date digits; original city and remaining caption text unchanged'}
 
 
+def _production_heading_read_locator(text):
+    """Damaged first word locates pixels only; source title checks stay strict."""
+    text=text.strip().rstrip('?')
+    if not _near_text(text.split(' ',1)[0].casefold(),'what',2):return None
+    return re.fullmatch(r'[a-z]{3,6} (?:shall|chall)\s*(?:we|me|te)\s+([a-z]{3,7}?)\s*in (.{1,60})',text,re.I)
+
+
 def _recover_city_and_production_rows(image, rows, executable, directory, evidence):
     """Narrow native city/list layouts; no rules names or dates are invented."""
     if image.size!=(640,480):return
@@ -2245,7 +2421,7 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
     # replacement must independently contain the actual original "What".
     # A missing OCR space before "in" may locate the list for pixel re-reads,
     # but never supplies a canonical title or authorizes its classification.
-    titles=[r for r in rows if (re.match(r'^wh(?:at|ait) (?:shall|chall)\s*(?:we|me|te)\s+[a-z]{3,7}?\s*in .+',r['text'],re.I)
+    titles=[r for r in rows if (_production_heading_read_locator(r['text'])
                               or r.get('production_caption_fragments') is True)
             and r['confidence']>=.8 and 70<r['center'][1]<350]
     if len(titles)!=1:return
@@ -2259,7 +2435,7 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
     # separately cropped RGB and grayscale pass. Keep that actual reading;
     # do not replace the verb or city with a guessed canonical title.
     heading=lambda text:re.fullmatch(r'what shall\s*(?:we|me) ([a-z]{3,7}) in (.{1,60})',text.strip().rstrip('?'),re.I)
-    old_heading=re.fullmatch(r'wh(?:at|ait) (?:shall|chall)\s*(?:we|me|te)\s+([a-z]{3,7}?)\s*in (.{1,60})',title['text'].strip().rstrip('?'),re.I)
+    old_heading=_production_heading_read_locator(title['text'])
     if old_heading and (not heading(title['text']) or not _near_text(old_heading[1].casefold(),'build',2)):
         city_readings=[]
         framings=[(3,(6,6)),(2,(6,6)),(2,(3,3))]
@@ -2341,7 +2517,7 @@ def _recover_city_and_production_rows(image, rows, executable, directory, eviden
 def _recover_production_option_rows(image,rows,executable,directory,evidence):
     """Read damaged list labels, including icon ink, from complete row crops."""
     if image.size!=(640,480):return
-    titles=[r for r in rows if re.fullmatch(r'Wha(?:t|it) shall (?:we|me) [a-z]{3,7} in .{1,60}\?',r['text'])
+    titles=[r for r in rows if _production_heading_read_locator(r['text'])
             and r['confidence']>=.8 and 70<r['center'][1]<350]
     if len(titles)!=1:return
     title=titles[0]
@@ -2685,7 +2861,7 @@ def _map_patch_colors(image, rows, source_hash):
     for row in rows:
         x,y,w,h=row['bounds']
         tiny=8<=x and x+w<=456 and 70<=y and y+h<=440 and 1<=w<=96 and 1<=h<=40
-        vertical_icons=110<=x and x+w<=160 and 100<=y and y+h<=375 and 1<=w<=24 and 40<h<=136
+        vertical_icons=110<=x and x+w<=160 and 98<=y and y+h<=375 and 1<=w<=24 and 40<h<=136
         if not (tiny or vertical_icons):continue
         pixels=list(image.crop((x,y,x+w,y+h)).convert('RGB').getdata())
         row['map_patch_colors']={'source_sha256':source_hash,'bounds':list(row['bounds']),
@@ -2748,7 +2924,7 @@ def recognize(path: str | Path) -> dict:
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
             for recover in (_recover_history_rows,_recover_history_title,_recover_research_rows,_recover_exchange_advance_row,_recover_split_production_title,_recover_joined_production_title,_recover_city_and_production_rows,_recover_production_option_rows,_recover_city_caption_year,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_council_title,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_stolen_advance_notice,_recover_capture_notice_title,_recover_foreign_completion_title,_recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_upgrade_boundaries,_recover_production_upgrade_city,_recover_support_notice,_recover_travellers_title,_recover_population_decrease_option,_recover_population_notice,_recover_map_menu_label,_recover_map_heading,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_title_fragments,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_intruder_notice,_recover_tech_demand_title,_recover_herald_title,_recover_exchange_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_treaty_missing_ok,_recover_treaty_closing_rows,_recover_greeting_body,_recover_howdy_spacing,_recover_diplomacy_gift_row,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_fortress_order_body,_recover_masked_city_badge,_recover_merged_city_badge,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+                            _recover_stolen_advance_notice,_recover_capture_notice_title,_recover_foreign_completion_title,_recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_upgrade_boundaries,_recover_production_upgrade_city,_recover_support_notice,_recover_travellers_title,_recover_population_decrease_option,_recover_population_notice,_recover_map_menu_label,_recover_map_heading,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_title_fragments,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_intruder_notice,_recover_tech_demand_title,_recover_herald_title,_recover_exchange_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_cease_proposal,_recover_treaty_missing_ok,_recover_treaty_closing_rows,_recover_greeting_body,_recover_golden_age_city_line,_recover_crusade_title,_recover_crusade_tail,_recover_howdy_spacing,_recover_diplomacy_gift_row,_recover_gape_boundary,_recover_exchange_body,_recover_government_offer,_recover_fortress_order_body,_recover_masked_city_badge,_recover_merged_city_badge,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

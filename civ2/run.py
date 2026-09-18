@@ -577,6 +577,55 @@ def navigate_city(session,context,observation,dialog,resources):
     return None
 
 
+def _selected_living_owned_unit(state):
+    """A selected native actor must exist uniquely and have resolved positive HP."""
+    selected=state.get('selected_unit_id');player=state.get('player',{}).get('id')
+    if type(selected) is not int or selected<0 or type(player) is not int or not 1<=player<=7:
+        return False
+    units=[u for u in state.get('units',[]) if isinstance(u,dict)
+           and type(u.get('id')) is int and u['id']==selected]
+    return (len(units)==1 and type(units[0].get('owner')) is int and units[0]['owner']==player
+            and type(units[0].get('hp')) is int and units[0]['hp']>0)
+
+
+def _await_selected_unit(session,observation,dialog,resources):
+    """Let an original combat/selection transition finish without choosing input.
+
+    Called after the normal-map checkpoint. A killed unit can disappear before
+    the Moving Units pane repaints. Only live read-only checkpoints may retry;
+    save-backed sessions stop instead of issuing additional Save commands.
+    Modal/end-turn screens return to the ordinary controller. Unknown screens
+    and a bounded unresolved selection never authorize a default unit action.
+    """
+    error='Original map has no unique selected owned living unit yet; no unit decision issued.'
+    if not dialog.get('supported') or dialog.get('kind')!='normal_map':
+        return observation,dialog,None
+    if _selected_living_owned_unit(session.state):
+        return observation,dialog,None
+    if getattr(session,'observer',None) is None:
+        return observation,dialog,error
+    for attempt in range(8):
+        session.game.rpc('resume')
+        try:time.sleep(.25)
+        finally:session.game.rpc('pause')
+        observation=session.ui.observe()
+        dialog=classify_dialog(observation,rules=session.rules,game_text=resources,
+                              labels_text=labels_text(),state=classification_state(session))
+        if not dialog.get('supported') or dialog.get('kind')!='normal_map':
+            return observation,dialog,None
+        session.checkpoint()
+        # A helper read runs guest time. Reobserve after it, so an arriving
+        # modal/end-turn cannot be mistaken for the earlier Moving Units frame.
+        observation=session.ui.observe()
+        dialog=classify_dialog(observation,rules=session.rules,game_text=resources,
+                              labels_text=labels_text(),state=classification_state(session))
+        if not dialog.get('supported') or dialog.get('kind')!='normal_map':
+            return observation,dialog,None
+        if _selected_living_owned_unit(session.state):
+            return observation,dialog,None
+    return observation,dialog,error
+
+
 def run_steps(session, *, max_decisions=10000):
     resources = game_text()
     context = controller_context(session)
@@ -843,6 +892,14 @@ def run_steps(session, *, max_decisions=10000):
             context['active_city'] = None
             housekeeping = 0
             session.checkpoint()
+            observation,dialog,unit_wait_error=_await_selected_unit(session,observation,dialog,resources)
+            if unit_wait_error:
+                return {'status':'paused','reason':unit_wait_error,'screen':observation['path']}
+            if not dialog['supported']:
+                return {'status':'paused','reason':'Original screen requires a controller update.',
+                        'screen':observation['path'],'classification':dialog}
+            if dialog['kind']!='normal_map':
+                continue
             session.choose_unit()
             continue
         if dialog['requires_model']:

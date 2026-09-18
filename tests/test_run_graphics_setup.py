@@ -17,6 +17,7 @@ def run(s, helper, throne=None):
 class GraphicsSetupTests(unittest.TestCase):
     def test_fresh_setup_verifies_each_option_separately_before_gameplay(self):
         normal=frame(1,'normal_map');s=session([normal]*3);ctx=controller_context(s)
+        s.state.update(player={'id':1},selected_unit_id=1,units=[{'id':1,'owner':1,'hp':10}])
         ctx['graphics_configured']=False;ctx['throne_presentation_disabled']=False
         s.checkpoint=mock.Mock();s.choose_unit=mock.Mock(side_effect=lambda:setattr(s,'decisions',1))
         civilopedia=mock.Mock(return_value={'scope':'TEST Civilopedia only'})
@@ -41,12 +42,14 @@ class GraphicsSetupTests(unittest.TestCase):
 
     def test_unconfigured_normal_map_configures_once_then_reobserves_before_command(self):
         normal=frame(1,'normal_map');s=session([normal,normal]);ctx=controller_context(s)
+        s.state.update(player={'id':1},selected_unit_id=1,units=[{'id':1,'owner':1,'hp':10}])
         del ctx['graphics_configured'];s.checkpoint=mock.Mock()
         s.choose_unit=mock.Mock(side_effect=lambda:setattr(s,'decisions',1))
         receipt={'scope':'TEST presentation only','other_checkboxes_unchanged':True}
         helper=mock.Mock(return_value=receipt)
         run(s,helper)
         helper.assert_called_once_with(s.ui);s.checkpoint.assert_called_once()
+        s.choose_unit.assert_called_once()
         self.assertEqual(s.ui.observe.call_count,2)
         self.assertTrue(ctx['graphics_configured'])
         records=[c.kwargs for c in s.journal.append.call_args_list if c.args[0]=='graphics_preferences_configured']

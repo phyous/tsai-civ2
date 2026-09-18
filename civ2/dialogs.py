@@ -234,7 +234,7 @@ def _clipped_city_label(row,state):
 
 
 def _production_stat(text):
-    return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+/\d+\s+hp:\s*\d+/\d+)?\)',text))
+    return bool(re.fullmatch(r'\(\d+\s+(?:turns?|tums?)(?:,\s*adm:\s*\d+/\d+[*%]?/\d+\s+hp:\s*\d+/\d+)?\),?',text))
 
 
 def _production_icon_rows(body, names):
@@ -253,10 +253,11 @@ def _production_icon_rows(body, names):
         # each overlapping row must already have its independently read stat.
         words=re.sub(r'[^a-z0-9 ]',' ',row['normal']).split()
         vertical=(row not in labels and row not in stats and row['confidence']<.5
-            and row.get('chromatic_fraction',0)>=.20 and 110<=x and x+w<=160
-            and 1<=w<=24 and 40<h<=136 and re.fullmatch(r'[A-Za-z0-9 -]{1,12}',row['text'])
+            and row.get('chromatic_fraction',0)>=.19 and 110<=x and x+w<=160
+            and 1<=w<=24 and 40<h<=136 and 1<=len(row['text'])<=12
+            and all(c.isalnum() or c in ' -' for c in row['text'])
             and not set(words)&{'ok','no','yes','help','cancel','buy','exit','auto','done','continue'}
-            and labels and all(r['bounds'][0]>=x+w+30 for r in labels))
+            and labels)
         if vertical:
             peers=[r for r in labels if y<=r['center'][1]<=y+h]
             peer_y=sorted(r['center'][1] for r in peers)
@@ -265,7 +266,7 @@ def _production_icon_rows(body, names):
             # sequence of six to eight independently read label/stat rows.
             tall_complete=(h<=80 or (6<=len(peers)<=8 and peer_y[0]-y<=14 and y+h-peer_y[-1]<=18
                             and all(15<=b-a<=19 for a,b in zip(peer_y,peer_y[1:]))))
-            if tall_complete and len(peers)>=3 and all(any(s['bounds'][0]>r['bounds'][0]+r['bounds'][2]
+            if tall_complete and len(peers)>=3 and all(r['bounds'][0]>=x+w+30 for r in peers) and all(any(s['bounds'][0]>r['bounds'][0]+r['bounds'][2]
                     and abs(s['center'][1]-r['center'][1])<=5 for s in stats) for r in peers):
                 icons.append(row);continue
         if (row in labels or row in stats or row['confidence']>=.5
@@ -1255,6 +1256,12 @@ def classify_dialog(observation, *, rules=None, game_text=None, labels_text=None
                     unknown_rows.append(row)
             if unknown_rows:return unknown('Unrecognized text inside native list; options may be incomplete',kind,title['text'])
             if not choices:return unknown('No complete authentic option labels recognized',kind,title['text'])
+            if kind=='production_choice':
+                unresolved=[{'source_line':r['source_line'],'raw_text':r['text']} for r in body
+                    if _production_stat(r['normal']) and re.search(r'adm:\s*\d+/\d+[*%]/\d+',r['normal'])]
+                if unresolved:
+                    result['evidence']['unresolved_displayed_stat_suffixes']={
+                        'rows':unresolved,'interpretation':'Unresolved displayed stat suffix; preserve the raw marker without assigning an ability or numeric meaning. Original RULES specifications remain the numeric source.'}
             return finish(kind,title['text'],choices,buttons,model=True)
         # Diplomacy may have no standard button labels in OCR: option radio rows
         # still need a complete resource-matched body and actual option labels.
