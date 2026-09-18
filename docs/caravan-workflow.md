@@ -43,9 +43,29 @@ separate native input and decision handling. The original manual describes
 city entry, naval carriage, trade and wonder contribution (local transcription
 lines6973–7014); GAME resources2943–2984 supply the dialogs.
 
-Remaining coverage limits are explicit: the Supply And Demand inquiry/report
-(`SUPPLYSEARCH`/`SUPPLYSHOW`) lacks live layout support, and the planner has no
-dedicated trade-delivery or wonder-contribution objective. Those do not add
-hidden actions: the inquiry will pause if encountered, and all currently offered
-movement commands still require the normal model choice. No home-city change is
+The planner separately offers `trade_delivery` and `assist_wonder` objectives to
+living original Caravan/Freight units. Delivery uses owned or remembered city
+coordinates on explored land, excluding the current square and the uniquely
+observed home city. Wonder assistance uses an owned city's exact current wonder
+production and the public `not_built` status. Original unit rules and observed
+HP are corroborated. Unknown cargo demand, prospective revenue and foreign
+ownership are never supplied as facts.
+
+The existing category/target selection retains each offered leaf and its full
+label. The candidate budget still reserves Hold and uses the same documented
+round-robin ordering and omission counts. Objectives do not prune or execute
+movement commands. Reaching the target completes only the travel objective;
+the original arrival choice remains a separate model decision. Changed wonder
+production, lost city/home identity or removed unit slots invalidate the plan
+without claiming delivery or shield contribution. Offline verification binds
+each new target to the native records and the actual model request.
+
+Trade entry into an occupied remembered city no longer requires a foreign-owner
+field: the native observation deliberately withholds that field. It requires a
+unique remembered city coordinate on observed land and excludes an owned city.
+The move label explicitly states that the present owner is unverified. An enemy
+unit on a bare square does not enable a civilian trade interaction.
+
+The Supply And Demand inquiry/report (`SUPPLYSEARCH`/`SUPPLYSHOW`) still lacks
+live layout support and will pause if encountered. No home-city change is
 introduced; the original game rejects changing a trade unit's home city.

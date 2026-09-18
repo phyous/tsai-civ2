@@ -80,8 +80,11 @@ the helpers themselves do not call Jev or the game.
 Candidates cover known frontiers, observed Plains/Grassland settlement proposals,
 rule-compatible roads/irrigation/mines, friendly-city defense for military land
 units, currently visible units belonging to declared enemies or barbarians,
-approaching remembered foreign cities with military land units, and Hold for one
-turn. Approaching a remembered city reveals no hidden owner or garrison and
+approaching remembered foreign cities with military land units, observed-city
+trade delivery and current owned-wonder assistance for Caravan/Freight units,
+and Hold for one turn. [Caravan objectives](caravan-workflow.md) do not guess
+supply, demand, revenue or shield contribution; every movement and original
+arrival choice remains independent. Approaching a remembered city reveals no hidden owner or garrison and
 authorizes no attack: the task ends nearby so Jev reassesses current diplomacy
 and visible threats through its ordinary choices. Original-game legality and reachability remain authoritative;
 these are known-compatible proposals, not guaranteed legal or safe destinations.

@@ -44,6 +44,29 @@ class ProductionUpgradeTests(unittest.TestCase):
             elif case=='radio':o['lines'][-2]['center'][0]-=60;o['lines'][-2]['bounds'][0]-=60
             with self.subTest(case=case):self.assertIsNone(self.classify(o,s,r,l,source))
 
+    def test_only_geometrically_separate_background_conflicts_are_retained(self):
+        o,s,r,l=fixture();o['ocr']={'conflicts':[dict(text='End of Turn',bounds=[476,445,62,11],reason='TEST ambiguous background status')]}
+        d=self.classify(o,s,r,l);self.assertIsNotNone(d)
+        self.assertEqual(d['evidence']['background_ocr_conflicts'],o['ocr']['conflicts'])
+        for bounds in ([280,200,30,12],None,[476,445,62,False]):
+            o['ocr']['conflicts'][0]['bounds']=bounds
+            self.assertIsNone(self.classify(o,s,r,l))
+
+    def test_original_antium_notice_preserves_background_footer_ambiguity(self):
+        p=Path('runs/attempt-011/screens/ui-0002166.png')
+        if not p.exists():self.skipTest('Private original frame unavailable')
+        from civ2.observe import recognize
+        from civ2.boot import original_rules
+        from civ2.save import parse_rules
+        from civ2.run import game_text,labels_text
+        o=recognize(p)
+        d=classify_dialog(o,state={'player':{'id':1},'cities':[{'owner':1,'name':'Antium'}]},
+            rules=parse_rules(original_rules()),game_text=game_text(),labels_text=labels_text())
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model'])
+        self.assertEqual(d['kind'],'production_upgrade_notice');self.assertIsNone(d['mechanical_action'])
+        self.assertEqual([x['text']for x in d['options']],['Zoom to City','Continue'])
+        self.assertEqual(d['evidence']['background_ocr_conflicts'],o['ocr']['conflicts'])
+
     def test_private_original_notice_offers_both_actual_choices(self):
         p=Path('runs/attempt-011/screens/ui-0002084.png')
         if not p.exists():self.skipTest('Private original frame unavailable')

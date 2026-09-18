@@ -25,7 +25,7 @@ from collections import Counter
 from copy import deepcopy
 import re
 
-from .save import parse_rules
+from .save import parse_rules, TERRAINS
 from .revision import (RevisionError, revision as state_revision, revision_key,
                        observation_key)
 from .rules import eligible_governments, eligible_research
@@ -205,8 +205,18 @@ def _civilian_interaction(unit, point, observation, rules):
     if saved is not None and (not isinstance(saved,dict) or any(type(saved.get(k)) is not int or saved[k]!=original[k] for k in fields)):return None
     if original['role']==6:return 'diplomacy'
     cities=observation.get('known_cities',[])
-    if any(isinstance(city,dict) and city.get('x')==point['x'] and city.get('y')==point['y']
-           and _integer(city.get('owner')) and city['owner']!=unit['owner'] for city in cities):return 'trade'
+    # The native visibility projection deliberately withholds current foreign
+    # ownership. A remembered city coordinate supports requesting entry, not a
+    # claim about its present owner or a guaranteed trade delivery.
+    owned=observation.get('cities',[])
+    if any(isinstance(city,dict) and (city.get('x'),city.get('y'))==(point['x'],point['y'])
+           for city in owned):return None
+    targets=[city for city in cities if isinstance(city,dict)
+             and (city.get('x'),city.get('y'))==(point['x'],point['y'])]
+    if any(_integer(city.get('owner')) and city['owner']==unit['owner'] for city in targets):return None
+    tiles=[tile for tile in observation.get('map',{}).get('tiles',[]) if isinstance(tile,dict)
+           and (tile.get('x'),tile.get('y'))==(point['x'],point['y'])]
+    if len(targets)==1 and len(tiles)==1 and tiles[0].get('terrain') in TERRAINS and tiles[0]['terrain']!='Ocean':return 'trade'
     return None
 
 
@@ -477,6 +487,7 @@ def unit_candidates(observation, unit_id=None, rules=None):
             description += "; visible " + names
             if interaction:
                 description += '; request original '+interaction+' interaction; availability and terms require a separate observed choice'
+                if interaction=='trade':description += '; remembered city location, current owner unverified'
             else:description += ", combat or diplomacy may follow"
         city_distance = _city_distance_label(observation, point) if cities else ""
         add("move_"+short, "move", f"Move {name} to ({point['x']},{point['y']}) — {description}{city_distance}", key,

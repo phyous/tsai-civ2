@@ -18,7 +18,8 @@ class PlanningError(PolicyError):
     pass
 
 
-TASKS = ('survey', 'settle', 'road', 'irrigate', 'mine', 'defend', 'engage', 'approach_city')
+TASKS = ('survey', 'settle', 'road', 'irrigate', 'mine', 'defend', 'engage', 'approach_city',
+         'trade_delivery', 'assist_wonder')
 ACTOR_FIELDS = ('id', 'owner', 'type_id', 'x', 'y', 'home_city_id', 'veteran')
 
 
@@ -29,6 +30,68 @@ def _actor(unit):
 def _neighbors(state, point):
     return [p for _, _, dx, dy, _ in DIRECTIONS
             if (p := _destination(state, point['x']+dx, point['y']+dy)) is not None]
+
+
+def _caravan_targets(state,rules,unit,tiles,*,exclude_here=True):
+    """Observed city objectives only, with no cargo demand or value forecast."""
+    matches=[r for r in rules.get('units',[]) if isinstance(r,dict) and r.get('id')==unit['type_id']]
+    if len(matches)!=1:return []
+    spec=matches[0];fields=('id','domain','role','attack','max_hp')
+    if (any(type(spec.get(k)) is not int for k in fields) or spec['id'] not in (48,49)
+            or (spec['domain'],spec['role'],spec['attack'])!=(0,7,0)
+            or spec.get('max_hp')!=10 or type(unit.get('hp')) is not int
+            or type(unit.get('hp_lost')) is not int or not 0<=unit['hp_lost']<10
+            or unit['hp']!=10-unit['hp_lost']):return []
+    saved=unit.get('specification')
+    if saved is not None and (not isinstance(saved,dict) or any(
+            type(saved.get(k)) is not int or saved[k]!=spec[k] for k in fields)):return []
+    player=state.get('player',{}).get('id');here=(unit['x'],unit['y'])
+    owned=[c for c in state.get('cities',[]) if isinstance(c,dict) and c.get('owner')==player
+           and type(c.get('id')) is int and c['id']>=0]
+    known=[c for c in state.get('known_cities',[]) if isinstance(c,dict)]
+    def land(city):
+        x,y=city.get('x'),city.get('y')
+        return (type(x) is int and type(y) is int and (x,y) in tiles
+                and tiles[x,y].get('terrain') in TERRAINS and tiles[x,y]['terrain']!='Ocean')
+    owned=[c for c in owned if land(c)];known=[c for c in known if land(c)]
+    points=Counter((c['x'],c['y']) for c in owned+known)
+    owned=[c for c in owned if points[c['x'],c['y']]==1]
+    known=[c for c in known if points[c['x'],c['y']]==1]
+    def name(city):
+        value=city.get('name')
+        return value if isinstance(value,str) and 0<len(value)<=60 else 'city'
+    result=[]
+    home=[c for c in owned if type(unit.get('home_city_id')) is int and c.get('id')==unit['home_city_id']]
+    if len(home)==1:
+        home_point=(home[0]['x'],home[0]['y'])
+        for city,knowledge in [(c,'owned') for c in owned]+[(c,'remembered') for c in known]:
+            point=(city['x'],city['y'])
+            if point==home_point or (exclude_here and point==here):continue
+            target={k:city[k] for k in ('x','y')}
+            result.append(('trade_delivery',target,
+                f"Deliver this unit's cargo toward {knowledge} {name(city)} at ({city['x']},{city['y']}); "
+                'a separate original arrival choice is required. Demand, revenue, route and safety are unverified.'
+                +(' The remembered city\'s current owner is unknown.' if knowledge=='remembered' else '')))
+    ids=Counter(c.get('id') for c in owned)
+    for city in owned:
+        if (type(city.get('id')) is not int or ids[city['id']]!=1
+                or (exclude_here and (city['x'],city['y'])==here)):continue
+        production=city.get('production',{})
+        if not isinstance(production,dict) or production.get('kind')!='improvement':continue
+        improvement_id=production.get('id')
+        if type(improvement_id) is not int or not 39<=improvement_id<=66:continue
+        improvements=[r for r in rules.get('improvements',[]) if isinstance(r,dict)
+                      and r.get('id')==improvement_id and r.get('kind')=='wonder']
+        public=[w for w in state.get('wonders',[]) if isinstance(w,dict) and w.get('improvement_id')==improvement_id]
+        if (len(improvements)!=1 or len(public)!=1 or public[0].get('status')!='not_built'
+                or not isinstance(improvements[0].get('name'),str)
+                or production.get('name')!=improvements[0]['name']):continue
+        target={k:city[k] for k in ('id','x','y')};target['improvement_id']=improvement_id
+        result.append(('assist_wonder',target,
+            f"Bring this trade unit toward owned {name(city)} at ({city['x']},{city['y']}) to assist its observed "
+            f"{improvements[0]['name']} production; a separate original Help build WONDER choice is required. "
+            'No shield contribution, completion, route or native eligibility is assumed.'))
+    return result
 
 
 def task_candidates(state, rules=None, limit=64):
@@ -103,6 +166,8 @@ def task_candidates(state, rules=None, limit=64):
                 f"Approach remembered foreign city {city.get('name','')} at ({target['x']},{target['y']}) "
                 'to reassess its current situation; current owner and defenses are unknown. '
                 'This objective does not authorize an attack or assert a safe route.')
+    for task,target,label in _caravan_targets(state,rules,unit,tiles):
+        add(task,target,label)
     hold = dict(id='hold_one_turn', task='hold', label='Hold this unit for one turn, then reassess',
                 actor=_actor(unit), preconditions={**revision, 'selected_unit_id':unit['id']}, target={'turn':state['turn']+1})
     for bucket in groups.values():
@@ -142,6 +207,8 @@ _CATEGORY_LABELS = {
     'defend':'Defend an observed owned city',
     'engage':'Engage a currently visible hostile unit',
     'approach_city':'Approach a remembered foreign city to reassess its situation',
+    'trade_delivery':'Bring this trade unit toward an observed city for a separate native delivery choice',
+    'assist_wonder':'Bring this trade unit toward an owned city currently producing an observed wonder',
 }
 
 
@@ -330,6 +397,12 @@ def advance_plan(plan, before, after, action=None, rules=None):
         return stop('expired', 'Bounded review interval reached; ask Jev for a new task')
     if task == 'defend' and point not in new_cities:
         return stop('invalidated', 'Target is no longer an observed owned city')
+    if task in ('trade_delivery','assist_wonder'):
+        eligible=_caravan_targets(after,_rules(rules),matches[0],tiles,exclude_here=False)
+        if not any(name==task and candidate_target==target for name,candidate_target,_ in eligible):
+            return stop('invalidated', 'Observed trade target, home city, or current wonder production no longer matches; no delivery effect inferred')
+        if (result['actor']['x'],result['actor']['y'])==point:
+            return stop('complete', 'The unit reached the observed target city; reassess the original arrival choice. Trade, shields and wonder completion are not inferred')
     if task == 'approach_city':
         if point in new_cities:
             return stop('complete', 'An owned city is now observed at the target; conquest is not inferred')

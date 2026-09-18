@@ -22,8 +22,9 @@ class CivilianInteraction(unittest.TestCase):
         for city in (None,dict(x=10,y=8,owner=1),dict(x=10,y=8),dict(x=8,y=8,owner=2),dict(x=10,y=8,owner=2)):
             s,r=self.state(7);s['known_cities']=[] if city is None else [city]
             a=unit_candidates(s,rules=r)
-            if city==dict(x=10,y=8,owner=2):
+            if city in (dict(x=10,y=8,owner=2),dict(x=10,y=8)):
                 self.assertIn('request original trade interaction',a['move_e']['label']);validate_action(a['move_e'],s,r)
+                self.assertIn('current owner unverified',a['move_e']['label'])
             else:self.assertNotIn('move_e',a)
 
     def test_saved_role_cannot_override_original_rules_and_worker_stays_blocked(self):

@@ -16,7 +16,7 @@ def radio(text):return re.sub(r'^(?:O|[○●•])\s+','',text)
 def classify_production_upgrade(observation,rows,resources,rules,state,labels_text):
     if ((observation.get('width'),observation.get('height'))!=(640,480)
             or not re.fullmatch('[a-f0-9]{64}',str(observation.get('sha256','')))
-            or observation.get('ocr',{}).get('conflicts') or not isinstance(rules,dict) or not isinstance(state,dict)
+            or not isinstance(rules,dict) or not isinstance(state,dict)
             or not isinstance(labels_text,str) or labels_text.splitlines()[48:50]!=['Zoom to City','Continue']
             or [r for r in resources if r.get('tag')=='UPGRADED']!=[SOURCE]):return None
     titles=[r for r in rows if normal(r['text'])=='domestic advisor']
@@ -27,6 +27,15 @@ def classify_production_upgrade(observation,rows,resources,rules,state,labels_te
             or not 100<=ok['center'][1]-cy<=160):return None
     # The original icon expands this320px prose resource to a468px panel.
     left,right=cx-234,cx+234
+    conflicts=observation.get('ocr',{}).get('conflicts',[])
+    if not isinstance(conflicts,list):return None
+    for conflict in conflicts:
+        bounds=conflict.get('bounds') if isinstance(conflict,dict) else None
+        if (not isinstance(bounds,list) or len(bounds)!=4 or any(type(v)is not int for v in bounds)
+                or bounds[2]<=0 or bounds[3]<=0 or bounds[0]<0 or bounds[1]<0
+                or bounds[0]+bounds[2]>640 or bounds[1]+bounds[3]>480):return None
+        x,y,w,h=bounds
+        if x<right and x+w>left and y<ok['bounds'][1]+ok['bounds'][3] and y+h>title['bounds'][1]:return None
     panel=[r for r in rows if r not in (title,ok) and cy<r['center'][1]<ok['center'][1]
            and left<=r['center'][0]<=right]
     if any(r['confidence']<.8 or r['bounds'][0]<left-2 or r['bounds'][0]+r['bounds'][2]>right+2 for r in [*panel,title,ok]):return None
@@ -61,4 +70,5 @@ def classify_production_upgrade(observation,rows,resources,rules,state,labels_te
             observed_body='\n'.join(r['text']for r in prose),body_source_lines=[r['source_line']for r in prose],
             option_source_lines=[r['source_line']for r in options],source_image_sha256=observation['sha256'],
             city_name=match[1],previous_unit=match[2],new_unit=match[3],
+            background_ocr_conflicts=deepcopy(conflicts),
             scope='Observed notice only; Zoom to City and Continue each require an actual model choice'))

@@ -1140,6 +1140,54 @@ def _presentation(payload, files, observed_screens):
     return _dispatch({'action':action,'receipt':receipt,'after':source},action,'dialog_action',files)
 
 
+def _trade_plan_binding(name,target,unit,state,model):
+    """Independently bind standard original Caravan/Freight travel proposals."""
+    # Original 1.06 @UNITS rows 48/49: role7, ground, attack0, maxHP10.
+    # Native parsing without private RULES retains type_id and hp_lost.
+    selected=model.get('selected_unit',{});spec=selected.get('specification')
+    expected={'id':unit['type_id'],'domain':0,'role':7,'attack':0,'max_hp':10}
+    _require(unit['type_id'] in (48,49) and type(unit.get('hp_lost')) is int
+             and 0<=unit['hp_lost']<10 and type(selected.get('hp')) is int
+             and selected['hp']==10-unit['hp_lost']
+             and isinstance(spec,dict) and all(type(spec.get(k)) is int and spec[k]==v for k,v in expected.items()),
+             'Trade plan actor differs from the alive original trade-unit specification')
+    point=(target['x'],target['y']);here=(unit['x'],unit['y'])
+    tiles={(t['x'],t['y']):t for t in state['map']['tiles']}
+    def land(city):
+        p=(city.get('x'),city.get('y'))
+        return p in tiles and tiles[p].get('terrain') in (
+            'Desert','Plains','Grassland','Forest','Hills','Mountains','Tundra','Glacier','Swamp','Jungle')
+    owned=[c for c in state['cities'] if c.get('owner')==state['player']['id'] and land(c)]
+    known=[c for c in state['known_cities'] if land(c)]
+    counts=Counter((c['x'],c['y']) for c in owned+known)
+    _require(point!=here and counts[point]==1 and point in tiles and land(target),
+             'Trade plan target is current, ambiguous, or outside observed land cities')
+    owned=[c for c in owned if counts[c['x'],c['y']]==1]
+    known=[c for c in known if counts[c['x'],c['y']]==1]
+    if name=='trade_delivery':
+        homes=[c for c in owned if type(unit.get('home_city_id')) is int and c['id']==unit['home_city_id']]
+        _require(len(homes)==1 and point!=(homes[0]['x'],homes[0]['y']),
+                 'Trade delivery lacks a unique observed home or targets its home city')
+        if any((c['x'],c['y'])==point for c in owned):
+            visible=model.get('owned_city_locations',[])
+        else:visible=model.get('remembered_foreign_cities',[])
+        _require(sum((c.get('x'),c.get('y'))==point for c in visible)==1,
+                 'Trade city target was not uniquely shown in the actual model request')
+        return
+    cities=[c for c in owned if all(c.get(k)==target[k] for k in ('id','x','y'))]
+    improvement=target['improvement_id']
+    public=[w for w in state.get('wonders',[]) if w.get('improvement_id')==improvement]
+    _require(len(cities)==1 and sum(c['id']==target['id'] for c in owned)==1
+             and 39<=improvement<=66 and cities[0].get('production',{}).get('kind')=='improvement'
+             and cities[0]['production'].get('id')==improvement
+             and len(public)==1 and public[0].get('status')=='not_built',
+             'Wonder assistance differs from current owned production or public wonder status')
+    visible=[c for c in model.get('owned_city_locations',[]) if all(c.get(k)==target[k] for k in ('id','x','y'))]
+    _require(len(visible)==1 and visible[0].get('production',{}).get('kind')=='improvement'
+             and visible[0]['production'].get('id')==improvement,
+             'Wonder target production was not shown in the actual model request')
+
+
 def _plan_binding(task, request, saves):
     _require(isinstance(task, dict) and set(task) ==
              {'id','task','label','actor','preconditions','target'}, 'Planning candidate schema is invalid')
@@ -1161,14 +1209,18 @@ def _plan_binding(task, request, saves):
     declared = model.get('planning', {}).get('targets', {}).get(task['id'])
     _require(declared == {'task':task['task'],'target':target}, 'Plan target differs from the actual model request')
     name = task['task']
-    _require(name in ('hold','survey','settle','road','irrigate','mine','defend','engage','approach_city'), 'Unknown planning task')
+    _require(name in ('hold','survey','settle','road','irrigate','mine','defend','engage','approach_city','trade_delivery','assist_wonder'), 'Unknown planning task')
     if name == 'hold':
         _require(target == {'turn':state['turn']+1}, 'Hold plan has an invalid review turn')
         return
     target_fields = ({'x','y','unknown_neighbors'} if name == 'survey' else
                      {'id','x','y'} if name == 'defend' else
-                     {'id','owner','type_id','x','y'} if name == 'engage' else {'x','y'})
+                     {'id','owner','type_id','x','y'} if name == 'engage' else
+                     {'id','x','y','improvement_id'} if name=='assist_wonder' else {'x','y'})
     _require(set(target) == target_fields, 'Plan target contains unsupported fields')
+    if name in ('trade_delivery','assist_wonder'):
+        _require(all(type(v) is int and v>=0 for v in target.values()),'Trade plan target fields must be native integers')
+        _trade_plan_binding(name,target,units[0],state,model)
     point = target.get('x'), target.get('y')
     known = {(t['x'],t['y']) for t in state['map']['tiles']}
     _require(point in known, 'Planning target is outside the explored native observation')
@@ -1201,7 +1253,7 @@ def _plan_category_binding(category,request,saves,latest_revision):
     categories=planning.get('categories');targets=planning.get('targets');target_criteria=planning.get('target_criteria')
     question=request.get('questions',{}).get('task_category',{})
     _require(planning.get('stage')=='category' and set(request.get('questions',{}))=={'task_category'}
-             and isinstance(categories,dict) and 2<=len(categories)<=9 and isinstance(targets,dict)
+             and isinstance(categories,dict) and 2<=len(categories)<=11 and isinstance(targets,dict)
              and 2<=len(targets)<=64 and set(question.get('criteria',{}))==set(categories)
              and isinstance(target_criteria,dict) and set(target_criteria)==set(targets)
              and all(isinstance(v,str) and 0<len(v)<=4096 for v in target_criteria.values())
@@ -1212,7 +1264,7 @@ def _plan_category_binding(category,request,saves,latest_revision):
     for identifier,item in categories.items():
         _require(isinstance(item,dict) and set(item)=={'id','kind','task','label','actor','preconditions',
                      'target_ids','target_count','sole_target'} and item['id']==item['task']==identifier
-                 and identifier in ('hold','survey','settle','road','irrigate','mine','defend','engage','approach_city')
+                 and identifier in ('hold','survey','settle','road','irrigate','mine','defend','engage','approach_city','trade_delivery','assist_wonder')
                  and item['kind']=='plan_category' and isinstance(item['label'],str)
                  and item['label']==question['criteria'][identifier]
                  and item['actor']==category['actor'] and item['preconditions']==category['preconditions']
