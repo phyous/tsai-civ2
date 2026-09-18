@@ -52,5 +52,30 @@ class WithdrawalPixels(unittest.TestCase):
         body=next(r for r in o['lines'] if r['text'].startswith('treaty,'))
         self.assertIn('inmediately',body['provenance'][0]['text'])
 
+    def test_both_radio_prefixes_need_complete_agreeing_actual_reads(self):
+        for agree in (True,False):
+            original=rows();original[3]['text']=original[3]['text'].replace('inmediately','immediately')
+            original[6]['text']='• '+original[6]['text'];before=deepcopy(original)
+            a=deepcopy(original[5]);a['text']=a['text'][2:]
+            b=deepcopy(original[6]);b['text']=b['text'][2:];peer=deepcopy(b)
+            if not agree:peer['text']='"No! We accept this treaty!"'
+            with patch('civ2.observe._crop_text',side_effect=[[a],[a],[b],[peer]]):
+                _recover_withdrawal_warning(Image.new('RGB',(640,480)),original,None,None,{})
+            if agree:self.assertEqual([r['text']for r in original[5:7]],[a['text'],b['text']])
+            else:self.assertEqual(original,before)
+
+    def test_actual_original_german_warning_keeps_both_alternatives(self):
+        p=Path('runs/attempt-010/screens/ui-0002117.png')
+        if not p.exists():self.skipTest('Private original frame absent')
+        from civ2.run import game_text
+        from civ2.dialogs import classify_dialog
+        o=recognize(p);d=classify_dialog(o,game_text=game_text())
+        self.assertTrue(d['supported'],d);self.assertEqual(d['resource_tag'],'VIOLATOR')
+        self.assertTrue(d['requires_model']);self.assertIsNone(d['mechanical_action'])
+        self.assertEqual([r['text']for r in d['options']],['Withdraw troops to nearest city.','"No! We renounce this worthless treaty!"'])
+        self.assertIn('Hamburg',d['visible_text'])
+        option=next(r for r in o['lines']if r['text'].startswith('"No!'))
+        self.assertTrue(option['provenance'][0]['text'].startswith('• '))
+
 
 if __name__=='__main__':unittest.main()
