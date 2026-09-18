@@ -14,6 +14,7 @@ from .gdi_text import recover_quoted_herald
 from .gdi_bodies import recover_herald_paragraph
 from .promotion_notice import recover_promotion_title
 from .gdi_titles import annotate_production_titles,annotate_production_crop_anchor
+from .gdi_dates import recover_caption_date
 from .gdi_treaty import recover_treaty_between
 from .dates import DATE_PATTERN,city_date_match,date_parts
 from .map_badges import annotate_badges
@@ -862,6 +863,76 @@ def _recover_exchange_requested_advance(image,rows,executable,directory,evidence
     rows[rows.index(old)]=a[0]
 
 
+def _recover_cancel_treaty_body(image,rows,executable,directory,evidence):
+    """Read source words/punctuation while retaining the treaty choice and target."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if 200<=r['bounds'][1]<=380 and 450<=r['center'][0]<=485
+            and r['confidence']>=.8 and r['text'].endswith(' Emissary')]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help')]
+    no=[r for r in rows if re.fullmatch(r'"Never! The [A-Za-z ]{2,40} are our friends\."',r['text'])]
+    yes=[r for r in rows if re.fullmatch(r'"Yes! Let us teach the [A-Za-z ]{2,40} a lesson!"',r['text'])]
+    if len(titles)!=1 or len(controls)!=1 or controls[0]['text']!='OK' or len(no)!=1 or len(yes)!=1:return
+    title=titles[0];bottom=min(no[0]['bounds'][1],yes[0]['bounds'][1])
+    body=sorted([r for r in rows if 300<=r['bounds'][0]<=315
+                 and title['center'][1]<r['center'][1] and r['bounds'][1]+r['bounds'][3]<=bottom],key=lambda r:r['center'][1])
+    if len(body)!=3 or any(r['confidence']<.8 for r in [*body,*no,*yes,*controls]):return
+    middle=re.fullmatch(r'the ([A-Za-z ]{2,40})\. We [A-Za-z]{2,16} you cancel this treaty',body[1]['text'])
+    first='"You have made peace with our evil neighbors:';last='at once!"'
+    if (not middle or no[0]['text']!=f'"Never! The {middle[1]} are our friends."'
+            or yes[0]['text']!=f'"Yes! Let us teach the {middle[1]} a lesson!"'
+            or not body[0]['text'].startswith('"You have made peace with our evil ')
+            or not _near_text(body[0]['text'],first,1)
+            or not body[2]['text'].startswith('at once') or not _near_text(body[2]['text'],last,2)):return
+    recovered=[]
+    for old,wanted,name in ((body[0],first,'intro'),(body[2],last,'tail')):
+        if old['text']==wanted:continue
+        if name=='intro':
+            a=_crop_text(image,old,'cancel_treaty_intro_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
+            b=_crop_text(image,old,'cancel_treaty_intro_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
+        else:
+            a=_crop_text(image,old,'cancel_treaty_tail_black2',executable,directory,evidence,padding=(3,3),scale=2,black_threshold=70)
+            b=_crop_text(image,old,'cancel_treaty_tail_black3',executable,directory,evidence,padding=(3,3),scale=3,black_threshold=70)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=wanted or b[0]['text']!=wanted
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+        recovered.append((old,a[0],b[0]))
+    for old,a,b in recovered:
+        a['provenance']=old['provenance']+a['provenance']+b['provenance']
+        rows[rows.index(old)]=a
+
+
+def _recover_tribute_tail(image,rows,executable,directory,evidence):
+    """Read TRIBUTE1's punctuation/radio label, never its amount or answer."""
+    if image.size!=(640,480):return
+    titles=[r for r in rows if 200<=r['bounds'][1]<=380 and 450<=r['center'][0]<=485
+            and r['confidence']>=.8 and r['text'].endswith(' Emissary')]
+    controls=[r for r in rows if r['text'] in ('OK','Cancel','Yes','No','Help')]
+    no=[r for r in rows if r['text']=='"We laugh at your petty boasts."']
+    pay=[(r,re.fullmatch(r'(?:[O○●•] )?Pay ([0-9]{1,6}) gold in tribute\.',r['text']))for r in rows]
+    pay=[(r,m)for r,m in pay if m]
+    if len(titles)!=1 or len(controls)!=1 or controls[0]['text']!='OK' or len(no)!=1 or len(pay)!=1:return
+    title=titles[0];payment,amount=pay[0];bottom=min(no[0]['bounds'][1],payment['bounds'][1])
+    body=sorted([r for r in rows if 304<=r['bounds'][0]<=315
+                 and title['center'][1]<r['center'][1] and r['bounds'][1]+r['bounds'][3]<=bottom],key=lambda r:r['center'][1])
+    if (len(body)!=4 or any(r['confidence']<.8 for r in [*body,*no,payment,*controls])
+            or body[0]['text']!='"Your pathetic civilization is hardly worth'
+            or body[1]['text']!='conquering. We might forego this pleasure for'
+            or body[2]['text']!=f'the time being in exchange for {amount[1]} gold in'
+            or body[3]['text'] not in ('tribute"','tribute."')):return
+    recovered=[]
+    for old,wanted,name in ((body[3],'tribute."','tail'),(payment,f'Pay {amount[1]} gold in tribute.','payment')):
+        if old['text']==wanted:continue
+        a=_crop_text(image,old,f'tribute_{name}_rgb3',executable,directory,evidence,padding=(3,3),scale=3)
+        b=_crop_text(image,old,f'tribute_{name}_gray3',executable,directory,evidence,padding=(3,3),scale=3,grayscale=True)
+        if (len(a)!=1 or len(b)!=1 or a[0]['text']!=wanted or b[0]['text']!=wanted
+                or min(a[0]['confidence'],b[0]['confidence'])<.8
+                or not _same_location(old,a[0]) or not _same_location(a[0],b[0])):return
+        recovered.append((old,a[0],b[0]))
+    for old,a,b in recovered:
+        a['provenance']=old['provenance']+a['provenance']+b['provenance']
+        rows[rows.index(old)]=a
+
+
 def _recover_government_offer(image,rows,executable,directory,evidence):
     """Recover the actual AUTOREV prose and two radio choices, not answers."""
     if image.size!=(640,480):return
@@ -1163,9 +1234,9 @@ def _recover_production_upgrade_city(image,rows,executable,directory,evidence):
 def _recover_support_notice(image,rows,executable,directory,evidence):
     """Two real crops restore an observed support-loss report, not an action."""
     if image.size!=(640,480):return
-    choices=[r for r in rows if re.fullmatch(r'(?:[O0•○●]\s+)?(?:Zoom to City|Continue)',r['text'])]
+    choices=[r for r in rows if re.fullmatch(r'(?:[Oo0•○●]\s+)?(?:Zoom to City|Continue)',r['text'])]
     controls=[r for r in rows if r['text'].casefold() in ('ok','cancel','yes','no','help')]
-    if (len(choices)!=2 or {re.sub(r'^[O0•○●]\s+','',r['text']) for r in choices}!={'Zoom to City','Continue'}
+    if (len(choices)!=2 or {re.sub(r'^[Oo0•○●]\s+','',r['text']) for r in choices}!={'Zoom to City','Continue'}
             or len(controls)!=1 or controls[0]['text']!='OK'):return
     body=[(i,r,m) for i,r in enumerate(rows)
           if (m:=re.fullmatch(r"(.+) can't support (.+)[,.] Unit dis[bh]anded\.",r['text']))
@@ -1179,7 +1250,11 @@ def _recover_support_notice(image,rows,executable,directory,evidence):
     if len(titles)!=1:return
     expected_body=match[1]+" can't support "+match[2]+'. Unit disbanded.'
     replacements=[]
-    for index,row,expected,name in ((*titles[0],'Military Advisor','title'),(bi,br,expected_body,'body')):
+    tasks=[(*titles[0],'Military Advisor','title'),(bi,br,expected_body,'body')]
+    # A lowercase radio glyph is only a crop locator: require both actual
+    # readings of the complete original label before the classifier sees it.
+    tasks.extend((rows.index(r),r,r['text'][2:],'option') for r in choices if r['text'].startswith('o '))
+    for index,row,expected,name in tasks:
         a=_crop_text(image,row,'support_'+name+'_rgb2',executable,directory,evidence,padding=(6,6),scale=2)
         b=_crop_text(image,row,'support_'+name+'_gray2',executable,directory,evidence,padding=(6,6),scale=2,grayscale=True)
         def valid():
@@ -1329,10 +1404,18 @@ def _recover_map_heading(image,rows,executable,directory,evidence):
     index,old=candidates[0]
     a=_crop_text(image,old,'map_heading_rgb3',executable,directory,evidence,padding=(3,3))
     b=_crop_text(image,old,'map_heading_gray3',executable,directory,evidence,padding=(3,3),grayscale=True)
+    previous=[]
+    if (len(a)==len(b)==1 and a[0]['text']==b[0]['text'] and a[0]['text']!='Roman Map'
+            and _near_text(a[0]['text'],'Roman Map',1)
+            and min(a[0]['confidence'],b[0]['confidence'])>=.8
+            and _same_location(old,b[0]) and _same_location(a[0],b[0])):
+        previous=a[0]['provenance']+b[0]['provenance']
+        a=_crop_text(image,old,'map_heading_rgb2',executable,directory,evidence,padding=(3,3),scale=2)
+        b=_crop_text(image,old,'map_heading_gray2',executable,directory,evidence,padding=(3,3),scale=2,grayscale=True)
     if (len(a)!=1 or len(b)!=1 or a[0]['text']!=b[0]['text'] or a[0]['text']!='Roman Map'
             or min(a[0]['confidence'],b[0]['confidence'])<.8
             or not _same_location(old,b[0]) or not _same_location(a[0],b[0])):return
-    if _replace_crop_row(rows,index,a,lambda before,after:True):rows[index]['provenance']+=b[0]['provenance']
+    if _replace_crop_row(rows,index,a,lambda before,after:True):rows[index]['provenance']+=previous+b[0]['provenance']
 
 
 def _recover_treasury_marker(image,rows,executable,directory,evidence):
@@ -3112,8 +3195,8 @@ def recognize(path: str | Path) -> dict:
                     _recover_status(rows, _run_ocr(executable, target), evidence['conflicts'])
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
                     evidence['fallback_errors'].append(dict(pass_name=name, error=type(error).__name__))
-            for recover in (_recover_history_rows,_recover_missing_history_rank,_recover_history_title,_recover_research_rows,_recover_exchange_advance_row,_recover_split_production_title,_recover_joined_production_title,_recover_city_and_production_rows,_recover_production_option_rows,_recover_city_caption_year,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_council_title,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
-                            _recover_stolen_advance_notice,_recover_capture_notice_title,_recover_civil_war_notice,recover_promotion_title,_recover_foreign_completion_title,_recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_upgrade_boundaries,_recover_production_upgrade_city,_recover_support_notice,_recover_travellers_title,_recover_population_decrease_option,_recover_population_notice,_recover_map_menu_label,_recover_map_heading,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_title_fragments,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_intruder_notice,_recover_tech_demand_title,_recover_herald_title,_recover_gape_title,_recover_exchange_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_cease_proposal,_recover_treaty_missing_ok,_recover_treaty_closing_rows,_recover_greeting_body,_recover_golden_age_city_line,_recover_crusade_title,_recover_crusade_tail,_recover_howdy_spacing,_recover_diplomacy_gift_row,_recover_gape_boundary,recover_herald_paragraph,_recover_exchange_body,_recover_exchange_requested_advance,_recover_government_offer,_recover_fortress_order_body,_recover_masked_city_badge,_recover_merged_city_badge,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
+            for recover in (_recover_history_rows,_recover_missing_history_rank,_recover_history_title,_recover_research_rows,_recover_exchange_advance_row,_recover_split_production_title,_recover_joined_production_title,_recover_city_and_production_rows,_recover_production_option_rows,_recover_city_caption_year,recover_caption_date,_recover_founded_production_title,_recover_city_section_labels,_recover_revolt_notice_title,_recover_revolution_title,_recover_name_city_title,_recover_governance_labels,_recover_council_title,_recover_tax_context,_recover_locator_names,_recover_domestic_title,
+                            _recover_stolen_advance_notice,_recover_capture_notice_title,_recover_civil_war_notice,recover_promotion_title,_recover_foreign_completion_title,_recover_saved_caption,_recover_acquisition_line,_recover_discovery_punctuation,_recover_production_change_prose,_recover_upgrade_boundaries,_recover_production_upgrade_city,_recover_support_notice,_recover_travellers_title,_recover_population_decrease_option,_recover_population_notice,_recover_map_menu_label,_recover_map_heading,_recover_treasury_marker,_recover_status_year,_recover_diplomacy_intro,_recover_audience_title_fragments,_recover_audience_radio,_recover_audience_body,_recover_withdrawal_warning,_recover_treaty_warning,_recover_treaty_reminder,_recover_intruder_notice,_recover_tech_demand_title,_recover_herald_title,_recover_gape_title,_recover_exchange_title,_recover_herald_panel,recover_quoted_herald,_recover_herald_options,_recover_cease_proposal,_recover_treaty_missing_ok,_recover_treaty_closing_rows,_recover_greeting_body,_recover_golden_age_city_line,_recover_crusade_title,_recover_crusade_tail,_recover_howdy_spacing,_recover_diplomacy_gift_row,_recover_gape_boundary,recover_herald_paragraph,_recover_exchange_body,_recover_exchange_requested_advance,_recover_cancel_treaty_body,_recover_tribute_tail,_recover_government_offer,_recover_fortress_order_body,_recover_masked_city_badge,_recover_merged_city_badge,_recover_compound_map_label,_recover_map_labels,_recover_moving_status,_recover_expanded_status,_recover_completion_zoom):
                 try:
                     recover(image,rows,executable,directory,evidence)
                 except (OSError,ValueError,TypeError,subprocess.SubprocessError) as error:

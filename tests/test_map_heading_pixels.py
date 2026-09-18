@@ -26,11 +26,33 @@ class MapHeadingPixelTests(unittest.TestCase):
             if mutation=='low_confidence':b['confidence']=.5
             if mutation=='moved':b=row('Roman Map',189,90)
             second=[b,row('Extra',189,65)] if mutation=='extra' else [b]
-            with mock.patch('civ2.observe._crop_text',side_effect=[[a],second]):
+            with mock.patch('civ2.observe._crop_text',side_effect=[[a],second,[a],second]):
                 observe._recover_map_heading(Image.new('RGB',(640,480)),rows,None,None,{})
             self.assertEqual(rows[0]['text'],'Roman Map' if mutation=='none' else 'Roman Wap')
             self.assertEqual(rows[0]['provenance'][0]['text'],'Roman Wap')
             if mutation=='none':self.assertEqual(len(rows[0]['provenance']),3)
+
+    def test_bounded_second_scale_still_requires_exact_agreeing_full_title(self):
+        for mutation in ('none','disagree','wrong','low','moved'):
+            rows=panel();rows[0]['text']='Romen Map'
+            first=row('Roman Mop',192,45);a=row('Roman Map',192,45);b=deepcopy(a)
+            if mutation=='disagree':b['text']='Roman Hap'
+            if mutation=='wrong':a['text']=b['text']='Roman Mop'
+            if mutation=='low':b['confidence']=.5
+            if mutation=='moved':b=row('Roman Map',192,90)
+            with mock.patch('civ2.observe._crop_text',side_effect=[[first],[first],[a],[b]]):
+                observe._recover_map_heading(Image.new('RGB',(640,480)),rows,None,None,{})
+            self.assertEqual(rows[0]['text'],'Roman Map' if mutation=='none' else 'Romen Map',mutation)
+            if mutation=='none':self.assertEqual(len(rows[0]['provenance']),5)
+
+    def test_actual_romen_heading_keeps_all_competing_reads(self):
+        path=Path('runs/attempt-011/screens/ui-0003287.png')
+        if not path.exists():self.skipTest('Private original calibration image unavailable')
+        result=observe.recognize(path)
+        heading=next(r for r in result['lines'] if r['text']=='Roman Map')
+        self.assertEqual(heading['provenance'][0]['text'],'Romen Map')
+        self.assertEqual(sorted(p['text'] for p in heading['provenance'][1:]),
+                         ['Roman Map','Roman Map','Roman Mop','Roman Mop'])
 
     def test_title_and_other_pane_anchors_must_be_observed(self):
         for mutation in ('valid','far_text','other_geometry','missing_world','missing_status','missing_menu','duplicate'):

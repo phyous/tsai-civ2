@@ -9,6 +9,42 @@ from tests.test_herald import prepared
 
 
 class SupportPixelTests(unittest.TestCase):
+    def test_lowercase_radio_requires_exact_paired_label_and_atomic_body(self):
+        for case in ('valid','disagree','different','weak'):
+            values=[prepared('bllitary Advisor',270,168,102,14),
+                    prepared("Veii can't support Warriors. Unit dishanded.",170,190,290,18),
+                    prepared('Zoom to City',206,217,86,18),prepared('o Continue',180,240,87,19),
+                    prepared('OK',308,298,24,16)]
+            def crop(image,row,name,*args,**kwargs):
+                result=copy.deepcopy(row)
+                if 'title' in name:result['text']='Military Advisor'
+                elif 'body' in name:result['text']="Veii can't support Warriors. Unit disbanded."
+                elif 'option' in name:
+                    result['text']='Continue'
+                    if case=='disagree' and 'gray' in name:result['text']='o Continue'
+                    if case=='different':result['text']='Zoom to City'
+                    if case=='weak':result['confidence']=.5
+                return [result]
+            with patch.object(observe,'_crop_text',side_effect=crop):
+                observe._recover_support_notice(Image.new('RGB',(640,480)),values,None,None,{})
+            self.assertEqual(values[0]['text'],'Military Advisor' if case=='valid' else 'bllitary Advisor',case)
+            self.assertEqual(values[3]['text'],'Continue' if case=='valid' else 'o Continue',case)
+
+    def test_actual_veii_support_preserves_two_model_choices(self):
+        p=Path('runs/attempt-011/screens/ui-0003267.png')
+        if not p.exists():self.skipTest('Private original notice unavailable')
+        from civ2.dialogs import classify_dialog
+        from civ2.run import game_text
+        o=observe.recognize(p);d=classify_dialog(o,game_text=game_text(),
+            state={'cities':[{'name':'Veii'}]},rules={'units':[{'name':'Warriors'}]})
+        self.assertTrue(d['supported'],d);self.assertTrue(d['requires_model'])
+        self.assertEqual(d['resource_tag'],'SUPPORT')
+        self.assertEqual([v['text'] for v in d['options']],['Zoom to City','Continue'])
+        option=next(r for r in o['lines'] if r['text']=='Continue')
+        self.assertEqual(option['provenance'][0]['text'],'o Continue')
+        self.assertEqual({r['preprocessing'] for r in option['provenance'][1:]},
+                         {'support_option_rgb2','support_option_gray2'})
+
     def test_black_glyph_fallback_requires_two_complete_unchanged_body_reads(self):
         for case in ('valid','disagree','city_changed','unit_changed','low'):
             values=[prepared('Aflitary Advisor',270,168,102,14),
